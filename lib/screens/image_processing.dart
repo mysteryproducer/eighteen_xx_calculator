@@ -3,6 +3,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
+import '../processing/tile_classifier.dart';
+import '../models/board.dart';
 
 class ImageProcessing extends StatefulWidget {
   final String imagePath;
@@ -18,6 +20,13 @@ class _ImageProcessingState extends State<ImageProcessing> {
   img.Image? _original;
   img.Image? _edgeImage;
   bool _processing = true;
+  final TileClassifier _classifier = TileClassifier();
+  List<ClassifiedHex> _classified = [];
+
+  // displayed image metrics (within the stack area)
+  double? _displayedImageWidth;
+  double? _displayedImageHeight;
+  Offset _imageOffset = Offset.zero;
 
   // Grid parameters
   double _hexSize = 60.0;
@@ -46,11 +55,69 @@ class _ImageProcessingState extends State<ImageProcessing> {
       _edgeImage = edges;
       _processing = false;
     });
+    // start loading tile templates in background
+    _classifier.loadTemplates();
   }
 
-  void _onConfirmGrid() {
-    // Placeholder: later we'll convert the grid into hex coordinates and run tile classification.
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Grid confirmed (prototype).')));
+  void _onConfirmGrid() async {
+    if (_original == null) return;
+    setState(() {
+      _processing = true;
+    });
+    await _classifier.loadTemplates();
+
+    final centers = <ClassifiedHex>[];
+    final w = _hexSize * 2;
+    final h = (1.7320508075688772) * _hexSize;
+    final horiz = w * 3 / 4;
+    final vert = h;
+    final rot = _rotation * (3.141592653589793 / 180.0);
+
+    for (int r = 0; r < _rows; r++) {
+      for (int c = 0; c < _cols; c++) {
+        final dx = _origin.dx + (c * horiz) + (r.isOdd ? horiz / 2 : 0);
+        final dy = _origin.dy + (r * (vert * 0.5));
+        final s = math.sin(rot);
+        final co = math.cos(rot);
+        final x = dx - _origin.dx;
+        final y = dy - _origin.dy;
+        final rx = x * co - y * s;
+        final ry = x * s + y * co;
+        final rp = Offset(rx + _origin.dx, ry + _origin.dy);
+
+        // map display coords -> original image pixel coords
+        final displayW = _displayedImageWidth ?? 1.0;
+        final displayH = _displayedImageHeight ?? 1.0;
+        final offsetX = _imageOffset.dx;
+        final offsetY = _imageOffset.dy;
+        final relX = rp.dx - offsetX;
+        final relY = rp.dy - offsetY;
+        final origX = (relX * (_original!.width / displayW)).round();
+        final origY = (relY * (_original!.height / displayH)).round();
+
+        final patchPxSize = (_hexSize * 1.6 * (_original!.width / displayW)).round();
+        final left = (origX - patchPxSize ~/ 2).clamp(0, _original!.width - 1);
+        final top = (origY - patchPxSize ~/ 2).clamp(0, _original!.height - 1);
+        final width = (patchPxSize).clamp(4, _original!.width - left);
+        final height = (patchPxSize).clamp(4, _original!.height - top);
+
+        img.Image patch;
+        try {
+          patch = img.copyCrop(_original!, x: left, y: top, width: width, height: height);
+        } catch (e) {
+          patch = img.copyResize(_original!, width: 32, height: 32);
+        }
+
+        final id = _classifier.matchTile(patch);
+        centers.add(ClassifiedHex(coord: HexCoord(r, c), center: rp, tileId: id));
+      }
+    }
+
+    setState(() {
+      _classified = centers;
+      _processing = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Classification complete (prototype).')));
   }
 
   @override
@@ -62,28 +129,58 @@ class _ImageProcessingState extends State<ImageProcessing> {
           : Column(
               children: [
                 Expanded(
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: _original != null
-                            ? Image.memory(img.encodeJpg(_original!))
-                            : const SizedBox.shrink(),
-                      ),
-                      Positioned.fill(
-                        child: IgnorePointer(
-                          child: CustomPaint(
-                            painter: _GridPainter(
-                              origin: _origin,
-                              hexSize: _hexSize,
-                              rotation: _rotation,
-                              rows: _rows,
-                              cols: _cols,
+                  child: LayoutBuilder(builder: (context, constraints) {
+                    final containerW = constraints.maxWidth;
+                    final containerH = constraints.maxHeight;
+                    double displayW = containerW;
+                    double displayH = containerH;
+                    if (_original != null) {
+                      final imgW = _original!.width.toDouble();
+                      final imgH = _original!.height.toDouble();
+                      final containerRatio = containerW / containerH;
+                      final imgRatio = imgW / imgH;
+                      if (imgRatio > containerRatio) {
+                        displayW = containerW;
+                        displayH = imgH * (containerW / imgW);
+                      } else {
+                        displayH = containerH;
+                        displayW = imgW * (containerH / imgH);
+                      }
+                      _displayedImageWidth = displayW;
+                      _displayedImageHeight = displayH;
+                      _imageOffset = Offset((containerW - displayW) / 2.0, (containerH - displayH) / 2.0);
+                    }
+
+                    return Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Center(
+                            child: _original != null
+                                ? SizedBox(
+                                    width: displayW,
+                                    height: displayH,
+                                    child: Image.memory(img.encodeJpg(_original!), fit: BoxFit.contain),
+                                  )
+                                : const SizedBox.shrink(),
+                          ),
+                        ),
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _GridPainter(
+                                origin: _origin,
+                                hexSize: _hexSize,
+                                rotation: _rotation,
+                                rows: _rows,
+                                cols: _cols,
+                                labels: _classified,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    );
+                  }),
                 ),
                 SizedBox(
                   height: 140,
@@ -192,8 +289,9 @@ class _GridPainter extends CustomPainter {
   final double rotation; // degrees
   final int rows;
   final int cols;
+  final List<ClassifiedHex>? labels;
 
-  _GridPainter({required this.origin, required this.hexSize, required this.rotation, required this.rows, required this.cols});
+  _GridPainter({required this.origin, required this.hexSize, required this.rotation, required this.rows, required this.cols, this.labels});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -231,6 +329,25 @@ class _GridPainter extends CustomPainter {
         }
         path.close();
         canvas.drawPath(path, paint);
+        // draw label if available
+        if (labels != null) {
+          final threshold = hexSize * 0.6;
+          ClassifiedHex? found;
+          for (final l in labels!) {
+            if ((l.center - rp).distance <= threshold) {
+              found = l;
+              break;
+            }
+          }
+          if (found != null) {
+            final textPainter = TextPainter(
+              text: TextSpan(text: found.tileId, style: const TextStyle(color: Colors.yellow, fontSize: 12, fontWeight: FontWeight.bold)),
+              textDirection: TextDirection.ltr,
+            );
+            textPainter.layout();
+            textPainter.paint(canvas, rp + const Offset(6, -6));
+          }
+        }
       }
     }
   }
