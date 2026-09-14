@@ -18,6 +18,13 @@ class TileMatch {
     required this.confidence,
   });
 
+  /// Confidence at or above which a match is trusted, so its tile data is used
+  /// for revenue instead of reading the photo. This is a starting guess: it
+  /// needs tuning against real board photos.
+  static const double reliableConfidence = 0.25;
+
+  bool get isReliable => confidence >= reliableConfidence;
+
   @override
   String toString() =>
       'TileMatch($tileId r$rotation, score ${score.toStringAsFixed(1)}, '

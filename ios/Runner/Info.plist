@@ -61,8 +61,6 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Used to photograph the game board so the app can read the tiles and work out routes.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Used to open a photo of the game board you have already taken.</string>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

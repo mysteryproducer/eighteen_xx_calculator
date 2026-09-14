@@ -11,6 +11,7 @@ import '../models/image_layout.dart';
 import '../models/tile_definition.dart';
 import '../models/tile_seed_data.dart';
 import '../processing/revenue_ocr.dart';
+import '../processing/revenue_resolver.dart';
 import '../processing/route_finder.dart';
 import '../processing/tile_classifier.dart';
 import '../processing/tile_renderer.dart';
@@ -58,7 +59,12 @@ class _BoardReviewState extends State<BoardReview> {
   final Map<String, int> _revenueOverrides = {};
   final Map<String, String?> _tokens = {};
   final Map<String, RevenueReading> _readings = {};
-  final RevenueOcr _ocr = RevenueOcr();
+
+  /// Hexes whose tile the user has set or checked in the tile editor. These
+  /// are trusted whatever the classifier's confidence was.
+  final Set<HexCoord> _confirmedHexes = {};
+
+  final RevenueOcr _ocr = const RevenueOcr();
   final TokenDetector _tokenDetector = const TokenDetector();
 
   ImageLayout _layout =
@@ -75,19 +81,39 @@ class _BoardReviewState extends State<BoardReview> {
     super.initState();
     _placed = Map.of(widget.placedTiles);
     _graph = _buildGraph();
+    // Where the scan wasn't sure of a tile, fall back to reading the revenue
+    // off the photo straight away rather than waiting to be asked.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _stationsNeedingPhoto().isNotEmpty) {
+        _readUncertainRevenues(automatic: true);
+      }
+    });
   }
 
-  @override
-  void dispose() {
-    _ocr.dispose();
-    super.dispose();
+  /// Whether the tile on [hex] can be relied on for its revenue: the user
+  /// confirmed it, the classifier was confident, or it wasn't scanned at all.
+  bool _isTileTrusted(HexCoord hex) {
+    if (_confirmedHexes.contains(hex)) return true;
+    final match = widget.matches[hex];
+    return match == null || match.isReliable;
   }
+
+  List<StationNode> _stationsNeedingPhoto() =>
+      RevenueResolver.stationsNeedingPhoto(
+        _graph,
+        isTileTrusted: _isTileTrusted,
+        manual: _revenueOverrides,
+      );
 
   BoardGraph _buildGraph() {
     final graph = BoardGraph.build(_placed, TileSeedData.all);
+    RevenueResolver.apply(
+      graph,
+      isTileTrusted: _isTileTrusted,
+      manual: _revenueOverrides,
+      readings: _readings,
+    );
     for (final station in graph.stations) {
-      final override = _revenueOverrides[station.id];
-      if (override != null) station.revenue = override;
       station.companyId = _tokens[station.id];
     }
     return graph;
@@ -122,38 +148,42 @@ class _BoardReviewState extends State<BoardReview> {
 
   // --- Recognition passes -------------------------------------------------
 
-  Future<void> _readRevenues() async {
-    if (_graph.stations.isEmpty) {
-      _snack('No cities or towns recognized yet.');
+  /// Reads revenue off the photo for stations whose tile match was doubtful.
+  /// Stations on trusted tiles keep their tile's revenue and aren't read.
+  Future<void> _readUncertainRevenues({bool automatic = false}) async {
+    final pending = _stationsNeedingPhoto();
+    if (pending.isEmpty) {
+      if (!automatic) {
+        _snack('Every revenue value already comes from a recognized tile '
+            'or from you.');
+      }
       return;
     }
     setState(() {
       _busy = true;
-      _status = 'Reading revenue numbers...';
+      _status = 'Reading uncertain revenue values from the photo...';
     });
 
     // Revenue is printed beside the circle, so the crop takes in a good part
     // of the hex around the station rather than just the circle itself.
     final crop = (widget.calibration.hexSize * 1.1).round();
     var read = 0;
-    for (final station in _graph.stations) {
-      final pos = _stationPosition(station);
-      final region = math.Rectangle<int>(
-        (pos.dx - crop / 2).round(),
-        (pos.dy - crop / 2).round(),
-        crop,
-        crop,
-      );
-      try {
+    String? unavailable;
+    try {
+      for (final station in pending) {
+        final pos = _stationPosition(station);
+        final region = math.Rectangle<int>(
+          (pos.dx - crop / 2).round(),
+          (pos.dy - crop / 2).round(),
+          crop,
+          crop,
+        );
         final reading = await _ocr.readRegion(widget.image, region);
         _readings[station.id] = reading;
-        if (reading.value != null) {
-          _revenueOverrides[station.id] = reading.value!;
-          read++;
-        }
-      } catch (e) {
-        debugPrint('OCR failed for ${station.id}: $e');
+        if (reading.recognized) read++;
       }
+    } on TextRecognitionUnavailable catch (e) {
+      unavailable = e.message;
     }
 
     if (!mounted) return;
@@ -163,8 +193,18 @@ class _BoardReviewState extends State<BoardReview> {
       _status = '';
       _route = null;
     });
-    _snack('Read $read of ${_graph.stations.length} revenue numbers. '
-        'Tap a circle to correct one.');
+
+    final missed = pending.length - read;
+    if (unavailable != null) {
+      _snack('$unavailable Check the amber values by hand.');
+    } else if (missed == 0) {
+      _snack('Read ${pending.length} revenue '
+          '${pending.length == 1 ? 'value' : 'values'} from the photo '
+          'where the tile was uncertain.');
+    } else {
+      _snack('Read $read of ${pending.length} uncertain revenue values. '
+          'Check the amber ones by hand.');
+    }
   }
 
   Future<void> _detectTokens() async {
@@ -359,6 +399,9 @@ class _BoardReviewState extends State<BoardReview> {
                   child: FilledButton(
                     onPressed: () {
                       _placed[coord] = PlacedTile(tileId, rotation: rotation);
+                      // Once the user has looked at a tile, its data is
+                      // trusted over whatever the photo reads.
+                      _confirmedHexes.add(coord);
                       Navigator.of(context).pop();
                       _refresh();
                     },
@@ -373,11 +416,27 @@ class _BoardReviewState extends State<BoardReview> {
     );
   }
 
+  String _describeRevenueSource(StationNode station) {
+    final tileId = _placed[station.hex]?.tileId;
+    final reading = _readings[station.id];
+    return switch (station.revenueSource) {
+      RevenueSource.manual => 'Revenue set by you.',
+      RevenueSource.tile => 'Revenue from tile $tileId.',
+      RevenueSource.photo =>
+        'The tile match was uncertain, so this was read from the photo.',
+      RevenueSource.unverified => reading == null
+          ? 'The tile match was uncertain and the photo hasn\'t been read. '
+              'Please check this value.'
+          : 'The tile match was uncertain and the photo couldn\'t be read. '
+              'Please check this value.',
+    };
+  }
+
   Future<void> _editStation(StationNode station) async {
     final controller =
         TextEditingController(text: station.revenue.toString());
     var companyId = station.companyId;
-    final reading = _readings[station.id];
+    final source = _describeRevenueSource(station);
 
     await showModalBottomSheet<void>(
       context: context,
@@ -400,13 +459,7 @@ class _BoardReviewState extends State<BoardReview> {
                     : 'Town on hex ${station.hex}',
                 style: Theme.of(context).textTheme.titleMedium,
               ),
-              if (reading != null)
-                Text(
-                  reading.recognized
-                      ? 'Read as ${reading.value} from the photo.'
-                      : 'Nothing readable here ("${reading.rawText}").',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
+              Text(source, style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 12),
               TextField(
                 controller: controller,
@@ -441,8 +494,12 @@ class _BoardReviewState extends State<BoardReview> {
                 alignment: Alignment.centerRight,
                 child: FilledButton(
                   onPressed: () {
+                    // Only an actual change counts as the user's own figure;
+                    // opening the sheet to set a token leaves revenue alone.
                     final value = int.tryParse(controller.text.trim());
-                    if (value != null) _revenueOverrides[station.id] = value;
+                    if (value != null && value != station.revenue) {
+                      _revenueOverrides[station.id] = value;
+                    }
                     _tokens[station.id] = companyId;
                     Navigator.of(context).pop();
                     _refresh();
@@ -479,8 +536,8 @@ class _BoardReviewState extends State<BoardReview> {
         title: const Text('Review board'),
         actions: [
           IconButton(
-            tooltip: 'Read revenue numbers',
-            onPressed: _busy ? null : _readRevenues,
+            tooltip: 'Read uncertain revenue values from the photo',
+            onPressed: _busy ? null : () => _readUncertainRevenues(),
             icon: const Icon(Icons.numbers),
           ),
           IconButton(
@@ -525,6 +582,7 @@ class _BoardReviewState extends State<BoardReview> {
                           placed: _placed,
                           graph: _graph,
                           stationPosition: _stationPosition,
+                          isTileTrusted: _isTileTrusted,
                           route: _route,
                         ),
                       ),
@@ -554,6 +612,20 @@ class _BoardReviewState extends State<BoardReview> {
     );
   }
 
+  /// A sentence about what still needs checking, or nothing if all is sure.
+  String _uncertaintySummary() {
+    final hexes = _placed.keys.where((h) => !_isTileTrusted(h)).length;
+    final values = _graph.stations
+        .where((s) => s.revenueSource == RevenueSource.unverified)
+        .length;
+    if (hexes == 0 && values == 0) return '';
+    final parts = [
+      if (hexes > 0) '$hexes uncertain ${hexes == 1 ? 'tile' : 'tiles'}',
+      if (values > 0) '$values unread ${values == 1 ? 'value' : 'values'}',
+    ];
+    return '${parts.join(' and ')} in amber. ';
+  }
+
   Widget _routePanel(int tileCount) {
     final route = _route;
     return SafeArea(
@@ -570,6 +642,7 @@ class _BoardReviewState extends State<BoardReview> {
           children: [
             Text(
               '$tileCount tiles, ${_graph.stations.length} revenue centres. '
+              '${_uncertaintySummary()}'
               'Tap a hex or a circle to correct it.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
@@ -658,7 +731,12 @@ class _BoardOverlayPainter extends CustomPainter {
   final Map<HexCoord, PlacedTile> placed;
   final BoardGraph graph;
   final Offset Function(StationNode) stationPosition;
+  final bool Function(HexCoord) isTileTrusted;
   final RouteResult? route;
+
+  /// Marks anything the user should check: a doubtful tile match, or a
+  /// revenue value that is neither from a trusted tile nor read successfully.
+  static const Color uncertain = Colors.amberAccent;
 
   const _BoardOverlayPainter({
     required this.layout,
@@ -666,24 +744,30 @@ class _BoardOverlayPainter extends CustomPainter {
     required this.placed,
     required this.graph,
     required this.stationPosition,
+    required this.isTileTrusted,
     this.route,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     final displayBoard = layout.boardToDisplay(calibration);
-    final hexPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2;
+    final hexPaint = Paint()..style = PaintingStyle.stroke;
 
     for (final coord in displayBoard.coords) {
       final tile = placed[coord];
       if (tile == null) continue;
       final isBlank = tile.tileId == TileSeedData.blankTileId;
+      final trusted = isTileTrusted(coord);
       final center = displayBoard.centerOf(coord);
-      hexPaint.color = isBlank
-          ? Colors.white24
-          : Colors.lightGreenAccent.withValues(alpha: 0.9);
+      // An uncertain "empty" hex is flagged too: it may be a tile the scan
+      // missed, and a missed city is a missing stop on every route.
+      hexPaint
+        ..color = !trusted
+            ? uncertain
+            : isBlank
+                ? Colors.white24
+                : Colors.lightGreenAccent.withValues(alpha: 0.9)
+        ..strokeWidth = trusted ? 1.2 : 2.4;
       final path = Path();
       for (int i = 0; i < 6; i++) {
         final v = HexGeometry.vertex(center, displayBoard.hexSize, i);
@@ -700,8 +784,8 @@ class _BoardOverlayPainter extends CustomPainter {
         final label = TextPainter(
           text: TextSpan(
             text: tile.tileId,
-            style: const TextStyle(
-              color: Colors.lightGreenAccent,
+            style: TextStyle(
+              color: trusted ? Colors.lightGreenAccent : uncertain,
               fontSize: 11,
               fontWeight: FontWeight.bold,
             ),
@@ -754,15 +838,21 @@ class _BoardOverlayPainter extends CustomPainter {
         radius,
         Paint()..color = company?.color ?? Colors.white.withValues(alpha: 0.85),
       );
+      final isOnRoute = onRoute.contains(station.id);
+      final isUnverified = station.revenueSource == RevenueSource.unverified;
       canvas.drawCircle(
         center,
         radius,
         Paint()
-          ..color = onRoute.contains(station.id)
+          ..color = isOnRoute
               ? Colors.orangeAccent
-              : Colors.black87
+              : isUnverified
+                  ? uncertain
+                  : station.revenueSource == RevenueSource.photo
+                      ? Colors.lightBlueAccent
+                      : Colors.black87
           ..style = PaintingStyle.stroke
-          ..strokeWidth = onRoute.contains(station.id) ? 3 : 1.5,
+          ..strokeWidth = isOnRoute || isUnverified ? 3 : 1.5,
       );
       final label = TextPainter(
         text: TextSpan(

@@ -43,3 +43,10 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // On-device text recognition for revenue numbers, with the Latin-script
+    // model bundled so it works offline at the table without a first-use
+    // download. Called from TextRecognitionChannel.kt.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+}

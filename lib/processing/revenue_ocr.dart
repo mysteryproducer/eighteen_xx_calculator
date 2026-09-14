@@ -1,11 +1,10 @@
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 
-/// What OCR made of one revenue circle.
+/// What text recognition made of one revenue circle.
 class RevenueReading {
   final int? value;
   final String rawText;
@@ -18,22 +17,42 @@ class RevenueReading {
   String toString() => recognized ? '$value' : 'unread("$rawText")';
 }
 
+/// Thrown when the platform has no text recognizer, such as a desktop build.
+class TextRecognitionUnavailable implements Exception {
+  final String message;
+  const TextRecognitionUnavailable(this.message);
+
+  @override
+  String toString() => message;
+}
+
 /// Reads the printed revenue numbers next to cities and towns.
 ///
-/// Each station's crop is taken from the full-resolution photo using the same
-/// hex placement maths the classifier uses, then handed to ML Kit's on-device
-/// text recognizer. Results are advisory: the review UI shows what was read
-/// and lets the user fix it, since small printed numbers on a photographed
-/// board are the least reliable part of this pipeline.
+/// This is the fallback source of revenue, used where a tile wasn't
+/// recognized confidently enough to trust its tile data (see
+/// `RevenueResolver`). Recognition itself is done natively on each platform,
+/// behind the [channel]: Apple's Vision framework on iOS
+/// (`ios/Runner/TextRecognitionPlugin.swift`) and ML Kit on Android
+/// (`TextRecognitionChannel.kt`). Neither needs a Flutter plugin, which keeps
+/// the iOS build free of CocoaPods.
+///
+/// The channel takes PNG bytes under `image` and returns the recognized lines
+/// as a single newline-separated string.
 class RevenueOcr {
-  final TextRecognizer _recognizer =
-      TextRecognizer(script: TextRecognitionScript.latin);
+  static const MethodChannel channel =
+      MethodChannel('eighteen_xx_calculator/text_recognition');
+
+  const RevenueOcr();
 
   /// Reads a number from [region] of [source].
   ///
-  /// The crop is written to a temporary file because ML Kit reads images from
-  /// disk (or a camera stream); the file is deleted once it has been read.
-  Future<RevenueReading> readRegion(img.Image source, math.Rectangle<int> region) async {
+  /// Returns an unread [RevenueReading] if the platform recognizer fails on
+  /// this crop, and throws [TextRecognitionUnavailable] if there is no
+  /// recognizer at all, so a caller reading many crops can stop early.
+  Future<RevenueReading> readRegion(
+    img.Image source,
+    math.Rectangle<int> region,
+  ) async {
     final left = region.left.clamp(0, source.width - 1);
     final top = region.top.clamp(0, source.height - 1);
     final width = region.width.clamp(1, source.width - left);
@@ -51,18 +70,19 @@ class RevenueOcr {
       );
     }
 
-    final file = File(
-      '${Directory.systemTemp.path}/ocr_${DateTime.now().microsecondsSinceEpoch}.png',
-    );
-    await file.writeAsBytes(img.encodePng(crop));
     try {
-      final recognized =
-          await _recognizer.processImage(InputImage.fromFilePath(file.path));
-      return parseRecognizedText(recognized.text);
-    } finally {
-      if (await file.exists()) {
-        await file.delete();
-      }
+      final text = await channel.invokeMethod<String>(
+        'recognizeText',
+        {'image': img.encodePng(crop)},
+      );
+      return parseRecognizedText(text ?? '');
+    } on MissingPluginException {
+      throw const TextRecognitionUnavailable(
+        'Text recognition is not available on this device.',
+      );
+    } on PlatformException catch (e) {
+      debugPrint('Text recognition failed: ${e.code} ${e.message}');
+      return const RevenueReading(value: null, rawText: '');
     }
   }
 
@@ -83,15 +103,5 @@ class RevenueOcr {
     }
     numbers.sort();
     return RevenueReading(value: numbers.last, rawText: text.trim());
-  }
-
-  /// Releases the recognizer. Failures here are logged rather than thrown:
-  /// tearing a screen down shouldn't fail because ML Kit is unavailable.
-  Future<void> dispose() async {
-    try {
-      await _recognizer.close();
-    } catch (e) {
-      debugPrint('Closing text recognizer failed: $e');
-    }
   }
 }

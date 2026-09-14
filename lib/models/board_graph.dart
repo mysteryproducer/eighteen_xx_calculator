@@ -8,6 +8,24 @@ class PlacedTile {
   const PlacedTile(this.tileId, {this.rotation = 0});
 }
 
+/// Where a station's revenue figure came from, in the order they're trusted
+/// (see `RevenueResolver`).
+enum RevenueSource {
+  /// Typed in by the user. Beats everything else.
+  manual,
+
+  /// Printed on a tile the classifier recognized confidently, or that the user
+  /// confirmed.
+  tile,
+
+  /// Read off the photo, because the tile match was too doubtful to trust.
+  photo,
+
+  /// The tile match was doubtful and the photo couldn't be read, so this is
+  /// the doubtful tile's value. Worth checking by hand.
+  unverified,
+}
+
 /// A revenue centre (city or town) on the board.
 class StationNode {
   final HexCoord hex;
@@ -15,9 +33,11 @@ class StationNode {
   final StationKind kind;
   final int slots;
 
-  /// Revenue for this stop. Seeded from the tile definition, then overwritten
-  /// by what OCR reads off the photo, and editable by the user.
+  /// Revenue for this stop. Seeded from the tile definition; [revenueSource]
+  /// records whether that stood or was replaced.
   int revenue;
+
+  RevenueSource revenueSource = RevenueSource.tile;
 
   /// Which company's token occupies this station, if known. Set by the
   /// token-colour classifier or by the user tapping the station.
