@@ -7,7 +7,7 @@ import 'image_processing.dart';
 class CameraCapture extends StatefulWidget {
   final Map<String, dynamic>? game;
 
-  const CameraCapture({Key? key, this.game}) : super(key: key);
+  const CameraCapture({super.key, this.game});
 
   @override
   State<CameraCapture> createState() => _CameraCaptureState();

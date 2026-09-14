@@ -1,16 +1,26 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
-import '../processing/tile_classifier.dart';
-import '../models/board.dart';
 
+import '../models/board.dart';
+import '../models/board_graph.dart';
+import '../models/image_layout.dart';
+import '../models/tile_seed_data.dart';
+import '../processing/tile_classifier.dart';
+import 'board_review.dart';
+
+/// Step one: line the hex grid up with the photographed board, then read each
+/// hex. Alignment is manual (drag to move the grid, sliders for size and
+/// rotation) -- automatic hex detection is a later exercise.
 class ImageProcessing extends StatefulWidget {
   final String imagePath;
   final Map<String, dynamic> game;
 
-  const ImageProcessing({Key? key, required this.imagePath, required this.game}) : super(key: key);
+  const ImageProcessing({super.key, required this.imagePath, required this.game});
 
   @override
   State<ImageProcessing> createState() => _ImageProcessingState();
@@ -18,352 +28,307 @@ class ImageProcessing extends StatefulWidget {
 
 class _ImageProcessingState extends State<ImageProcessing> {
   img.Image? _original;
-  img.Image? _edgeImage;
-  bool _processing = true;
+  Uint8List? _preview;
+  bool _busy = true;
+  String _status = 'Loading photo...';
+
   final TileClassifier _classifier = TileClassifier();
-  List<ClassifiedHex> _classified = [];
 
-  // displayed image metrics (within the stack area)
-  double? _displayedImageWidth;
-  double? _displayedImageHeight;
-  Offset _imageOffset = Offset.zero;
+  /// Grid calibration in display coordinates while the user is adjusting it.
+  Board _board = const Board(
+    rows: 5,
+    cols: 5,
+    hexSize: 60,
+    origin: Offset(120, 120),
+  );
 
-  // Grid parameters
-  double _hexSize = 60.0;
-  double _rotation = 0.0; // degrees
-  Offset _origin = const Offset(100, 100);
-  int _rows = 8;
-  int _cols = 8;
+  ImageLayout _layout = const ImageLayout(imageSize: Size.zero, containerSize: Size.zero);
 
   @override
   void initState() {
     super.initState();
-    _loadAndProcess();
+    _load();
   }
 
-  void _loadAndProcess() async {
-    setState(() {
-      _processing = true;
-    });
+  Future<void> _load() async {
     final bytes = await File(widget.imagePath).readAsBytes();
     final decoded = img.decodeImage(bytes);
-    if (decoded == null) return;
-    final grayscale = img.grayscale(decoded);
-    final edges = img.sobel(grayscale);
+    if (!mounted) return;
+    if (decoded == null) {
+      setState(() {
+        _busy = false;
+        _status = 'Could not read that image.';
+      });
+      return;
+    }
     setState(() {
       _original = decoded;
-      _edgeImage = edges;
-      _processing = false;
+      _preview = img.encodeJpg(decoded, quality: 85);
+      _busy = false;
+      _status = '';
     });
-    // start loading tile templates in background
-    _classifier.loadTemplates();
+    // Reference tiles take a moment to render; start now so "Scan board" is
+    // responsive later.
+    unawaited(_classifier.loadTemplates());
   }
 
-  void _onConfirmGrid() async {
-    if (_original == null) return;
+  Future<void> _scanBoard() async {
+    final original = _original;
+    if (original == null) return;
     setState(() {
-      _processing = true;
+      _busy = true;
+      _status = 'Rendering reference tiles...';
     });
     await _classifier.loadTemplates();
+    if (!mounted) return;
+    setState(() => _status = 'Reading hexes...');
 
-    final centers = <ClassifiedHex>[];
-    final w = _hexSize * 2;
-    final h = (1.7320508075688772) * _hexSize;
-    final horiz = w * 3 / 4;
-    final vert = h;
-    final rot = _rotation * (3.141592653589793 / 180.0);
+    final imageBoard = _layout.boardToImage(_board);
+    final placed = <HexCoord, PlacedTile>{};
+    final matches = <HexCoord, TileMatch>{};
 
-    for (int r = 0; r < _rows; r++) {
-      for (int c = 0; c < _cols; c++) {
-        final dx = _origin.dx + (c * horiz) + (r.isOdd ? horiz / 2 : 0);
-        final dy = _origin.dy + (r * (vert * 0.5));
-        final s = math.sin(rot);
-        final co = math.cos(rot);
-        final x = dx - _origin.dx;
-        final y = dy - _origin.dy;
-        final rx = x * co - y * s;
-        final ry = x * s + y * co;
-        final rp = Offset(rx + _origin.dx, ry + _origin.dy);
+    // A patch a little wider than the hex so the whole tile is in frame.
+    final patchSize = (imageBoard.hexSize * 1.8).round().clamp(8, original.width);
 
-        // map display coords -> original image pixel coords
-        final displayW = _displayedImageWidth ?? 1.0;
-        final displayH = _displayedImageHeight ?? 1.0;
-        final offsetX = _imageOffset.dx;
-        final offsetY = _imageOffset.dy;
-        final relX = rp.dx - offsetX;
-        final relY = rp.dy - offsetY;
-        final origX = (relX * (_original!.width / displayW)).round();
-        final origY = (relY * (_original!.height / displayH)).round();
-
-        final patchPxSize = (_hexSize * 1.6 * (_original!.width / displayW)).round();
-        final left = (origX - patchPxSize ~/ 2).clamp(0, _original!.width - 1);
-        final top = (origY - patchPxSize ~/ 2).clamp(0, _original!.height - 1);
-        final width = (patchPxSize).clamp(4, _original!.width - left);
-        final height = (patchPxSize).clamp(4, _original!.height - top);
-
-        img.Image patch;
-        try {
-          patch = img.copyCrop(_original!, x: left, y: top, width: width, height: height);
-        } catch (e) {
-          patch = img.copyResize(_original!, width: 32, height: 32);
-        }
-
-        final id = _classifier.matchTile(patch);
-        centers.add(ClassifiedHex(coord: HexCoord(r, c), center: rp, tileId: id));
+    for (final coord in imageBoard.coords) {
+      final center = imageBoard.centerOf(coord);
+      final left = (center.dx - patchSize / 2).round();
+      final top = (center.dy - patchSize / 2).round();
+      if (left < 0 ||
+          top < 0 ||
+          left + patchSize > original.width ||
+          top + patchSize > original.height) {
+        continue; // hex falls outside the photo
       }
+      final patch = img.copyCrop(
+        original,
+        x: left,
+        y: top,
+        width: patchSize,
+        height: patchSize,
+      );
+      final match = _classifier.matchTile(patch);
+      if (match == null) continue;
+      matches[coord] = match;
+      placed[coord] = PlacedTile(match.tileId, rotation: match.rotation);
     }
 
+    if (!mounted) return;
     setState(() {
-      _classified = centers;
-      _processing = false;
+      _busy = false;
+      _status = '';
     });
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Classification complete (prototype).')));
+
+    final recognized =
+        placed.values.where((p) => p.tileId != TileSeedData.blankTileId).length;
+    if (!mounted) return;
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => BoardReview(
+        imagePath: widget.imagePath,
+        image: original,
+        previewBytes: _preview!,
+        calibration: imageBoard,
+        placedTiles: placed,
+        matches: matches,
+        gameName: widget.game['name'] as String? ?? '',
+        recognizedCount: recognized,
+      ),
+    ));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Process Image - ${widget.game['name'] ?? ''}')),
-      body: _processing
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
+      appBar: AppBar(title: Text('Align grid - ${widget.game['name'] ?? ''}')),
+      body: Column(
+        children: [
+          Expanded(
+            child: LayoutBuilder(builder: (context, constraints) {
+              final original = _original;
+              if (original == null) {
+                return Center(
+                  child: _busy
+                      ? const CircularProgressIndicator()
+                      : Text(_status),
+                );
+              }
+              _layout = ImageLayout(
+                imageSize:
+                    Size(original.width.toDouble(), original.height.toDouble()),
+                containerSize: Size(constraints.maxWidth, constraints.maxHeight),
+              );
+              return GestureDetector(
+                // Neither the photo nor the overlay takes hits, so the
+                // detector has to claim the whole area to be draggable.
+                behavior: HitTestBehavior.opaque,
+                onPanUpdate: (details) => setState(() {
+                  _board = _board.copyWith(origin: _board.origin + details.delta);
+                }),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Center(
+                      child: Image.memory(
+                        _preview!,
+                        fit: BoxFit.contain,
+                        gaplessPlayback: true,
+                      ),
+                    ),
+                    IgnorePointer(
+                      child: CustomPaint(
+                        painter: _GridPainter(board: _board),
+                      ),
+                    ),
+                    if (_busy)
+                      Container(
+                        color: Colors.black54,
+                        alignment: Alignment.center,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const CircularProgressIndicator(),
+                            const SizedBox(height: 12),
+                            Text(
+                              _status,
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            }),
+          ),
+          _controls(),
+        ],
+      ),
+    );
+  }
+
+  Widget _controls() {
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Drag the photo to move the grid, then match it to the board.',
+              style: TextStyle(fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+            Row(
               children: [
                 Expanded(
-                  child: LayoutBuilder(builder: (context, constraints) {
-                    final containerW = constraints.maxWidth;
-                    final containerH = constraints.maxHeight;
-                    double displayW = containerW;
-                    double displayH = containerH;
-                    if (_original != null) {
-                      final imgW = _original!.width.toDouble();
-                      final imgH = _original!.height.toDouble();
-                      final containerRatio = containerW / containerH;
-                      final imgRatio = imgW / imgH;
-                      if (imgRatio > containerRatio) {
-                        displayW = containerW;
-                        displayH = imgH * (containerW / imgW);
-                      } else {
-                        displayH = containerH;
-                        displayW = imgW * (containerH / imgH);
-                      }
-                      _displayedImageWidth = displayW;
-                      _displayedImageHeight = displayH;
-                      _imageOffset = Offset((containerW - displayW) / 2.0, (containerH - displayH) / 2.0);
-                    }
-
-                    return Stack(
-                      children: [
-                        Positioned.fill(
-                          child: Center(
-                            child: _original != null
-                                ? SizedBox(
-                                    width: displayW,
-                                    height: displayH,
-                                    child: Image.memory(img.encodeJpg(_original!), fit: BoxFit.contain),
-                                  )
-                                : const SizedBox.shrink(),
-                          ),
-                        ),
-                        Positioned.fill(
-                          child: IgnorePointer(
-                            child: CustomPaint(
-                              painter: _GridPainter(
-                                origin: _origin,
-                                hexSize: _hexSize,
-                                rotation: _rotation,
-                                rows: _rows,
-                                cols: _cols,
-                                labels: _classified,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    );
-                  }),
+                  child: _slider('Size', _board.hexSize, 20, 200,
+                      (v) => _board = _board.copyWith(hexSize: v)),
                 ),
-                SizedBox(
-                  height: 140,
-                  child: SingleChildScrollView(
-                    child: Column(
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            Column(
-                              children: [
-                                const Text('Hex size'),
-                                Slider(
-                                  value: _hexSize,
-                                  min: 20,
-                                  max: 150,
-                                  onChanged: (v) => setState(() => _hexSize = v),
-                                ),
-                              ],
-                            ),
-                            Column(
-                              children: [
-                                const Text('Rotation'),
-                                Slider(
-                                  value: _rotation,
-                                  min: -180,
-                                  max: 180,
-                                  onChanged: (v) => setState(() => _rotation = v),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            Column(
-                              children: [
-                                const Text('Rows'),
-                                Slider(
-                                  value: _rows.toDouble(),
-                                  min: 1,
-                                  max: 40,
-                                  divisions: 39,
-                                  onChanged: (v) => setState(() => _rows = v.toInt()),
-                                ),
-                              ],
-                            ),
-                            Column(
-                              children: [
-                                const Text('Cols'),
-                                Slider(
-                                  value: _cols.toDouble(),
-                                  min: 1,
-                                  max: 40,
-                                  divisions: 39,
-                                  onChanged: (v) => setState(() => _cols = v.toInt()),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 12.0),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              ElevatedButton(
-                                onPressed: _onConfirmGrid,
-                                child: const Text('Confirm Grid'),
-                              ),
-                              ElevatedButton(
-                                onPressed: () {
-                                  // Show edges in a dialog
-                                  showDialog(
-                                    context: context,
-                                    builder: (_) => AlertDialog(
-                                      title: const Text('Edge image'),
-                                      content: SizedBox(
-                                        width: 300,
-                                        child: _edgeImage != null
-                                            ? Image.memory(img.encodePng(_edgeImage!))
-                                            : const SizedBox.shrink(),
-                                      ),
-                                    ),
-                                  );
-                                },
-                                child: const Text('Show Edges'),
-                              ),
-                            ],
-                          ),
-                        )
-                      ],
-                    ),
-                  ),
-                )
+                Expanded(
+                  child: _slider('Rotation', _board.rotation, -30, 30,
+                      (v) => _board = _board.copyWith(rotation: v)),
+                ),
               ],
             ),
+            Row(
+              children: [
+                Expanded(
+                  child: _slider('Rows', _board.rows.toDouble(), 1, 20,
+                      (v) => _board = _board.copyWith(rows: v.round()),
+                      divisions: 19),
+                ),
+                Expanded(
+                  child: _slider('Cols', _board.cols.toDouble(), 1, 20,
+                      (v) => _board = _board.copyWith(cols: v.round()),
+                      divisions: 19),
+                ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: FilledButton.icon(
+                onPressed: _busy || _original == null ? null : _scanBoard,
+                icon: const Icon(Icons.grid_on),
+                label: const Text('Scan board'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _slider(
+    String label,
+    double value,
+    double min,
+    double max,
+    void Function(double) apply, {
+    int? divisions,
+  }) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('$label: ${divisions != null ? value.round() : value.toStringAsFixed(0)}',
+            style: const TextStyle(fontSize: 12)),
+        Slider(
+          value: value.clamp(min, max),
+          min: min,
+          max: max,
+          divisions: divisions,
+          onChanged: (v) => setState(() => apply(v)),
+        ),
+      ],
     );
   }
 }
 
+/// Simple alignment overlay: hex outlines and centers, no tile labels.
 class _GridPainter extends CustomPainter {
-  final Offset origin;
-  final double hexSize;
-  final double rotation; // degrees
-  final int rows;
-  final int cols;
-  final List<ClassifiedHex>? labels;
+  final Board board;
 
-  _GridPainter({required this.origin, required this.hexSize, required this.rotation, required this.rows, required this.cols, this.labels});
+  const _GridPainter({required this.board});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.red.withOpacity(0.8)
+    final outline = Paint()
+      ..color = Colors.red.withValues(alpha: 0.85)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2;
+      ..strokeWidth = 1.4;
+    final centerDot = Paint()..color = Colors.blue.withValues(alpha: 0.85);
 
-    final centerPaint = Paint()..color = Colors.blue.withOpacity(0.8);
-
-    final rot = rotation * (math.pi / 180.0);
-
-    // hexagon geometry (pointy-top)
-    final w = hexSize * 2;
-    final h = math.sqrt(3) * hexSize;
-    final horiz = w * 3 / 4;
-    final vert = h;
-
-    for (int r = 0; r < rows; r++) {
-      for (int c = 0; c < cols; c++) {
-        final dx = origin.dx + (c * horiz) + (r.isOdd ? horiz / 2 : 0);
-        final dy = origin.dy + (r * (vert * 0.5));
-        final p = Offset(dx, dy);
-        final rp = _rot(p, origin, rot);
-        // draw hex center
-        canvas.drawCircle(rp, 3.0, centerPaint);
-        // draw hex outline
-        final path = Path();
-        for (int i = 0; i < 6; i++) {
-          final angle = math.pi / 180 * (60 * i - 30);
-          final x = rp.dx + hexSize * math.cos(angle);
-          final y = rp.dy + hexSize * math.sin(angle);
-          if (i == 0) path.moveTo(x, y);
-          else path.lineTo(x, y);
-        }
-        path.close();
-        canvas.drawPath(path, paint);
-        // draw label if available
-        if (labels != null) {
-          final threshold = hexSize * 0.6;
-          ClassifiedHex? found;
-          for (final l in labels!) {
-            if ((l.center - rp).distance <= threshold) {
-              found = l;
-              break;
-            }
-          }
-          if (found != null) {
-            final textPainter = TextPainter(
-              text: TextSpan(text: found.tileId, style: const TextStyle(color: Colors.yellow, fontSize: 12, fontWeight: FontWeight.bold)),
-              textDirection: TextDirection.ltr,
-            );
-            textPainter.layout();
-            textPainter.paint(canvas, rp + const Offset(6, -6));
-          }
+    for (final coord in board.coords) {
+      final center = board.centerOf(coord);
+      canvas.drawCircle(center, 2.5, centerDot);
+      final path = Path();
+      for (int i = 0; i < 6; i++) {
+        final v = HexGeometry.vertex(center, board.hexSize, i);
+        if (i == 0) {
+          path.moveTo(v.dx, v.dy);
+        } else {
+          path.lineTo(v.dx, v.dy);
         }
       }
+      path.close();
+      canvas.drawPath(
+        _rotatedPath(path, center, board.rotation * math.pi / 180),
+        outline,
+      );
     }
   }
 
-  Offset _rot(Offset p, Offset center, double a) {
-    final s = math.sin(a);
-    final c = math.cos(a);
-    final x = p.dx - center.dx;
-    final y = p.dy - center.dy;
-    final rx = x * c - y * s;
-    final ry = x * s + y * c;
-    return Offset(rx + center.dx, ry + center.dy);
+  Path _rotatedPath(Path path, Offset center, double radians) {
+    if (radians == 0) return path;
+    final matrix = Matrix4.identity()
+      ..translateByDouble(center.dx, center.dy, 0, 1)
+      ..rotateZ(radians)
+      ..translateByDouble(-center.dx, -center.dy, 0, 1);
+    return path.transform(matrix.storage);
   }
 
   @override
-  bool shouldRepaint(covariant _GridPainter oldDelegate) {
-    return oldDelegate.hexSize != hexSize || oldDelegate.rotation != rotation || oldDelegate.rows != rows || oldDelegate.cols != cols || oldDelegate.origin != origin;
-  }
+  bool shouldRepaint(covariant _GridPainter oldDelegate) =>
+      oldDelegate.board != board;
 }
+

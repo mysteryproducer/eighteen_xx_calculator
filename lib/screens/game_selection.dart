@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'camera_capture.dart';
 
 class GameSelection extends StatelessWidget {
-  const GameSelection({Key? key}) : super(key: key);
+  const GameSelection({super.key});
 
   static final List<Map<String, dynamic>> demoGames = [
     {
