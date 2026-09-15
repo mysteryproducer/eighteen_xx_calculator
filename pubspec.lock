@@ -49,6 +49,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.10.2"
+  camera_macos:
+    dependency: "direct main"
+    description:
+      name: camera_macos
+      sha256: "64e199368efb0dc12c5298819df98aada4fe2cc50a5d84997f7bf7d94edaa3f8"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.1"
   camera_platform_interface:
     dependency: transitive
     description:

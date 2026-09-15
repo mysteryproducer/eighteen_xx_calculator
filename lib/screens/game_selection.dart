@@ -30,7 +30,7 @@ class GameSelection extends StatelessWidget {
             subtitle: Text(game['description']),
             onTap: () {
               Navigator.of(context).push(MaterialPageRoute(builder: (_) {
-                return CameraCapture(game: game);
+                return boardCaptureScreen(game: game);
               }));
             },
           );

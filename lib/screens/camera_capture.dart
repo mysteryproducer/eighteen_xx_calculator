@@ -1,8 +1,18 @@
 import 'dart:io';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'image_processing.dart';
+import 'mac_webcam_capture.dart';
+
+/// The board capture screen for the platform the app is running on. Phones use
+/// the camera plugin; macOS uses the Mac's webcam, for testing on a
+/// development machine, because the camera plugin doesn't support macOS.
+Widget boardCaptureScreen({Map<String, dynamic>? game}) =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+        ? MacWebcamCapture(game: game)
+        : CameraCapture(game: game);
 
 class CameraCapture extends StatefulWidget {
   final Map<String, dynamic>? game;

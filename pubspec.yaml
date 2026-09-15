@@ -40,6 +40,9 @@ dependencies:
   # Photographing the board. The camera plugin asks for permission itself, so
   # there is no separate permission package here.
   camera: ^0.12.0
+  # The camera plugin has no macOS support; this drives a Mac's webcam so the
+  # app can be tried on a development machine. Only used on macOS.
+  camera_macos: ^0.1.1
   # Cropping and comparing hexes from the photo.
   image: ^4.9.1
 

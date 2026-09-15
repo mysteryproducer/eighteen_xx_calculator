@@ -158,6 +158,11 @@ silently.
   Adding a plugin that only ships a CocoaPod would bring CocoaPods back, so check for
   Swift Package Manager support before adding iOS plugins.
 - Camera permission strings were missing from both platforms and have been added.
+- For testing on a Mac, the macOS build photographs the board with the webcam through
+  `camera_macos` ([mac_webcam_capture.dart](../../lib/screens/mac_webcam_capture.dart)),
+  since the `camera` plugin has no macOS support. The camera entitlement is only in the
+  Debug and Profile entitlements, so a macOS release build can't use the webcam. Text
+  recognition isn't wired up on macOS, so doubtful revenue values stay amber there.
 - Three things that were quietly broken before this pass, now fixed: the hex grid used
   mismatched spacing constants and so could never line up with a real board; the gesture
   detectors deferred to their children, so dragging the grid and tapping the board did

@@ -5,6 +5,9 @@ import 'package:eighteen_xx_calculator/models/image_layout.dart';
 import 'package:eighteen_xx_calculator/processing/revenue_ocr.dart';
 import 'package:eighteen_xx_calculator/processing/tile_classifier.dart';
 import 'package:eighteen_xx_calculator/screens/board_review.dart';
+import 'package:eighteen_xx_calculator/screens/camera_capture.dart';
+import 'package:eighteen_xx_calculator/screens/mac_webcam_capture.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -82,6 +85,19 @@ void main() {
     await tester.pumpWidget(const MyApp());
     expect(find.text('Select 18xx Title'), findsOneWidget);
     expect(find.text('18xx Example Set'), findsOneWidget);
+  });
+
+  test('macOS captures from the webcam, phones from the camera plugin', () {
+    try {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      expect(boardCaptureScreen(), isA<MacWebcamCapture>());
+      for (final phone in [TargetPlatform.iOS, TargetPlatform.android]) {
+        debugDefaultTargetPlatformOverride = phone;
+        expect(boardCaptureScreen(), isA<CameraCapture>());
+      }
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   testWidgets('review screen summarises what was recognized', (tester) async {
