@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../models/board_graph.dart';
+import '../models/tile_definition.dart';
 
 /// One candidate route: the stations visited in order, the track run between
 /// them, and what it pays.
@@ -78,6 +79,8 @@ class RouteFinder {
         ));
       }
       if (stops.length >= maxStops) return;
+      // An off-board area ends a route; trains don't run through it.
+      if (current.kind == StationKind.offboard && stops.length > 1) return;
 
       for (final edge in graph.edgesFrom(current)) {
         final next = edge.to;

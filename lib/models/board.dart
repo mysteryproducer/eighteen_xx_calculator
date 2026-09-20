@@ -16,41 +16,103 @@ class HexCoord {
 
   @override
   int get hashCode => Object.hash(row, col);
+
+  // Cube coordinates (x + y + z == 0) make rotating and measuring simple; see
+  // https://www.redblobgames.com/grids/hexagons/#conversions-offset.
+  int get cubeX => col - (row - (row & 1)) ~/ 2;
+  int get cubeZ => row;
+  int get cubeY => -cubeX - cubeZ;
+
+  static HexCoord fromCube(int x, int z) =>
+      HexCoord(z, x + (z - (z & 1)) ~/ 2);
+
+  /// Steps between this hex and [other].
+  int distanceTo(HexCoord other) {
+    final dx = (cubeX - other.cubeX).abs();
+    final dy = (cubeY - other.cubeY).abs();
+    final dz = (cubeZ - other.cubeZ).abs();
+    return math.max(dx, math.max(dy, dz));
+  }
+
+  /// This hex turned [steps] x 60 degrees clockwise about [pivot]. Turning
+  /// by one step carries a hex's edge k onto edge k + 1.
+  HexCoord rotatedAbout(HexCoord pivot, int steps) {
+    var x = cubeX - pivot.cubeX;
+    var y = cubeY - pivot.cubeY;
+    var z = cubeZ - pivot.cubeZ;
+    for (int i = 0; i < ((steps % 6) + 6) % 6; i++) {
+      final nx = -z, ny = -x, nz = -y;
+      x = nx;
+      y = ny;
+      z = nz;
+    }
+    return fromCube(x + pivot.cubeX, z + pivot.cubeZ);
+  }
+
+  /// This hex moved by the cube offset that takes [from] to [to].
+  HexCoord translated(HexCoord from, HexCoord to) => fromCube(
+        cubeX + to.cubeX - from.cubeX,
+        cubeZ + to.cubeZ - from.cubeZ,
+      );
+
+  /// The six hexes around this one, in edge order 0..5.
+  List<HexCoord> get neighbors =>
+      [for (int e = 0; e < 6; e++) Board.neighborOf(this, e)];
+
+  /// Position of this hex's centre on the flat board, in units of the hex
+  /// circumradius, with hex (0, 0) at the origin.
+  Offset get boardCenter => Board.centerFor(row, col, 1, Offset.zero);
+
+  /// The hex whose centre is nearest [point] on the flat board (in the units
+  /// of [boardCenter]).
+  static HexCoord nearestTo(Offset point) {
+    // Fractional axial coordinates for a pointy-top layout, then cube
+    // rounding (redblobgames.com/grids/hexagons/#rounding).
+    final q = (math.sqrt(3) / 3 * point.dx - point.dy / 3);
+    final r = (2 / 3 * point.dy);
+    final x = q, z = r, y = -q - r;
+    var rx = x.roundToDouble(), ry = y.roundToDouble(), rz = z.roundToDouble();
+    final dx = (rx - x).abs(), dy = (ry - y).abs(), dz = (rz - z).abs();
+    if (dx > dy && dx > dz) {
+      rx = -ry - rz;
+    } else if (dy > dz) {
+      ry = -rx - rz;
+    } else {
+      rz = -rx - ry;
+    }
+    return fromCube(rx.toInt(), rz.toInt());
+  }
 }
 
-class ClassifiedHex {
-  final HexCoord coord;
-  final Offset center; // in display coordinates
-  final String tileId;
-  final int rotation; // 0..5
-
-  ClassifiedHex({
-    required this.coord,
-    required this.center,
-    required this.tileId,
-    this.rotation = 0,
-  });
-}
-
-/// Geometry helpers for a pointy-top hexagon, shared by the grid painter,
-/// the tile template renderer, and the revenue-OCR crop math so they all
-/// agree on where hex vertices/edges/centers sit.
+/// Geometry helpers for a pointy-top hexagon, shared by the tile renderer,
+/// the grid detector and the drawn board, so they all agree on where hex
+/// vertices, edges and centres sit.
 ///
-/// Edges are numbered 0..5 starting at the edge between the vertices at -30
-/// and 30 degrees (the "east" edge) and running clockwise on screen:
-/// 0=E, 1=SE, 2=SW, 3=W, 4=NW, 5=NE. As in the tobymao/18xx tile DSL, the
-/// edge shared with the neighboring hex across edge k is always `(k + 3) % 6`.
+/// Edges are numbered as in the tobymao/18xx tile DSL: 0 is the south-west
+/// side and they run clockwise on screen, so 0=SW, 1=W, 2=NW, 3=NE, 4=E,
+/// 5=SE. (Checked against printed 1844 hexes: A20's `path=a:0` and
+/// `path=a:5` are the sides facing B19 and B21, and Bern's `path=a:5` faces
+/// G12.) The edge shared with the hex across edge k is always `(k + 3) % 6`.
 class HexGeometry {
-  static const List<int> _vertexAngleOffsets = [0, 1, 2, 3, 4, 5];
+  /// Direction, in degrees clockwise from east, of the outward normal of
+  /// edge 0. The rest follow every 60 degrees.
+  static const double _firstEdgeAngle = 120;
 
   /// Position of vertex [i] (0..5) of a pointy-top hex centered at [center]
-  /// with circumradius [size].
+  /// with circumradius [size]. Vertex i and vertex i + 1 are the ends of
+  /// edge i.
   static Offset vertex(Offset center, double size, int i) {
-    final angle = (math.pi / 180.0) * (60.0 * _vertexAngleOffsets[i % 6] - 30.0);
+    final angle = (math.pi / 180.0) * (_firstEdgeAngle - 30 + 60.0 * (i % 6));
     return Offset(
       center.dx + size * math.cos(angle),
       center.dy + size * math.sin(angle),
     );
+  }
+
+  /// Unit vector pointing out of the hex across edge [k].
+  static Offset edgeNormal(int k) {
+    final angle = (math.pi / 180.0) * (_firstEdgeAngle + 60.0 * (k % 6));
+    return Offset(math.cos(angle), math.sin(angle));
   }
 
   /// Midpoint of edge [k] (0..5): the edge between vertex k and vertex k+1.
@@ -64,69 +126,18 @@ class HexGeometry {
   static int oppositeEdge(int k) => (k + 3) % 6;
 }
 
-/// Where the hex grid sits relative to an image, and how big it is.
+/// The flat board's geometry: where hexes sit, and which hex is across a
+/// given side.
 ///
-/// The same object is used as the user's manual alignment (in display
-/// coordinates while they drag sliders) and as the stored calibration (in
-/// source-image pixels) that later screens use to crop tiles and revenue
-/// numbers out of the photo.
+/// Positions are in units of a hex's circumradius with hex (0, 0) at the
+/// origin; a photo is tied to this space by a perspective transform (see
+/// `GridDetector`), and the drawn board by a simple scale (see
+/// `BoardMapGeometry`).
 class Board {
-  final int rows;
-  final int cols;
-  final double hexSize; // circumradius
-  final Offset origin; // center of hex (0, 0)
-  final double rotation; // degrees
+  Board._();
 
-  const Board({
-    required this.rows,
-    required this.cols,
-    required this.hexSize,
-    required this.origin,
-    this.rotation = 0.0,
-  });
-
-  Board copyWith({
-    int? rows,
-    int? cols,
-    double? hexSize,
-    Offset? origin,
-    double? rotation,
-  }) =>
-      Board(
-        rows: rows ?? this.rows,
-        cols: cols ?? this.cols,
-        hexSize: hexSize ?? this.hexSize,
-        origin: origin ?? this.origin,
-        rotation: rotation ?? this.rotation,
-      );
-
-  /// This calibration re-expressed in another coordinate space, e.g. moving
-  /// from on-screen coordinates to source-image pixels. Points map as
-  /// `p * scale + offset`.
-  Board mapped({required double scale, required Offset offset}) => Board(
-        rows: rows,
-        cols: cols,
-        hexSize: hexSize * scale,
-        origin: origin * scale + offset,
-        rotation: rotation,
-      );
-
-  /// Center of [coord] in this calibration's coordinate space.
-  Offset centerOf(HexCoord coord) => rotateAround(
-        centerFor(coord.row, coord.col, hexSize, origin),
-        origin,
-        rotation * (math.pi / 180.0),
-      );
-
-  Iterable<HexCoord> get coords sync* {
-    for (int r = 0; r < rows; r++) {
-      for (int c = 0; c < cols; c++) {
-        yield HexCoord(r, c);
-      }
-    }
-  }
-
-  /// Center, in local (unrotated) layout coordinates, of hex (r, c).
+  /// Centre of hex (r, c), [hexSize] being the circumradius and [origin] the
+  /// centre of hex (0, 0).
   ///
   /// Pointy-top hexes, offset coordinates, odd rows shifted right by half a
   /// hex width (the standard "odd-r horizontal layout" -- see
@@ -139,62 +150,29 @@ class Board {
     return Offset(dx, dy);
   }
 
-  static Offset rotateAround(Offset p, Offset center, double radians) {
-    final s = math.sin(radians);
-    final c = math.cos(radians);
-    final x = p.dx - center.dx;
-    final y = p.dy - center.dy;
-    final rx = x * c - y * s;
-    final ry = x * s + y * c;
-    return Offset(rx + center.dx, ry + center.dy);
-  }
-
-  /// Centers for every (row, col) in row-major order.
-  List<Offset> computeCenters() => [for (final c in coords) centerOf(c)];
-
-  /// The hex whose center is nearest [point], or null if nothing is within
-  /// [maxDistance] (defaults to one hex radius).
-  HexCoord? hexAt(Offset point, {double? maxDistance}) {
-    final limit = maxDistance ?? hexSize;
-    HexCoord? best;
-    double bestDistance = double.infinity;
-    for (final coord in coords) {
-      final d = (centerOf(coord) - point).distance;
-      if (d < bestDistance) {
-        bestDistance = d;
-        best = coord;
-      }
-    }
-    return bestDistance <= limit ? best : null;
-  }
-
-  /// The neighboring hex across edge [edge] (0..5) of [coord], and the edge
-  /// number on that neighbor which touches the same physical side. The
-  /// returned coordinate may be out of the board's row/col bounds; callers
-  /// should check against `rows`/`cols` (or a placed-tile map) themselves.
+  /// The hex across edge [edge] (0..5) of [coord]. The hex may not exist on
+  /// the map, which callers check with `MapLayout.contains`.
   static HexCoord neighborOf(HexCoord coord, int edge) {
     final e = edge % 6;
     final r = coord.row;
     final c = coord.col;
-    // Odd-r offset neighbor deltas for pointy-top hexes, as [dCol, dRow].
-    // Edge numbering follows the vertex order in [HexGeometry]: edge 0 spans
-    // the vertices at -30 and 30 degrees, and since screen y grows downward
-    // the edges run clockwise 0=E, 1=SE, 2=SW, 3=W, 4=NW, 5=NE.
+    // Odd-r offset neighbour deltas for pointy-top hexes, as [dCol, dRow],
+    // in the edge order [HexGeometry] documents: SW, W, NW, NE, E, SE.
     final List<List<int>> evenRowDeltas = [
-      [1, 0], // E
-      [0, 1], // SE
       [-1, 1], // SW
       [-1, 0], // W
       [-1, -1], // NW
       [0, -1], // NE
+      [1, 0], // E
+      [0, 1], // SE
     ];
     final List<List<int>> oddRowDeltas = [
-      [1, 0], // E
-      [1, 1], // SE
       [0, 1], // SW
       [-1, 0], // W
       [0, -1], // NW
       [1, -1], // NE
+      [1, 0], // E
+      [1, 1], // SE
     ];
     final deltas = r.isOdd ? oddRowDeltas : evenRowDeltas;
     final d = deltas[e];

@@ -5,6 +5,7 @@ import 'package:eighteen_xx_calculator/models/board_graph.dart';
 import 'package:eighteen_xx_calculator/models/tile_seed_data.dart';
 import 'package:eighteen_xx_calculator/processing/revenue_ocr.dart';
 import 'package:eighteen_xx_calculator/processing/revenue_resolver.dart';
+import 'package:eighteen_xx_calculator/models/tile_rules.dart';
 import 'package:eighteen_xx_calculator/processing/tile_classifier.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -127,17 +128,20 @@ void main() {
     });
   });
 
-  group('TileMatch.isReliable', () {
-    TileMatch withConfidence(double c) =>
-        TileMatch(tileId: '57', rotation: 0, score: 1, confidence: c);
+  group('TileReading.isReliable', () {
+    TileReading withConfidence(double c) => TileReading(
+          option: const TileOption('57', 0),
+          confidence: c,
+          ranked: const [],
+        );
 
-    test('trusts matches at or above the threshold', () {
-      expect(withConfidence(TileMatch.reliableConfidence).isReliable, isTrue);
+    test('trusts readings at or above the threshold', () {
+      expect(withConfidence(TileReading.reliableConfidence).isReliable, isTrue);
       expect(withConfidence(0.9).isReliable, isTrue);
     });
 
-    test('doubts matches below it', () {
-      expect(withConfidence(TileMatch.reliableConfidence - 0.01).isReliable,
+    test('doubts readings below it', () {
+      expect(withConfidence(TileReading.reliableConfidence - 0.01).isReliable,
           isFalse);
       expect(withConfidence(0).isReliable, isFalse);
     });

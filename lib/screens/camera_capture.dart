@@ -1,23 +1,17 @@
-import 'dart:io';
-
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'image_processing.dart';
-import 'mac_webcam_capture.dart';
 
-/// The board capture screen for the platform the app is running on. Phones use
-/// the camera plugin; macOS uses the Mac's webcam, for testing on a
-/// development machine, because the camera plugin doesn't support macOS.
-Widget boardCaptureScreen({Map<String, dynamic>? game}) =>
-    !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
-        ? MacWebcamCapture(game: game)
-        : CameraCapture(game: game);
+import 'capture.dart';
 
+/// Photographs the board with the device camera and returns the file path.
+///
+/// With a [guide], the hexes to capture are outlined over the preview: the
+/// user lines the board up with the outline, which frames the right part of
+/// the board and tells the app which hexes it is looking at.
 class CameraCapture extends StatefulWidget {
-  final Map<String, dynamic>? game;
+  final CaptureGuide? guide;
 
-  const CameraCapture({super.key, this.game});
+  const CameraCapture({super.key, this.guide});
 
   @override
   State<CameraCapture> createState() => _CameraCaptureState();
@@ -25,8 +19,9 @@ class CameraCapture extends StatefulWidget {
 
 class _CameraCaptureState extends State<CameraCapture> {
   CameraController? _controller;
-  XFile? _capturedFile;
   bool _isInitialized = false;
+  bool _busy = false;
+  String? _error;
 
   @override
   void initState() {
@@ -37,46 +32,45 @@ class _CameraCaptureState extends State<CameraCapture> {
   Future<void> _initCamera() async {
     try {
       final cameras = await availableCameras();
+      if (cameras.isEmpty) throw StateError('No camera on this device.');
       final camera = cameras.firstWhere(
         (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
-
-      _controller = CameraController(
+      final controller = CameraController(
         camera,
-        ResolutionPreset.high,
+        // The board's printing is fine: the more detail the better.
+        ResolutionPreset.veryHigh,
         enableAudio: false,
       );
-
-      await _controller!.initialize();
-      if (!mounted) return;
+      await controller.initialize();
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
       setState(() {
+        _controller = controller;
         _isInitialized = true;
       });
     } catch (e) {
-      // ignore errors for now
-      debugPrint('Camera init error: $e');
+      if (mounted) setState(() => _error = 'Could not start the camera: $e');
     }
   }
 
   Future<void> _takePicture() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized || _busy) return;
+    setState(() => _busy = true);
     try {
-      final file = await _controller!.takePicture();
-      setState(() {
-        _capturedFile = file;
-      });
-      // navigate to processing screen with captured image and chosen game
-      if (mounted) {
-        Navigator.of(context).push(MaterialPageRoute(builder: (_) {
-          return ImageProcessing(
-            imagePath: file.path,
-            game: widget.game ?? {},
-          );
-        }));
-      }
+      final file = await controller.takePicture();
+      if (mounted) Navigator.of(context).pop(file.path);
     } catch (e) {
-      debugPrint('Take picture error: $e');
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = 'Could not take the picture: $e';
+        });
+      }
     }
   }
 
@@ -88,46 +82,48 @@ class _CameraCaptureState extends State<CameraCapture> {
 
   @override
   Widget build(BuildContext context) {
+    final guide = widget.guide;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Capture Board'),
+        title: Text(guide == null ? 'Photograph the board' : 'Close-up'),
       ),
       body: Column(
         children: [
           Expanded(
             child: Center(
-              child: _isInitialized && _controller != null
-                  ? CameraPreview(_controller!)
-                  : const Text('Initializing camera...'),
+              child: _error != null
+                  ? Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(_error!, textAlign: TextAlign.center),
+                    )
+                  : _isInitialized && _controller != null
+                      ? CameraPreview(
+                          _controller!,
+                          child: guide == null
+                              ? null
+                              : CustomPaint(painter: CaptureGuidePainter(guide)),
+                        )
+                      : const CircularProgressIndicator(),
             ),
           ),
-          if (_capturedFile != null)
-            SizedBox(
-              height: 200,
-              child: Image.file(File(_capturedFile!.path)),
-            ),
-          Padding(
-            padding: const EdgeInsets.all(12.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                ElevatedButton.icon(
-                  onPressed: _takePicture,
-                  icon: const Icon(Icons.camera_alt),
-                  label: const Text('Capture'),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () {
-                    setState(() {
-                      _capturedFile = null;
-                    });
-                  },
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Clear'),
+                CaptureInstructions(guide?.instruction ??
+                    'Fit the whole board in the frame, as square-on as you can.'),
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: FilledButton.icon(
+                    onPressed: _isInitialized && !_busy ? _takePicture : null,
+                    icon: const Icon(Icons.camera_alt),
+                    label: Text(_busy ? 'Capturing...' : 'Capture'),
+                  ),
                 ),
               ],
             ),
-          )
+          ),
         ],
       ),
     );

@@ -1,179 +1,284 @@
 # Recognition & Route Plotting
 
-Status: first pass built. Recognition, board graph, revenue, token detection,
-correction UI, and route search are all in place and covered by tests. Revenue comes
-from recognized tile data, with text recognition on the photo as the fallback. Train
-rules and a full tile set are still to come (see Deferred).
+Status: second pass. The app now knows the title it is looking at, finds the hex
+grid in a photo by itself and corrects the camera's angle, keeps a game session
+between photos, and asks for close-ups of the hexes it isn't sure about. Train
+rules are still the one big thing missing (see Deferred).
 
 ## Context
 
-The app photographs an 18xx board, works out what's on it, and finds the best-paying
-route for a company. Before this pass it could only take a photo, draw an adjustable
-hex grid over it, and compare each hex against template images that didn't exist -- so
-nothing was ever recognized, and there was no model of what a tile's track actually
-connects to, no revenue reading, and no route search.
+The app photographs an 18xx board, works out what's on it, and finds the
+best-paying route for a company.
 
-This pass builds the two halves the calculator needs: reading the board, and plotting
-routes across it. Per-train and per-company route legality rules are deliberately left
-for later; route length is a plain "maximum stops" number for now.
+The first pass could read a board, but only if the user dragged a rectangular
+hex grid over the photo by hand. That fell apart on a real board: a hand-held
+photo has perspective, so a grid that lines up on one side is out by half a hex
+on the other; real maps aren't rectangles, and hexes are missing all round the
+edge; and matching every hex against every tile produced false tiles on an empty
+board.
 
-## Where the tile data comes from
+This pass fixes all three, and changes the shape of the app: a game is now a
+**session** that persists, and photos update it rather than re-reading the whole
+board each time.
 
-[tobymao/18xx](https://github.com/tobymao/18xx) (the engine behind 18xx.games, MIT
-licensed) describes every tile as a compact string, documented in its `TILES.md` and
-listed in `lib/engine/config/tile.rb`:
+## What it does now
 
-- `'9' => 'path=a:0,b:3'` -- plain track between hex edges 0 and 3
-- `'5' => 'city=revenue:20;path=a:0,b:_0;path=a:1,b:_0'` -- a city reached from edges 0 and 1
-- `'58' => 'town=revenue:10;path=a:0,b:_0;path=a:_0,b:2'` -- a town
-
-Hex edges are numbered 0-5; an endpoint written `_N` refers to the Nth city/town declared
-earlier in the same string. Twenty of these tile strings are ported verbatim into
-[lib/models/tile_seed_data.dart](../../lib/models/tile_seed_data.dart) (plain yellow track,
-yellow cities/towns, common green upgrades) plus a blank map hex. Adding a tile means
-adding one line there -- nothing else changes.
-
-Using this data twice is what removes the need for tile artwork: the same definitions are
-both the route graph's topology and the source of the reference images the classifier
-matches photos against.
-
-## How it fits together
+1. Pick a title (1844 or 1854), then start or resume a game.
+2. Photograph the whole board once. The app finds the grid, deskews it, works out
+   which hex is which, and reads the board.
+3. It flags hexes it isn't sure about and offers close-ups, grouped so one photo
+   covers a hex and its six neighbours. The camera shows an outline to line up
+   with.
+4. Through the game, photograph just what changed -- one close-up per tile lay --
+   and the session keeps up. Everything can still be corrected by tapping.
+5. Ask for the best route for a company, at any point.
 
 ```
 photo
-  -> manual grid alignment (drag + sliders)            screens/image_processing.dart
-  -> per-hex crop matched against rendered templates   processing/tile_classifier.dart
-       templates drawn from tile definitions           processing/tile_renderer.dart
-  -> PlacedTile (tile id + rotation) per hex
-  -> review & correction, tap any hex or circle        screens/board_review.dart
-  -> revenue: tile data where the match is confident,  processing/revenue_resolver.dart
-       read from the photo where it isn't              processing/revenue_ocr.dart
-  -> station tokens matched by colour                  processing/token_detector.dart
-  -> stations + track runs between them                models/board_graph.dart
-  -> best route within a stop limit                    processing/route_finder.dart
-  -> route drawn back over the photo
+  -> hex grid found automatically              processing/grid_detector.dart
+       repeat + angle from autocorrelation
+       perspective fitted to printed outlines
+       title's map slid over the grid
+  -> deskewed hex patches                      processing/hex_patch.dart
+  -> what the rules allow on each hex          models/tile_rules.dart
+  -> best match among those                    processing/tile_classifier.dart
+  -> merged into the game session              models/game_session.dart
+  -> low-confidence hexes grouped              processing/board_reader.dart
+       -> close-ups, framed with a guide       screens/capture.dart
+  -> route search over the session's graph     processing/route_finder.dart
 ```
 
-## The pieces
+## Where the data comes from
 
-**Hex geometry** ([models/board.dart](../../lib/models/board.dart)) is the single source of
-truth for where hexes sit, shared by the alignment overlay, the template renderer, the OCR
-crops, and the route overlay. Hexes are pointy-top in an odd-r offset layout. Edges run
-clockwise on screen: 0=E, 1=SE, 2=SW, 3=W, 4=NW, 5=NE, so the edge shared with a neighbour
-across edge k is always `(k + 3) % 6`, matching the tile DSL's numbering. `Board` doubles as
-the grid calibration and maps between screen coordinates and image pixels, so an alignment
-made on one screen is reusable on another.
+[tobymao/18xx](https://github.com/tobymao/18xx) (the engine behind 18xx.games,
+MIT licensed) has both the tile designs and the per-title maps.
+`tool/import_tobymao_title.dart` fetches a title's `map.rb`, `tiles.rb` and the
+shared `config/tile.rb`, reads the Ruby constant hashes, and writes
+`lib/titles/title_<id>.dart`:
 
-**Tile definitions** ([models/tile_definition.dart](../../lib/models/tile_definition.dart))
-parse the DSL subset we need -- `city=`, `town=`, `path=`, with `revenue`/`slots` -- and
-skip what we don't (labels, upgrades, borders, junctions, multi-lane track). `rotated(n)`
-turns a tile by n 60-degree steps.
+```
+dart run tool/import_tobymao_title.dart 1844
+```
 
-**Classification** ([processing/tile_classifier.dart](../../lib/processing/tile_classifier.dart))
-renders every tile in every rotation, then scores a cropped hex against them by
-brightness-normalized mean squared error. It reports a confidence, measured against the best
-*different* tile so a symmetric tile isn't called uncertain just because two of its own
-rotations tie. This is a coarse matcher and is expected to be wrong sometimes, which is why
-correction is part of the flow rather than an afterthought.
+That gives, for each title: every hex that exists, what is printed on it (cities,
+towns, off-board revenue by phase, pre-printed track, labels, impassable
+borders), place names, and the tiles in the box with their counts. 1844 has 131
+hexes and 59 tile designs; 1854 has 100 and 42.
 
-**Board graph** ([models/board_graph.dart](../../lib/models/board_graph.dart)) reduces the
-board to what routing needs. Stations (cities/towns) are nodes; plain pass-through track is
-contracted into the edge that crosses it, so a run of straights between two cities is one
-`TrackEdge` that remembers the hexes it crosses (which is what the route overlay draws).
-Track only joins across a hex boundary when both tiles have track reaching that side.
+**Which side is which.** tobymao numbers a pointy-top hex's sides from the
+south-west, running clockwise: 0=SW, 1=W, 2=NW, 3=NE, 4=E, 5=SE. This is not
+obvious from the data and getting it wrong is quiet but ruinous -- the printed
+track faces the wrong way, so the upgrade rules reject the tile that is actually
+on the hex and recognition never even considers it. It was settled against the
+printed 1844 board: A20's `path=a:0` and `path=a:5` are the sides facing B19 and
+B21, Bern's `path=a:5` faces G12, and Lausanne's `a:1,2,4` are its west,
+north-west and east sides. [HexGeometry] defines it in one place, and
+`board_test.dart` pins it to those printed hexes.
+
+Knowing the map is what makes the rest work. It says which hexes exist (so the
+ragged edge of the map can be matched against the photo), which hexes never
+change (red off-board areas and grey hexes are never scanned), and what is
+printed underneath each tile.
+
+## Finding the grid
+
+[processing/grid_detector.dart](../../lib/processing/grid_detector.dart) does
+this in four steps, all on a copy of the photo about 1024 px across, reduced to
+"how strongly does this pixel sit on a thin dark line".
+
+**The repeat.** A photo of a hex grid, shifted by exactly one hex, lines up with
+itself. The autocorrelation of the line image therefore peaks at the six
+neighbour offsets, 60 degrees apart, which gives the hex size and the angle of
+the grid without knowing anything about the map. Two traps: every other hex also
+repeats, and so does the 30-degree-rotated grid through the hex corners, so a
+candidate is only preferred over the strongest peak if it is a real peak in its
+own right (it beats the shifts just short of and just past it), not merely a high
+value on the slope near zero shift.
+
+**The phase.** Folding the line image onto a single repeat of the lattice
+averages every hex in the middle of the photo together, and matching that against
+an ideal hex outline says where the hex centres fall.
+
+**The perspective.** The grid is then pulled onto the printed outlines, a ring at
+a time from the middle outward: each sample point on a predicted hex side looks
+along its normal for the darkest line nearby, and a new perspective transform is
+fitted to those matches with outliers down-weighted. Growing outward matters --
+the grid never has to jump more than a fraction of a hex, so it can't lock onto
+the wrong hex -- and a full perspective transform (eight numbers, not the four a
+move/scale/turn has) is what actually absorbs the camera's angle.
+
+**Which hex is which.** The map is then slid over the grid, in 60-degree turns
+and whole-hex steps, to where the most map hexes land on printed outlines and the
+fewest outlines are left uncovered. Ties are broken on colour: red off-board
+hexes, yellow pre-printed hexes and grey hexes have to land on hexes of about
+that colour, measured against each hex's own neighbours so uneven lighting
+cancels out.
+
+Two things learned from a real photo (a webcam shot of an 1844 board, lit
+unevenly, with a fold across the middle):
+
+- Line strength has to be normalized locally. Glare washed out the outlines over
+  one part of the board; measured absolutely, those hexes looked like bare table.
+  Dividing by the local average line strength fixed it.
+- The map's silhouette alone is nearly symmetric enough to place the map upside
+  down. Colour agreement is what settles it.
+
+On that photo the whole thing takes about 1.2 s and places all 115 visible hexes
+within a fraction of a hex, including across the fold.
+
+## Reading the hexes
+
+Each hex is sampled through the perspective transform into a square patch framed
+exactly as `TileRenderer` draws a tile, so a tile in the photo lines up pixel for
+pixel with its rendered template whatever angle the photo was taken at
+([processing/hex_patch.dart](../../lib/processing/hex_patch.dart)). The patch
+keeps two things: where the dark printing is (with coloured darkness discounted,
+so lakes and rivers don't read as track) and the background colour.
+
+[models/tile_rules.dart](../../lib/models/tile_rules.dart) then says what could
+be on that hex: what was there before, and the legal upgrades of it -- next
+colour, same number of cities and towns, keeping the track already laid, matching
+the hex's label, not running off the map or across an impassable border. That is
+usually a handful of options instead of every tile in every rotation, and it is
+the single biggest reason recognition is more accurate than in the first pass.
+
+[processing/tile_classifier.dart](../../lib/processing/tile_classifier.dart)
+scores those options on where the dark printing lies, on background colour
+(judged against the bare map nearby in the same photo), and with a penalty per
+upgrade step, since most hexes don't change between photos. When the hex has been
+photographed before, the "unchanged" option is also compared against that earlier
+picture, which is how printed map art the renderer doesn't draw stops being a
+problem.
+
+Confidence is the margin between the best option and the next. Anything close is
+reported as "worth a closer look" rather than as an answer, because a small lead
+usually means map art, not a tile.
+
+The tile editor will let the user pick any tile at all, since the rules here
+don't cover every title's exceptions -- but it says so when the choice doesn't
+fit ("F13 has 1 town printed, but tile 5 has 1 city"), and the board outlines
+such a hex in red. A city where the map prints a town is an easy slip and it
+makes every route through that hex wrong.
+
+## Sessions and close-ups
+
+A session ([models/game_session.dart](../../lib/models/game_session.dart)) holds
+what the app believes about every hex: the tile, how sure it is, where that came
+from, and how the hex looked when it was last sure. Sessions are saved per title
+([services/session_store.dart](../../lib/services/session_store.dart)), along
+with a small picture of each hex, which the tile editor shows next to what the
+hex was read as.
+
+Two rules keep the state honest:
+
+- A doubtful reading is shown but doesn't become the basis for the next one, so
+  one bad photo can't narrow what later photos are allowed to find.
+- A doubtful reading never overwrites something the user set by hand; it only
+  flags the hex. A confident one does, because that is a tile being laid.
+
+Close-ups are the normal way to update a game. `planCloseUps` groups hexes into
+as few photos as possible (each covers a hex and its six neighbours), and the
+camera draws that outline over the preview. Which hexes is up to the user: a
+board where recognition is unsure of twenty hexes is twenty hexes' worth of
+photography, and after an operating round the player knows perfectly well which
+three hexes changed. The board has a choosing mode -- tap the hexes, see how
+many photos that comes to, take them -- reachable from the toolbar or from the
+"needs a closer look" banner. Nothing starts chosen; an "All" button takes
+everything the app is unsure of, to then toggle back off. Lining the board up with the
+outline does two jobs: it frames the right hexes at a workable size, and it tells
+the app which hex is which -- which a close-up of a repeating grid can't
+otherwise say. The fit is then corrected against the printed lines, so the
+framing only has to be good to within about half a hex. A close-up of Bern's
+neighbourhood is roughly eight times the detail of the same hexes in a
+whole-board photo.
+
+## The rest
+
+**Hex geometry** ([models/board.dart](../../lib/models/board.dart)) is unchanged:
+pointy-top hexes, odd-r offset coordinates, edges 0..5 clockwise from east, and
+cube coordinates for turning and measuring. Printed coordinates like `D19` are
+converted on import.
+
+**Board graph** ([models/board_graph.dart](../../lib/models/board_graph.dart))
+now builds from what is on each hex -- a laid tile, or the map's printing where
+there is none -- so printed cities, towns and off-board areas are stops, and
+impassable borders block connections. Off-board revenue follows the session's
+phase.
 
 **Route search** ([processing/route_finder.dart](../../lib/processing/route_finder.dart))
-enumerates simple paths out of the home station -- no station twice, no stretch of track
-twice -- and joins the best two non-overlapping arms, so a route runs both ways out of its
-home as a real one does. `maxStops` stands in for train length and is the seam where real
-train rules will plug in. `bestRouteAnywhere` ignores tokens, for use before tokens are set.
+is as before, with one rule added: a route can end at an off-board area but not
+run through it. `maxStops` still stands in for train length.
 
-**Revenue** ([processing/revenue_resolver.dart](../../lib/processing/revenue_resolver.dart))
-takes each station's figure from the most reliable source available:
-
-1. A value the user typed.
-2. The tile data, when the tile was matched confidently or the user confirmed it in the
-   tile editor. Printed tile revenue is more dependable than reading small print off a photo.
-3. A number read off the photo, when the tile match was doubtful.
-4. Otherwise the doubtful tile's own value, flagged as unverified so the user checks it.
-
-"Confident" is `TileMatch.reliableConfidence`, currently 0.25. That is a first guess and
-needs tuning against real board photos. The review screen reads the photo for doubtful
-stations as soon as it opens, and the toolbar button re-reads them on request.
-
-**Text recognition** ([processing/revenue_ocr.dart](../../lib/processing/revenue_ocr.dart))
-uses each platform's own recognizer over one method channel, rather than a Flutter plugin:
-Apple's Vision framework on iOS ([TextRecognitionPlugin.swift](../../ios/Runner/TextRecognitionPlugin.swift))
-and ML Kit on Android
-([TextRecognitionChannel.kt](../../android/app/src/main/kotlin/com/example/eighteen_xx_calculator/TextRecognitionChannel.kt)).
-The reason is CocoaPods: its trunk goes read-only on 2 December 2026, and Google ships ML
-Kit for iOS only as a CocoaPod, so the Flutter ML Kit plugins can't move to Swift Package
-Manager. Vision ships with iOS, so the iOS app has no CocoaPods dependency at all. Android
-gets ML Kit through Gradle, with the Latin model bundled so it works offline. The two
-engines may read the same photo differently, so check revenue reading on a device of each
-kind.
-
-**Review UI** ([screens/board_review.dart](../../lib/screens/board_review.dart)) treats
-recognition as a first draft: tap a hex to change its tile or rotation, tap a circle to fix
-its revenue or set which company has a token there. Doubtful tiles and unverified revenue
-are outlined in amber, figures read from the photo in blue, and each station's editor says
-where its figure came from. Token detection fills in suggestions that are never trusted
-silently.
+**Revenue** comes from tile and map data. Where a hex is doubtful, the station
+editor can read the printed figure off that hex's stored picture using the
+platform text recognizers (Apple Vision on iOS, ML Kit on Android) over the
+existing method channel.
 
 ## Deferred
 
-- Real train rules: train types, "+" trains counting towns separately, E/D trains, city slot
-  availability, token requirements, route group restrictions. `maxStops` is the placeholder.
-- Automatic hex detection and perspective correction -- alignment is manual.
-- The rest of the standard tile manifest, and the parts of the DSL the parser skips.
-- Cities, towns and off-board areas printed on the map itself. These aren't tiles, so they
-  aren't recognized and have no station in the graph. The photo fallback can only correct
-  the revenue of a station that exists, so it can't fill this gap on its own. Per-title map
-  data, which tobymao/18xx also has, is the likely fix.
-- Per-title company lists; companies are currently the eight token colours in
-  [models/company.dart](../../lib/models/company.dart), renameable by the player later.
+- Real train rules: train types, "+" trains, E/D trains, city slot availability,
+  token requirements, route groupings. `maxStops` is the placeholder.
+- Per-title company lists and liveries; companies are still the eight token
+  colours in [models/company.dart](../../lib/models/company.dart).
+- Titles whose maps are flat-top rather than pointy-top; the importer refuses
+  them rather than importing something wrong.
+- Maps printed in two pieces (1854's local railways may be a separate inset on
+  the physical board). The detector places one connected map; if a title's map is
+  in two pieces, the second would need its own placement.
+- Tile counts are imported but not used; "there are only two of tile 15 in the
+  box" would be a good extra constraint on recognition.
+- Hexes at the very edge of the map (red off-board areas, the grey mountain
+  railways) are printed as part-hexes running off the board, so a close-up
+  centred on one has little grid to lock onto. The planner aims at hexes that
+  take tiles instead, and a fit is judged on the hexes that are drawn in full,
+  but a photo of nothing but the map's edge will still fail.
 
 ## Verifying
 
 - `flutter analyze` -- clean.
-- `flutter test` -- 80 tests covering DSL parsing and rotation, hex adjacency (including a
-  cross-check that the topology agrees with the on-screen geometry), graph building,
-  route search, classifier round-trips, token colour matching, revenue source priority,
-  the text-recognition channel contract, and the review screen's tap, fallback and route
-  flows.
-- `flutter build apk --debug` -- builds, with the channel handler and ML Kit's bundled
-  model in the APK.
-- iOS -- the Swift sources type-check against the iOS simulator SDK targeting iOS 13. A full
-  `flutter build ios --simulator` couldn't finish on the machine this was written on,
-  because its Xcode doesn't have the iOS 26.5 platform component installed. CocoaPods is
-  no longer involved.
-- On a device: photograph a few tiles, align the grid, scan, then check the tile ids,
-  the amber values, set a token, and find a route. Recognition quality under real
-  lighting is the part that will need iterating.
+- `flutter test` -- the suite covers the perspective maths, the imported maps
+  against how the boards are printed, the upgrade rules, grid detection (on
+  boards drawn from the title data and re-photographed through a perspective
+  transform, including turned, angled and unevenly lit), recognition end to end,
+  session state and saving, close-up planning, and the screens.
+- `test/photo_fit_test.dart` runs detection against a real photo that isn't
+  checked in:
+
+  ```
+  BOARD_PHOTO=~/board.png BOARD_TITLE=1844 BOARD_PHOTO_OUT=/tmp/fit.png \
+    flutter test test/photo_fit_test.dart
+  ```
+
+  It prints the fit and writes the photo with the grid drawn over it, which is
+  the quickest way to see what detection is doing.
 
 ## Notes for the next pass
 
-- iOS builds with Swift Package Manager only. The Podfile and the CocoaPods includes in
-  `ios/Flutter/*.xcconfig` have been removed, and the deployment target is back to iOS 13.
-  Adding a plugin that only ships a CocoaPod would bring CocoaPods back, so check for
-  Swift Package Manager support before adding iOS plugins.
-- Camera permission strings were missing from both platforms and have been added.
-- For testing on a Mac, the macOS build photographs the board with the webcam through
-  `camera_macos` ([mac_webcam_capture.dart](../../lib/screens/mac_webcam_capture.dart)),
-  since the `camera` plugin has no macOS support. The camera entitlement is only in the
-  Debug and Profile entitlements, so a macOS release build can't use the webcam. Text
-  recognition isn't wired up on macOS, so doubtful revenue values stay amber there.
-- Three things that were quietly broken before this pass, now fixed: the hex grid used
-  mismatched spacing constants and so could never line up with a real board; the gesture
-  detectors deferred to their children, so dragging the grid and tapping the board did
-  nothing; and `permission_handler` (unused, pinned to `any`) had drifted to a version
-  requiring compileSdk 37, which failed the Android build. Dependencies are now pinned
-  rather than `any`, so this can't recur silently.
-- The classifier's accuracy on real photos is untested; if it proves weak, the next thing
-  to try is matching on colour as well as shape, and using the hex's dominant background
-  colour to narrow candidates to one tile phase before scoring.
-- Once real photos are available, tune `TileMatch.reliableConfidence` from them: too low
-  and misread tiles supply wrong revenue silently, too high and most revenue comes from
-  the less reliable photo reading.
-- Reading the photo on confident tiles too, and flagging any disagreement with the tile
-  value, would be a cheap way to catch tiles that were matched confidently but wrongly.
+- **Recognition on real tiles is untested.** Everything here has been checked
+  against one photo of an *empty* 1844 board and against boards drawn from the
+  title data. On the empty board all 95 hexes now read as bare, with one
+  flagged for a closer look; before the side-numbering was fixed, three hexes
+  were confidently read as track that wasn't there. Photograph a board with
+  real tiles on it and tune from there: `TileClassifier._shapeScale`,
+  `_stepPenalty` and `_marginScale`, and `TileReading.reliableConfidence`, are
+  the knobs, and the per-hex pictures the session saves are the evidence.
+- Every `Isolate.run` lives in `services/photo_pipeline.dart`. A closure written
+  inside a `State` method shares its captured context with the closures around
+  it, so a neighbouring `setState` drags the widget tree and the framework's
+  zone into the isolate message and it fails with "object is unsendable" --
+  which the align screen then showed as a wall of text. Keep the heavy work
+  behind the pipeline, and keep error messages short enough to fit on screen.
+- The "photograph the empty board first" step exists because of that lake hex: it
+  records how every hex looks bare, which is what later photos are compared
+  against. It is worth checking how much it actually buys once there are tiles to
+  read.
+- `ColourModel.defaults` was measured from one warm-lit webcam photo. The reader
+  replaces those values with what it measures whenever the photo has enough hexes
+  of a colour it already knows, so the defaults only matter for the first photo
+  of a game.
+- Detection assumes the photo isn't mirrored. The macOS webcam path turns
+  mirroring off; a mirrored photo would not match any rotation of the map.
+- `path_provider` reaches Foundation through FFI (2.6.0), so it adds no
+  CocoaPods dependency on iOS -- worth re-checking on upgrade, since the iOS
+  build has no CocoaPods at all and adding a plugin that only ships a pod would
+  bring it back.

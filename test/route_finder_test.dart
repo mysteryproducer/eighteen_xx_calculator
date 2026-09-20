@@ -4,16 +4,21 @@ import 'package:eighteen_xx_calculator/models/tile_seed_data.dart';
 import 'package:eighteen_xx_calculator/processing/route_finder.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+/// Tiles 57 and 9 run between edges 0 and 3 -- the south-west and north-east
+/// sides -- so turning them four steps lays their track east-west, along a
+/// row of hexes.
+const int eastWest = 4;
+
 /// A line of cities joined by plain track:
 ///   (0,0) city - (0,1) track - (0,2) city - (0,3) track - (0,4) city
 /// Each city pays 20, so a train that can reach all three pays 60.
 BoardGraph lineOfThreeCities() => BoardGraph.build(
       {
-        const HexCoord(0, 0): const PlacedTile('57'),
-        const HexCoord(0, 1): const PlacedTile('9'),
-        const HexCoord(0, 2): const PlacedTile('57'),
-        const HexCoord(0, 3): const PlacedTile('9'),
-        const HexCoord(0, 4): const PlacedTile('57'),
+        const HexCoord(0, 0): const PlacedTile('57', rotation: eastWest),
+        const HexCoord(0, 1): const PlacedTile('9', rotation: eastWest),
+        const HexCoord(0, 2): const PlacedTile('57', rotation: eastWest),
+        const HexCoord(0, 3): const PlacedTile('9', rotation: eastWest),
+        const HexCoord(0, 4): const PlacedTile('57', rotation: eastWest),
       },
       TileSeedData.all,
     );
@@ -67,7 +72,7 @@ void main() {
 
     test('an isolated station earns only itself', () {
       final graph = BoardGraph.build(
-        {const HexCoord(0, 0): const PlacedTile('57')},
+        {const HexCoord(0, 0): const PlacedTile('57', rotation: eastWest)},
         TileSeedData.all,
       );
       final route =
@@ -82,8 +87,8 @@ void main() {
       final graph = BoardGraph.build(
         {
           const HexCoord(0, 0): const PlacedTile('58'), // town, edges 0 and 2
-          const HexCoord(0, 1): const PlacedTile('57'), // city, edges 0 and 3
-          const HexCoord(0, 2): const PlacedTile('57'), // city, edges 0 and 3
+          const HexCoord(0, 1): const PlacedTile('57', rotation: eastWest), // city, edges 0 and 3
+          const HexCoord(0, 2): const PlacedTile('57', rotation: eastWest), // city, edges 0 and 3
         },
         TileSeedData.all,
       );

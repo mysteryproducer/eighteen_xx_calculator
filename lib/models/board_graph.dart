@@ -110,7 +110,16 @@ class BoardGraph {
       final def = definitions[placed.tileId];
       if (def != null) rotated[hex] = def.rotated(placed.rotation);
     });
+    return fromContent(rotated);
+  }
 
+  /// Builds the graph from what is on each hex, already turned the right way:
+  /// a laid tile, or the map's own printing where there is none. Stations
+  /// whose revenue changes with the game's phase pay their [phase] value.
+  static BoardGraph fromContent(
+    Map<HexCoord, TileDefinition> rotated, {
+    TileColor phase = TileColor.yellow,
+  }) {
     // One node per station instance.
     final stations = <StationNode>[];
     final stationByKey = <String, StationNode>{};
@@ -120,7 +129,7 @@ class BoardGraph {
           hex: hex,
           stationIndex: st.index,
           kind: st.kind,
-          revenue: st.revenue,
+          revenue: st.revenueIn(phase),
           slots: st.slots,
         );
         stations.add(node);
@@ -158,6 +167,10 @@ class BoardGraph {
         if (neighbourDef == null) continue;
         final opposite = HexGeometry.oppositeEdge(edge);
         if (!neighbourDef.touchesEdge(opposite)) continue;
+        if (def.impassable.contains(edge) ||
+            neighbourDef.impassable.contains(opposite)) {
+          continue;
+        }
         // Link once per boundary, not twice (each hex would otherwise add it).
         if (hex.row < neighbour.row ||
             (hex.row == neighbour.row && hex.col < neighbour.col)) {

@@ -1,163 +1,159 @@
-import 'package:image/image.dart' as img;
+import 'dart:math' as math;
+import 'dart:ui' show Offset;
 
 import '../models/tile_definition.dart';
-import '../models/tile_seed_data.dart';
+import '../models/tile_rules.dart';
+import 'hex_patch.dart';
 import 'tile_renderer.dart';
 
-/// What the classifier thinks is sitting on one hex.
-class TileMatch {
-  final String tileId;
-  final int rotation; // 0..5
-  final double score; // mean squared error, lower is better
-  final double confidence; // 0..1, how far clear of the runner-up
+/// What recognition made of one hex.
+class TileReading {
+  /// The most likely option.
+  final TileOption option;
 
-  const TileMatch({
-    required this.tileId,
-    required this.rotation,
-    required this.score,
+  /// 0..1: how far the best option stood clear of the next best. Low means
+  /// "take a closer look".
+  final double confidence;
+
+  /// Every option considered, best first, with its score (higher is better).
+  final List<(TileOption, double)> ranked;
+
+  const TileReading({
+    required this.option,
     required this.confidence,
+    required this.ranked,
   });
 
-  /// Confidence at or above which a match is trusted, so its tile data is used
-  /// for revenue instead of reading the photo. This is a starting guess: it
-  /// needs tuning against real board photos.
-  static const double reliableConfidence = 0.25;
+  /// Confidence at or above which a reading is trusted without the user
+  /// checking it. A starting guess, to be tuned against real photos.
+  static const double reliableConfidence = 0.6;
 
   bool get isReliable => confidence >= reliableConfidence;
 
   @override
   String toString() =>
-      'TileMatch($tileId r$rotation, score ${score.toStringAsFixed(1)}, '
-      'confidence ${(confidence * 100).toStringAsFixed(0)}%)';
+      'TileReading($option, ${(confidence * 100).toStringAsFixed(0)}%)';
 }
 
-/// Matches a cropped hex from the board photo against reference tiles.
+/// The background colours to expect in one photo, relative to the plain map
+/// colour around each hex (see `BoardReader`).
+class ColourModel {
+  final Map<TileColor, Offset> centroids;
+
+  /// Typical scatter of a colour class about its centroid.
+  final double spread;
+
+  const ColourModel(this.centroids, {this.spread = 0.02});
+
+  /// Rough expectations from one warm-lit webcam photo of a printed 1844
+  /// board. Colour differences in photos are much smaller than in the tile
+  /// artwork; `BoardReader` replaces these with what it measures when the
+  /// photo has enough hexes of a colour it already knows.
+  static const ColourModel defaults = ColourModel({
+    TileColor.plain: Offset(0, 0),
+    TileColor.red: Offset(0.047, 0.056),
+    TileColor.yellow: Offset(-0.021, 0.02),
+    TileColor.green: Offset(-0.04, 0.018),
+    TileColor.brown: Offset(0.033, 0.045),
+    TileColor.grey: Offset(0, -0.03),
+    TileColor.purple: Offset(-0.011, -0.04),
+    TileColor.blue: Offset(-0.01, -0.02),
+  });
+
+  Offset expected(TileColor color) => centroids[color] ?? Offset.zero;
+
+  ColourModel withCentroids(Map<TileColor, Offset> measured) =>
+      ColourModel({...centroids, ...measured}, spread: spread);
+}
+
+/// Picks which of a hex's possible contents a photo of it shows.
 ///
-/// Reference images are rendered at runtime from [TileSeedData] via
-/// [TileRenderer] -- one per tile design per 60-degree rotation -- so the
-/// recognized tile id and rotation map straight onto the same definitions the
-/// route graph is built from.
+/// Each option is drawn by `TileRenderer` from the same tile data the route
+/// graph uses, and compared with the photographed hex on where the dark
+/// printing (track, city rings, town bars) lies. Background colour then
+/// separates a yellow tile from a green one or from bare map, and a small
+/// penalty per upgrade step reflects that most hexes don't change between
+/// photos. When the hex has been photographed before, the "unchanged" option
+/// is also compared with that earlier picture, which catches printed map art
+/// (mountains, place names) the renderer doesn't draw.
 ///
-/// The matching itself is deliberately simple: brightness-normalized mean
-/// squared error over a downscaled greyscale image. It is a starting point,
-/// not a finished recognizer, and the UI is expected to let the user correct
-/// what it gets wrong -- [TileMatch.confidence] exists to flag which hexes are
-/// worth checking.
+/// The options come from `TileRules`, so a hex is only ever matched against
+/// what could legally be there.
 class TileClassifier {
-  static const int templateSize = 64;
+  final Map<String, HexPatch> _templates = {};
+  final Map<String, Future<void>> _rendering = {};
 
-  final Map<String, TileDefinition> definitions;
-  final Map<String, img.Image> _templates = {}; // "id@rotation" -> greyscale
-  bool _loaded = false;
-  Future<void>? _loading;
-
-  TileClassifier({Map<String, TileDefinition>? definitions})
-      : definitions = definitions ?? TileSeedData.all;
-
-  bool get isLoaded => _loaded;
   int get templateCount => _templates.length;
 
-  /// Renders the reference images. Safe to call again while a previous call is
-  /// still running -- callers share the one in-flight render rather than
-  /// starting a second.
-  Future<void> loadTemplates() {
-    if (_loaded) return Future.value();
-    return _loading ??= _renderTemplates();
+  /// Draws and stores templates for any of [contents] (keyed by a stable
+  /// name) not already drawn.
+  Future<void> prepare(Map<String, TileDefinition> contents) async {
+    final pending = <Future<void>>[];
+    contents.forEach((key, def) {
+      if (_templates.containsKey(key)) return;
+      pending.add(_rendering[key] ??= () async {
+        final raster = await TileRenderer.rasterize(def, size: HexPatch.size);
+        _templates[key] = HexPatch.fromTileImage(raster);
+        _rendering.remove(key);
+      }());
+    });
+    await Future.wait(pending);
   }
 
-  Future<void> _renderTemplates() async {
-    for (final def in definitions.values) {
-      // A tile with no track looks the same whichever way round it is.
-      final rotations = def.segments.isEmpty ? 1 : 6;
-      for (int rotation = 0; rotation < rotations; rotation++) {
-        final rotated = def.rotated(rotation);
-        final raster =
-            await TileRenderer.rasterize(rotated, size: templateSize);
-        _templates['${def.id}@$rotation'] = _normalize(img.grayscale(raster));
+  HexPatch? template(String key) => _templates[key];
+
+  /// Scores each of [options] against [patch]. [keyOf] names the template
+  /// for an option (as passed to [prepare]) and [colourOf] gives its
+  /// background colour. [relativeChroma] is the patch's colour relative to
+  /// the plain map nearby. [reference] is how the hex looked when it last
+  /// held the first option, if known.
+  TileReading classify({
+    required HexPatch patch,
+    required Offset relativeChroma,
+    required List<TileOption> options,
+    required String Function(TileOption) keyOf,
+    required TileColor Function(TileOption) colourOf,
+    ColourModel colours = ColourModel.defaults,
+    HexPatch? reference,
+  }) {
+    assert(options.isNotEmpty);
+    final scored = <(TileOption, double)>[];
+    for (int i = 0; i < options.length; i++) {
+      final option = options[i];
+      final template = _templates[keyOf(option)];
+      var shape = template == null ? 1.0 : patch.distanceTo(template);
+      if (i == 0 && reference != null) {
+        shape = math.min(shape, patch.distanceTo(reference));
       }
+      final colourMiss =
+          (relativeChroma - colours.expected(colourOf(option))).distanceSquared /
+              (2 * colours.spread * colours.spread);
+      final score = -shape / _shapeScale -
+          0.5 * math.min(colourMiss, 4.0) -
+          _stepPenalty * option.steps;
+      scored.add((option, score));
     }
-    _loaded = true;
-    _loading = null;
-  }
-
-  /// Best tile + rotation for [patch], or null if templates aren't loaded.
-  TileMatch? matchTile(img.Image patch) {
-    if (_templates.isEmpty) return null;
-
-    final prepared = _normalize(img.grayscale(
-      img.copyResize(patch, width: templateSize, height: templateSize),
-    ));
-
-    String? bestKey;
-    double bestScore = double.infinity;
-    final scoresById = <String, double>{};
-
-    for (final entry in _templates.entries) {
-      final score = _meanSquaredError(prepared, entry.value);
-      final id = entry.key.split('@')[0];
-      final existing = scoresById[id];
-      if (existing == null || score < existing) scoresById[id] = score;
-      if (score < bestScore) {
-        bestScore = score;
-        bestKey = entry.key;
-      }
-    }
-
-    if (bestKey == null) return null;
-    final parts = bestKey.split('@');
-
-    // Confidence compares against the best *different* tile, so a tile whose
-    // rotations look alike (a straight #9, say) isn't reported as uncertain
-    // just because two of its own rotations tie.
-    double runnerUp = double.infinity;
-    for (final entry in scoresById.entries) {
-      if (entry.key == parts[0]) continue;
-      if (entry.value < runnerUp) runnerUp = entry.value;
-    }
-    final confidence = runnerUp.isFinite && runnerUp > 0
-        ? ((runnerUp - bestScore) / runnerUp).clamp(0.0, 1.0).toDouble()
-        : 0.0;
-
-    return TileMatch(
-      tileId: parts[0],
-      rotation: int.parse(parts[1]),
-      score: bestScore,
-      confidence: confidence,
+    scored.sort((a, b) => b.$2.compareTo(a.$2));
+    final margin = scored.length < 2 ? 4.0 : scored[0].$2 - scored[1].$2;
+    return TileReading(
+      option: scored.first.$1,
+      confidence: 1 - math.exp(-margin / _marginScale),
+      ranked: scored,
     );
   }
 
-  /// Stretches luminance to the full 0..255 range so exposure differences
-  /// between the photo and the rendered reference matter less.
-  static img.Image _normalize(img.Image source) {
-    int min = 255;
-    int max = 0;
-    for (final pixel in source) {
-      final l = img.getLuminance(pixel).round();
-      if (l < min) min = l;
-      if (l > max) max = l;
-    }
-    final range = max - min;
-    if (range <= 0) return source;
-    for (final pixel in source) {
-      final l = img.getLuminance(pixel).round();
-      final scaled = ((l - min) * 255 / range).round().clamp(0, 255);
-      pixel.r = scaled;
-      pixel.g = scaled;
-      pixel.b = scaled;
-    }
-    return source;
-  }
+  /// A difference in mean squared darkness of this much counts as one unit
+  /// of evidence. Track covering a tenth of a hex that is there in one
+  /// picture and not the other makes a difference of about 0.1.
+  static const double _shapeScale = 0.02;
 
-  static double _meanSquaredError(img.Image a, img.Image b) {
-    double total = 0;
-    final width = a.width;
-    final height = a.height;
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        final d = a.getPixel(x, y).r - b.getPixel(x, y).r;
-        total += d * d;
-      }
-    }
-    return total / (width * height);
-  }
+  /// Evidence against each upgrade step, since most hexes are unchanged
+  /// between one photo and the next.
+  static const double _stepPenalty = 1.0;
+
+  /// How big a lead one option needs over the next before the reading counts
+  /// as settled. Printed map art the renderer doesn't draw -- lakes, hill
+  /// shading, place names -- can give a wrong option a small lead, so a small
+  /// lead is reported as "worth a closer look" rather than as an answer.
+  static const double _marginScale = 2.0;
 }

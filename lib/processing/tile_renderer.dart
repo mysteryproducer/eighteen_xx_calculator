@@ -25,6 +25,9 @@ class TileRenderer {
         TileColor.green => const Color(0xFF73C26B),
         TileColor.brown => const Color(0xFFB97A3D),
         TileColor.grey => const Color(0xFFBDBDBD),
+        TileColor.red => const Color(0xFFD9695F),
+        TileColor.blue => const Color(0xFF6FA8DC),
+        TileColor.purple => const Color(0xFFB39DDB),
       };
 
   /// Where a station sits inside the hex: at the centre normally, or nudged
@@ -84,6 +87,21 @@ class TileRenderer {
         ..style = PaintingStyle.stroke
         ..strokeWidth = size * 0.015,
     );
+
+    // Impassable borders: a heavy line along the side, as printed on maps.
+    final borderPaint = Paint()
+      ..color = trackColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = size * 0.06
+      ..strokeCap = StrokeCap.round;
+    for (final edge in def.impassable) {
+      final inset = radius * 0.94;
+      canvas.drawLine(
+        HexGeometry.vertex(center, inset, edge),
+        HexGeometry.vertex(center, inset, (edge + 1) % 6),
+        borderPaint,
+      );
+    }
 
     Offset positionOf(TileEndpoint e) => switch (e) {
           EdgeEndpoint(:final edge) => HexGeometry.edgeMidpoint(center, radius, edge),

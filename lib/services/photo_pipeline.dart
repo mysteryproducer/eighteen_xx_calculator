@@ -1,0 +1,66 @@
+import 'dart:io';
+import 'dart:isolate';
+import 'dart:typed_data';
+
+import 'package:image/image.dart' as img;
+
+import '../geometry/homography.dart';
+import '../models/board.dart';
+import '../models/map_layout.dart';
+import '../processing/grid_detector.dart';
+
+/// The heavy per-photo work, kept off the UI thread.
+///
+/// Decoding a camera photo and searching it for the hex grid take a second or
+/// two each, so both run in a background isolate. Recognition itself stays on
+/// the main isolate because it draws its reference tiles with the graphics
+/// engine, which only the main isolate has.
+///
+/// Every `Isolate.run` in the app belongs here, and for a reason: a closure
+/// written inside a `State` method shares its captured context with the
+/// other closures around it, so a nearby `setState` drags the whole widget
+/// tree -- and the framework's zone -- into the message, and sending it
+/// fails with "object is unsendable". The closures below capture nothing but
+/// their arguments.
+class PhotoPipeline {
+  const PhotoPipeline();
+
+  /// Reads the photo at [path], turning it the right way up if the camera
+  /// recorded an orientation, and returns it with a JPEG for display.
+  Future<(img.Image, Uint8List)> load(String path) async {
+    final bytes = await File(path).readAsBytes();
+    return Isolate.run(() {
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) {
+        throw const FormatException('That file is not an image the app can read.');
+      }
+      // Phones record which way up the camera was rather than rotating the
+      // pixels; everything downstream assumes the picture is the right way up.
+      final photo = img.bakeOrientation(decoded);
+      final preview = img.encodeJpg(
+        photo.width > 1600
+            ? img.copyResize(photo, width: 1600, interpolation: img.Interpolation.average)
+            : photo,
+        quality: 85,
+      );
+      return (photo, preview);
+    });
+  }
+
+  /// Finds the whole map in a photo of the board.
+  Future<GridFit?> fitBoard(MapLayout map, img.Image photo) =>
+      Isolate.run(() => GridDetector(map).fitBoard(photo));
+
+  /// Tightens a hand-made alignment onto the printed lines.
+  Future<GridFit> snap(MapLayout map, img.Image photo, Homography guess) =>
+      Isolate.run(() => GridDetector(map).snap(photo, guess));
+
+  /// Finds the grid in a close-up framed with a guide.
+  Future<GridFit?> fitCloseUp(
+    MapLayout map,
+    img.Image photo,
+    Homography guess,
+    HexCoord target,
+  ) =>
+      Isolate.run(() => GridDetector(map).fitCloseUp(photo, guess, target));
+}

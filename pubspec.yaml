@@ -45,6 +45,9 @@ dependencies:
   camera_macos: ^0.1.1
   # Cropping and comparing hexes from the photo.
   image: ^4.9.1
+  # Where saved game sessions live. On iOS and macOS this calls Foundation
+  # through FFI, so it adds no CocoaPods (or any native plugin) dependency.
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
