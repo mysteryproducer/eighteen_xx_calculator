@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/game_session.dart';
 import '../models/game_title.dart';
 import '../services/session_store.dart';
+import '../services/training_log.dart';
 import 'session_board.dart';
 
 /// The saved games for one title.
@@ -40,6 +41,7 @@ class _SessionListState extends State<SessionList> {
         title: widget.title,
         session: session,
         store: widget.store,
+        trainingLog: TrainingLog(),
       ),
     ));
     await _load();

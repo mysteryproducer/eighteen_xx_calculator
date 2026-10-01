@@ -6,6 +6,7 @@ import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/board_graph.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/models/map_layout.dart';
+import 'package:eighteen_xx_calculator/models/tile_definition.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
 import 'package:eighteen_xx_calculator/processing/tile_renderer.dart';
 import 'package:flutter/material.dart';
@@ -22,6 +23,7 @@ Future<img.Image> drawBoard(
   MapLayout map, {
   double hexRadius = 26,
   Map<HexCoord, PlacedTile> laid = const {},
+  Map<HexCoord, TileDefinition> drawn = const {},
 }) async {
   final bounds = map.boardBounds.inflate(1.2);
   final width = (bounds.width * hexRadius).round();
@@ -34,9 +36,10 @@ Future<img.Image> drawBoard(
   final tileSize = hexRadius / 0.48;
   for (final hex in map.hexes) {
     final placed = laid[hex.coord];
-    final def = placed == null
-        ? hex.printed
-        : title.tiles[placed.tileId]!.rotated(placed.rotation);
+    final def = drawn[hex.coord] ??
+        (placed == null
+            ? hex.printed
+            : title.tiles[placed.tileId]!.rotated(placed.rotation));
     final centre = (hex.coord.boardCenter - bounds.topLeft) * hexRadius;
     canvas.save();
     canvas.translate(centre.dx - tileSize / 2, centre.dy - tileSize / 2);

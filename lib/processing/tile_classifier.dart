@@ -80,7 +80,9 @@ class ColourModel {
 /// The options come from `TileRules`, so a hex is only ever matched against
 /// what could legally be there.
 class TileClassifier {
-  final Map<String, HexPatch> _templates = {};
+  /// Each option's drawings: one, or for a tile with a city of several
+  /// slots in its middle, one for each way its row of slots could run.
+  final Map<String, List<HexPatch>> _templates = {};
   final Map<String, Future<void>> _rendering = {};
 
   int get templateCount => _templates.length;
@@ -92,19 +94,25 @@ class TileClassifier {
     contents.forEach((key, def) {
       if (_templates.containsKey(key)) return;
       pending.add(_rendering[key] ??= () async {
-        final raster = await TileRenderer.rasterize(def, size: HexPatch.size);
-        _templates[key] = HexPatch.fromTileImage(raster);
+        _templates[key] = [
+          for (int turn = 0; turn < (TileRenderer.hasSlotRow(def) ? 3 : 1); turn++)
+            HexPatch.fromTileImage(await TileRenderer.rasterize(def,
+                size: HexPatch.size, slotTurn: turn)),
+        ];
         _rendering.remove(key);
       }());
     });
     await Future.wait(pending);
   }
 
-  HexPatch? template(String key) => _templates[key];
+  HexPatch? template(String key) => _templates[key]?.first;
 
   /// Scores each of [options] against [patch]. [keyOf] names the template
-  /// for an option (as passed to [prepare]) and [colourOf] gives its
-  /// background colour. [relativeChroma] is the patch's colour relative to
+  /// for an option (as passed to [prepare]), [colourOf] gives its
+  /// background colour, and [exitsOf] how strongly its printing should run
+  /// off each side (see `TileDefinition.exitStrengths`). [colourWeight]
+  /// scales how much background colour counts: less where glare has washed
+  /// it out. [relativeChroma] is the patch's colour relative to
   /// the plain map nearby. [reference] is how the hex looked when it last
   /// held the first option, if known.
   TileReading classify({
@@ -113,34 +121,55 @@ class TileClassifier {
     required List<TileOption> options,
     required String Function(TileOption) keyOf,
     required TileColor Function(TileOption) colourOf,
+    required Map<int, double> Function(TileOption) exitsOf,
     ColourModel colours = ColourModel.defaults,
     HexPatch? reference,
+    double stepPenalty = _stepPenalty,
+    double colourWeight = 1,
   }) {
     assert(options.isNotEmpty);
     final scored = <(TileOption, double)>[];
     for (int i = 0; i < options.length; i++) {
       final option = options[i];
-      final template = _templates[keyOf(option)];
-      var shape = template == null ? 1.0 : patch.distanceTo(template);
+      final drawings = _templates[keyOf(option)];
+      var shape = drawings == null
+          ? 1.0
+          : drawings.map(patch.distanceTo).reduce(math.min);
       if (i == 0 && reference != null) {
         shape = math.min(shape, patch.distanceTo(reference));
       }
       final colourMiss =
           (relativeChroma - colours.expected(colourOf(option))).distanceSquared /
               (2 * colours.spread * colours.spread);
+      // Which sides the printing runs off, against which sides this option's
+      // track reaches. A hex whose track leaves by three sides looks quite
+      // unlike a bare one however similar the two are pixel for pixel.
+      final exits = exitsOf(option);
+      double exitMiss = 0;
+      for (int e = 0; e < 6; e++) {
+        final measured = patch.exits[e].clamp(0.0, 1.0);
+        final expected = exits[e] ?? 0.0;
+        final miss = measured - expected;
+        exitMiss += miss * miss;
+      }
       final score = -shape / _shapeScale -
-          0.5 * math.min(colourMiss, 4.0) -
-          _stepPenalty * option.steps;
+          0.5 * colourWeight * math.min(colourMiss, 4.0) -
+          _exitWeight * exitMiss -
+          stepPenalty * option.steps;
       scored.add((option, score));
     }
     scored.sort((a, b) => b.$2.compareTo(a.$2));
     final margin = scored.length < 2 ? 4.0 : scored[0].$2 - scored[1].$2;
     return TileReading(
       option: scored.first.$1,
-      confidence: 1 - math.exp(-margin / _marginScale),
+      confidence: confidenceFor(margin),
       ranked: scored,
     );
   }
+
+  /// How sure a lead of [margin] (in units of evidence) makes a reading.
+  static double confidenceFor(double margin) =>
+      1 - math.exp(-margin / _marginScale);
 
   /// A difference in mean squared darkness of this much counts as one unit
   /// of evidence. Track covering a tenth of a hex that is there in one
@@ -148,8 +177,12 @@ class TileClassifier {
   static const double _shapeScale = 0.02;
 
   /// Evidence against each upgrade step, since most hexes are unchanged
-  /// between one photo and the next.
+  /// between one photo and the next. `BoardReader` softens this for a hex it
+  /// has never seen, where there is no "unchanged" to speak of.
   static const double _stepPenalty = 1.0;
+
+  /// Weight on each side's track agreeing with the photo.
+  static const double _exitWeight = 2.0;
 
   /// How big a lead one option needs over the next before the reading counts
   /// as settled. Printed map art the renderer doesn't draw -- lakes, hill

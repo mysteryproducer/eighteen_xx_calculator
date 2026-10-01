@@ -156,17 +156,20 @@ class BoardGraph {
             StationEndpoint(:final stationIndex) => stationPort(hex, stationIndex),
           };
       for (final seg in def.segments) {
+        // Track printed for a line that hasn't opened yet carries nothing.
+        if (seg.future) continue;
         link(portFor(seg.a), portFor(seg.b));
       }
       // Join this tile's track to the neighbouring tile's track where both
       // sides of a hex boundary carry track.
+      final reachable = def.routableEdges;
       for (int edge = 0; edge < 6; edge++) {
-        if (!def.touchesEdge(edge)) continue;
+        if (!reachable.contains(edge)) continue;
         final neighbour = Board.neighborOf(hex, edge);
         final neighbourDef = rotated[neighbour];
         if (neighbourDef == null) continue;
         final opposite = HexGeometry.oppositeEdge(edge);
-        if (!neighbourDef.touchesEdge(opposite)) continue;
+        if (!neighbourDef.routableEdges.contains(opposite)) continue;
         if (def.impassable.contains(edge) ||
             neighbourDef.impassable.contains(opposite)) {
           continue;

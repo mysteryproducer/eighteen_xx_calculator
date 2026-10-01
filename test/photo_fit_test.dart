@@ -63,6 +63,27 @@ void main() {
     print('read ${readings.length} hexes in ${readWatch.elapsedMilliseconds} ms: '
         '${tiles.length} read as tiles (${tiles.map((r) => '${r.hex.id}=${r.reading.option}').join(' ')}), '
         '${doubtful.length} doubtful (${doubtful.map((r) => '${r.hex.id} ${(r.reading.confidence * 100).round()}%').join(', ')})');
+    final glared = [
+      for (final r in readings)
+        if (r.glare > 0.3) '${r.hex.id} ${(r.glare * 100).round()}%',
+    ];
+    // ignore: avoid_print
+    print('glare: ${glared.isEmpty ? 'none' : glared.join(', ')}');
+    final tokens = [
+      for (final r in readings)
+        for (final t in r.tokens.values)
+          if (t.present) '${r.hex.id}=$t ${t.color}',
+    ];
+    // ignore: avoid_print
+    print('tokens seen: ${tokens.isEmpty ? 'none' : tokens.join(', ')}');
+    final tunnels = reader.readTunnels(
+        photo: photo, boardToImage: fit.boardToImage, hexes: fit.visible);
+    // ignore: avoid_print
+    print('tunnels: ${tunnels.isEmpty ? 'none' : tunnels.join(', ')}');
+    final mountains = reader.readMountains(
+        photo: photo, boardToImage: fit.boardToImage, hexes: fit.visible);
+    // ignore: avoid_print
+    print('mountains: ${mountains.isEmpty ? 'none' : mountains.join(', ')}');
 
     final out = img.Image.from(photo);
     for (final hex in fit.visible) {

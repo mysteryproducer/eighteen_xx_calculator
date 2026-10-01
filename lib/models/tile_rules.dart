@@ -148,6 +148,75 @@ class TileRules {
         '${fitting.isEmpty ? '' : '; ${fitting.length} other tiles do fit'}.';
   }
 
+  /// The hexes of the line [hex] belongs to, if it is printed for later
+  /// opening: [hex] and every such hex joined to it. 1844's Furka-Oberalp
+  /// line is one piece over five hexes, laid and lifted as one. Just [hex]
+  /// for any other hex.
+  List<MapHex> lineOf(MapHex hex) {
+    if (!hex.opensLater) return [hex];
+    final line = <MapHex>[hex];
+    final seen = {hex.coord};
+    for (int i = 0; i < line.length; i++) {
+      for (final c in line[i].coord.neighbors) {
+        final next = title.map.at(c);
+        if (next != null && next.opensLater && seen.add(c)) line.add(next);
+      }
+    }
+    return line;
+  }
+
+  /// The tile that opens the line printed on [hex], turned to fit it; null
+  /// if the hex isn't printed for later opening.
+  TileOption? openingOf(MapHex hex) {
+    if (!hex.opensLater) return null;
+    for (final o in _upgrades(hex, TileOption.printed)) {
+      return o;
+    }
+    return null;
+  }
+
+  /// The ways a tunnel can run through [hex], as pairs of sides: each turn
+  /// of the title's tunnel tiles whose ends both reach the map without
+  /// crossing a printed border. Empty where no tunnel can go.
+  List<(int, int)> tunnelPaths(MapHex hex) {
+    if (!title.tunnelHexes.contains(hex.id)) return const [];
+    final paths = <(int, int)>{};
+    for (final id in title.tunnelTiles) {
+      final tile = title.tiles[id];
+      if (tile == null) continue;
+      for (int r = 0; r < 6; r++) {
+        for (final seg in tile.rotated(r).segments) {
+          if (seg.a is! EdgeEndpoint || seg.b is! EdgeEndpoint) continue;
+          final a = (seg.a as EdgeEndpoint).edge, b = (seg.b as EdgeEndpoint).edge;
+          final ends = [a, b];
+          if (ends.any((e) =>
+              hex.printed.impassable.contains(e) ||
+              !title.map.contains(Board.neighborOf(hex.coord, e)))) {
+            continue;
+          }
+          paths.add(a < b ? (a, b) : (b, a));
+        }
+      }
+    }
+    return paths.toList()..sort((x, y) => x.$1 != y.$1 ? x.$1 - y.$1 : x.$2 - y.$2);
+  }
+
+  /// The revenue plates a mountain railway can put on [hex]; empty if none.
+  List<String> mountainPlates(MapHex hex) =>
+      title.mountainHexes.contains(hex.id) ? title.mountainPlates : const [];
+
+  /// The ways [tileId] can be turned that look different: a straight turned
+  /// three steps is the same straight.
+  List<int> distinctRotations(String tileId) {
+    final def = title.tiles[tileId];
+    if (def == null) return const [];
+    final seen = <String>{};
+    return [
+      for (int r = 0; r < 6; r++)
+        if (seen.add(_signature(def.rotated(r)))) r,
+    ];
+  }
+
   /// The content of [hex] if [option] is on it.
   TileDefinition? contentOf(MapHex hex, TileOption option) => option.isPrinted
       ? hex.printed
@@ -156,6 +225,27 @@ class TileRules {
   Iterable<TileOption> _upgrades(MapHex hex, TileOption from) sync* {
     final base = contentOf(hex, from);
     if (base == null) return;
+
+    // Track printed for a line that opens later: the only thing that ever
+    // goes here is the tile the game lays when it opens, which makes that
+    // same track real.
+    if (hex.opensLater) {
+      if (!from.isPrinted) return;
+      final wanted = hex.printed.edges;
+      for (final tile in title.tiles.values) {
+        if (!title.laidByGame.contains(tile.id)) continue;
+        if (tile.townCount != hex.printed.townCount) continue;
+        if (tile.cityCount != hex.printed.cityCount) continue;
+        for (int r = 0; r < 6; r++) {
+          final turned = tile.rotated(r);
+          if (turned.edges.length != wanted.length) continue;
+          if (!turned.edges.containsAll(wanted)) continue;
+          yield TileOption(tile.id, r);
+          break;
+        }
+      }
+      return;
+    }
     final nextColour = _nextColour(hex, from, base);
     if (nextColour == null) return;
     final requiredLabel = base.label ??
@@ -182,10 +272,6 @@ class TileRules {
   }
 
   TileColor? _nextColour(MapHex hex, TileOption from, TileDefinition base) {
-    if (hex.printed.color == TileColor.purple) {
-      // Special hexes take their own purple tiles, once.
-      return from.isPrinted ? TileColor.purple : null;
-    }
     final colour = from.isPrinted && base.color == TileColor.plain
         ? null
         : base.color;

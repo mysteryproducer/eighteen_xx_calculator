@@ -108,6 +108,17 @@ class GrayImage {
   }
 
   /// Area-averaged copy scaled by [scale] (< 1 to shrink).
+  /// The [width] x [height] part of this image whose top left is ([left],
+  /// [top]).
+  GrayImage cropped(int left, int top, int width, int height) {
+    final out = GrayImage(width, height);
+    for (int y = 0; y < height; y++) {
+      final from = (top + y) * this.width + left;
+      out.data.setRange(y * width, (y + 1) * width, data, from);
+    }
+    return out;
+  }
+
   GrayImage scaled(double scale) {
     final tw = math.max(1, (width * scale).round());
     final th = math.max(1, (height * scale).round());

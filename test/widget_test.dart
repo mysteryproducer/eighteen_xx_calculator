@@ -1,10 +1,13 @@
 import 'package:eighteen_xx_calculator/main.dart';
+import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/board_graph.dart';
 import 'package:eighteen_xx_calculator/models/game_session.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
+import 'package:eighteen_xx_calculator/models/tile_definition.dart';
 import 'package:eighteen_xx_calculator/screens/session_board.dart';
 import 'package:eighteen_xx_calculator/screens/session_list.dart';
 import 'package:eighteen_xx_calculator/widgets/board_map.dart';
+import 'package:eighteen_xx_calculator/widgets/tile_choices.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -50,14 +53,25 @@ Future<void> tapHex(WidgetTester tester, String hexId) => tapBoardAt(
 Future<void> tapStation(WidgetTester tester, String hexId) =>
     tapBoardAt(tester, title.map.byId(hexId)!.coord.boardCenter);
 
-/// Opens the tile list in the hex editor. The finder is scoped to the sheet
-/// so it can't pick up the company list on the board behind it.
-Future<void> openTilePicker(WidgetTester tester) async {
-  final picker = find.descendant(
-    of: find.byType(BottomSheet),
-    matching: find.byType(DropdownButton<String?>),
-  );
-  await tester.tap(picker);
+/// The drawn tile choices in the hex editor.
+Finder tileChoice(String label) => find.descendant(
+      of: find.byType(TileChoices),
+      matching: find.text(label),
+    );
+
+/// Picks a tile in the hex editor by what it is labelled, scrolling the row
+/// of choices along until it shows.
+Future<void> chooseTile(WidgetTester tester, String label) async {
+  // The choices run off the side of the screen, so scroll the row of tiles
+  // along until this one shows.
+  final tiles = find
+      .descendant(of: find.byType(TileChoices), matching: find.byType(ListView))
+      .first;
+  for (int i = 0; i < 15 && tileChoice(label).hitTestable().evaluate().isEmpty; i++) {
+    await tester.drag(tiles, const Offset(-220, 0));
+    await tester.pumpAndSettle();
+  }
+  await tester.tap(tileChoice(label).first);
   await tester.pumpAndSettle();
 }
 
@@ -74,11 +88,11 @@ void main() {
 
   setUp(() => store = FakeSessionStore());
 
-  /// The drawn 1844 board is bigger than a default test window, and taps
-  /// outside the window land nowhere.
+  /// The size a Mac window opens at, which is smaller than the drawn 1844
+  /// board: everything has to work in it without the user resizing anything.
   setUp(() {
     final view = TestWidgetsFlutterBinding.instance.platformDispatcher.views.first;
-    view.physicalSize = const Size(900, 1400);
+    view.physicalSize = const Size(800, 600);
     view.devicePixelRatio = 1;
     addTearDown(() {
       view.resetPhysicalSize();
@@ -217,6 +231,69 @@ void main() {
       expect(find.textContaining('1 photo'), findsOneWidget);
     });
 
+    testWidgets('every hex can be chosen, even when the map is bigger than '
+        'the window', (tester) async {
+      // The window is smaller than the drawn map; the far corners of the
+      // map must still take taps.
+      await openSession(tester);
+      await tester.tap(find.byIcon(Icons.center_focus_strong));
+      await tester.pumpAndSettle();
+      await tapHex(tester, 'K22'); // Bellinzona, near the south-east corner
+      await tapHex(tester, 'B19'); // Schaffhausen, at the top
+      expect(find.textContaining('2 chosen'), findsOneWidget);
+    });
+
+    testWidgets('a hex a tunnel can go through can be chosen', (tester) async {
+      await openSession(tester);
+      await tester.tap(find.byIcon(Icons.center_focus_strong));
+      await tester.pumpAndSettle();
+      await tapHex(tester, 'I12'); // Loetschberg: no tile, but a tunnel
+      expect(find.textContaining('1 chosen'), findsOneWidget);
+    });
+
+    testWidgets('a tunnel is set in the hex editor', (tester) async {
+      final session = await openSession(tester);
+      await tapHex(tester, 'I12');
+      expect(find.textContaining('a tunnel can be driven through'),
+          findsOneWidget);
+      await tester.tap(find.text('tunnel').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(session.tunnels['I12'], isNotNull);
+    });
+
+    testWidgets('a mountain a railway can climb can be chosen', (tester) async {
+      await openSession(tester);
+      await tester.tap(find.byIcon(Icons.center_focus_strong));
+      await tester.pumpAndSettle();
+      await tapHex(tester, 'G14'); // Pilatus: no tile, but a mountain railway
+      expect(find.textContaining('1 chosen'), findsOneWidget);
+    });
+
+    testWidgets('a plate a photo found is named in the hex editor',
+        (tester) async {
+      final session = await openSession(tester, setUp: (session) {
+        session.mountains['G14'] = GameSession.unknownPlate;
+        session.mountainDoubts.add('G14');
+      });
+      expect(find.textContaining('1 mountain railway to check'),
+          findsOneWidget);
+      await tapHex(tester, 'G14');
+      expect(find.textContaining('a mountain railway can put'), findsOneWidget);
+      expect(find.textContaining('but not which one'), findsOneWidget);
+      // The plates are shown as printed, by what they pay: XM2 is the one
+      // paying 40 in green.
+      await tester.tap(find.ancestor(
+          of: find.text('40'), matching: find.byType(ChoiceChip)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(session.mountains['G14'], 'XM2');
+      expect(session.mountainDoubts, isEmpty);
+      expect(find.textContaining('to check'), findsNothing);
+    });
+
     testWidgets('a hex that never changes cannot be chosen', (tester) async {
       await openSession(tester);
       await tester.tap(find.byIcon(Icons.center_focus_strong));
@@ -224,6 +301,34 @@ void main() {
       await tapHex(tester, 'M18'); // a red off-board area
       expect(find.textContaining('never changes'), findsOneWidget);
       expect(find.textContaining('chosen'), findsNothing);
+    });
+
+    testWidgets("a token naming a company the game doesn't have is up for "
+        'checking', (tester) async {
+      final session = await openSession(tester, setUp: (session) {
+        final stans = title.map.byId('G18')!;
+        session.tokens['${stans.coord.row}_${stans.coord.col}_0'] = 'white';
+      });
+      expect(session.tokenDoubts, hasLength(1));
+      expect(find.textContaining('1 token to check'), findsOneWidget);
+    });
+
+    testWidgets('colours can be calibrated, and the calibration forgotten',
+        (tester) async {
+      final session = await openSession(tester, setUp: (session) {
+        session.colourProfile = ColourProfile(
+            colours: const {TileColor.yellow: Offset(0.02, 0.15)},
+            measured: DateTime(2026, 10, 1));
+      });
+      await tester.tap(find.byTooltip('More'));
+      await tester.pumpAndSettle();
+      expect(find.text('Recalibrate colours'), findsOneWidget);
+      await tester.tap(find.text('Forget colour calibration'));
+      await tester.pumpAndSettle();
+      expect(session.colourProfile, isNull);
+      await tester.tap(find.byTooltip('More'));
+      await tester.pumpAndSettle();
+      expect(find.text('Calibrate colours'), findsOneWidget);
     });
 
     testWidgets('the board summarises what is on it', (tester) async {
@@ -253,20 +358,22 @@ void main() {
     testWidgets('the editor offers the tiles the rules allow', (tester) async {
       await openSession(tester);
       await tapHex(tester, 'C12');
-      // Basel is a printed city, so city tiles are offered and track tiles
-      // are not.
-      await openTilePicker(tester);
-      expect(find.text('Tile 57').hitTestable(), findsWidgets);
-      expect(find.text('Tile 9'), findsNothing);
+      // The choices are drawn, turned the way they would be laid, rather
+      // than listed by number.
+      expect(find.byType(TileChoices), findsOneWidget);
+      expect(tileChoice('none'), findsOneWidget);
+      // Basel is a printed city, so city tiles are on offer...
+      await chooseTile(tester, '57');
+      expect(find.byIcon(Icons.warning_amber), findsNothing);
+      // ...and the count says how many the rules allow.
+      expect(find.textContaining('the rules allow here'), findsOneWidget);
     });
 
     testWidgets('setting a tile by hand updates the board and saves it',
         (tester) async {
       final session = await openSession(tester);
       await tapHex(tester, 'C12');
-      await openTilePicker(tester);
-      await tester.tap(find.text('Tile 57').hitTestable().last);
-      await tester.pumpAndSettle();
+      await chooseTile(tester, '57');
       await tester.tap(find.text('Apply'));
       await tester.pumpAndSettle();
 
@@ -276,6 +383,105 @@ void main() {
       expect(store.sessions.values.single.tileAt(basel)?.tileId, '57');
     });
 
+    testWidgets('a hex already holding a yellow tile still offers the others',
+        (tester) async {
+      // Langnau holds a 58; if that was misread, the right one has to be on
+      // offer -- not just the 58 and what could follow it.
+      final session = await openSession(tester, setUp: (session) {
+        session.setManually(
+            title.map.byId('F13')!, const PlacedTile('58', rotation: 4));
+      });
+      await tapHex(tester, 'F13');
+      await chooseTile(tester, '4');
+      expect(find.byIcon(Icons.warning_amber), findsNothing);
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(session.tileAt(title.map.byId('F13')!)?.tileId, '4');
+    });
+
+    testWidgets('a tile is chosen first, then which way round', (tester) async {
+      // Sarnen, a printed town, has the Pilatus railway's printed track
+      // running up to its west side.
+      final sarnen = title.map.byId('G16')!;
+      final pilatus = title.map.byId('G14')!;
+      final session = await openSession(tester);
+      await tapHex(tester, 'G16');
+      await chooseTile(tester, '4');
+      // The way that joins the track already there comes first, and is what
+      // picking the tile gives.
+      expect(find.text('Turned:'), findsOneWidget);
+      expect(find.text('joins 1'), findsOneWidget);
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      final towardsPilatus = [
+        for (int e = 0; e < 6; e++)
+          if (Board.neighborOf(sarnen.coord, e) == pilatus.coord) e,
+      ].single;
+      expect(
+          title.tiles['4']!.rotated(session.tileAt(sarnen)!.rotation).edges,
+          contains(towardsPilatus));
+
+      // Any other way round is a second tap.
+      await tapHex(tester, 'G16');
+      await tester.tap(find.textContaining('turn ').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(
+          title.tiles['4']!.rotated(session.tileAt(sarnen)!.rotation).edges,
+          isNot(contains(towardsPilatus)));
+    });
+
+    testWidgets('the Furka-Oberalp line is laid and taken up as one piece',
+        (tester) async {
+      final session = await openSession(tester);
+      final line = ['H17', 'H19', 'H21', 'H23', 'I16'];
+      await tapHex(tester, 'H17');
+      expect(find.textContaining('one piece'), findsOneWidget);
+      await chooseTile(tester, 'OP3');
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      for (final id in line) {
+        expect(session.tileAt(title.map.byId(id)!)?.tileId, startsWith('OP'),
+            reason: id);
+      }
+      // And lifted again from any of its hexes.
+      await tapHex(tester, 'H21');
+      await chooseTile(tester, 'none');
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      for (final id in line) {
+        expect(session.tileAt(title.map.byId(id)!), isNull, reason: id);
+      }
+    });
+
+    testWidgets('a photo that disagrees with the user is offered, not taken',
+        (tester) async {
+      final langnau = title.map.byId('F13')!;
+      final session = await openSession(tester, setUp: (session) {
+        session.setManually(langnau, const PlacedTile('58', rotation: 4));
+        session.recordReading(langnau,
+            tile: const PlacedTile('4', rotation: 1),
+            confidence: 0.85,
+            source: HexSource.closeUp);
+      });
+      expect(session.tileAt(langnau)?.tileId, '58');
+      expect(find.textContaining('something other than what you set'),
+          findsOneWidget);
+      await tester.tap(find.text('Review'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('The photo shows tile 4 turned 1'),
+          findsOneWidget);
+      await tester.tap(find.text('Use that'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(session.tileAt(langnau)?.tileId, '4');
+      expect(session.suggestedHexes(title.map), isEmpty);
+      expect(find.textContaining('something other than what you set'),
+          findsNothing);
+    });
+
     testWidgets('a tile that cannot belong on a hex is flagged', (tester) async {
       await openSession(tester);
       await tapHex(tester, 'F13'); // Langnau, a printed town
@@ -283,11 +489,8 @@ void main() {
       // through the hex wrong, so the editor says what is off.
       await tester.tap(find.textContaining('Show every tile'));
       await tester.pumpAndSettle();
-      await openTilePicker(tester);
-      // Tile 5 is a city tile, and near the top of the list so the dropdown
-      // doesn't have to be scrolled.
-      await tester.tap(find.text('Tile 5').hitTestable().last);
-      await tester.pumpAndSettle();
+      // Tile 5 carries a city, which a town hex can't take.
+      await chooseTile(tester, '5');
       expect(find.textContaining('F13'), findsWidgets);
       expect(find.textContaining('town'), findsWidgets);
       expect(find.byIcon(Icons.warning_amber), findsOneWidget);
@@ -312,6 +515,28 @@ void main() {
       await tapStation(tester, 'C12'); // Basel's printed city
       expect(find.textContaining('City on C12 Basel'), findsOneWidget);
       expect(find.text('Station token'), findsOneWidget);
+      // The title's own companies, not a set of plain colours.
+      expect(find.text('SCB'), findsOneWidget);
+      expect(find.text('BLS'), findsOneWidget);
+      expect(find.text('Red'), findsNothing);
+    });
+
+    testWidgets('a token whose company was guessed is flagged until settled',
+        (tester) async {
+      final session = await openSession(tester, setUp: (session) {
+        final basel = title.map.byId('C12')!;
+        final id = '${basel.coord.row}_${basel.coord.col}_0';
+        session.tokens[id] = 'SCB';
+        session.tokenDoubts.add(id);
+      });
+      expect(find.textContaining('1 token to check'), findsOneWidget);
+      await tapStation(tester, 'C12');
+      expect(find.textContaining('whose it is was a guess'), findsOneWidget);
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(session.tokenDoubts, isEmpty);
+      expect(session.tokens.values, ['SCB']);
+      expect(find.textContaining('to check'), findsNothing);
     });
   });
 
@@ -337,11 +562,12 @@ void main() {
         session.setManually(basel, const PlacedTile('57', rotation: eastWest));
         session.setManually(
             title.map.byId('C14')!, const PlacedTile('4', rotation: eastWest));
-        session.tokens['${basel.coord.row}_${basel.coord.col}_0'] = 'red';
+        // Basel is the Centralbahn's home.
+        session.tokens['${basel.coord.row}_${basel.coord.col}_0'] = 'SCB';
       });
       await tester.tap(find.text('Any company'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Red').hitTestable().last);
+      await tester.tap(find.textContaining('SCB').hitTestable().last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Find route'));
       await tester.pumpAndSettle();

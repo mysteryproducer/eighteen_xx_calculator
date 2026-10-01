@@ -109,6 +109,45 @@ void main() {
       }
     });
 
+    group('a line that opens later', () {
+      test('takes the tile the game lays when it opens', () {
+        // 1844's Gotthard tunnel: the track is printed faintly from the
+        // start, and the game makes it real in a later phase.
+        final tunnel = title.map.byId('H19')!;
+        expect(tunnel.opensLater, isTrue);
+        expect(tunnel.takesTiles, isTrue);
+        final options = rules.options(tunnel, null, maxSteps: 1);
+        expect(options.length, 2, reason: 'as printed, or opened');
+        final opened = options.last;
+        expect(title.laidByGame, contains(opened.tileId));
+        // The tile makes exactly the track that was printed.
+        expect(rules.contentOf(tunnel, opened)!.edges, tunnel.printed.edges);
+      });
+
+      test('the town on the tunnel keeps its town', () {
+        final andermatt = title.map.byId('H17')!; // printed town + future track
+        final opened = rules.options(andermatt, null, maxSteps: 1).last;
+        expect(rules.contentOf(andermatt, opened)!.townCount, 1);
+        expect(rules.contentOf(andermatt, opened)!.edges,
+            andermatt.printed.edges);
+      });
+
+      test('nothing else is offered there, and nothing follows it', () {
+        final tunnel = title.map.byId('H19')!;
+        final opened = rules.options(tunnel, null, maxSteps: 1).last;
+        expect(tunnel.printed.color, TileColor.purple);
+        expect(rules.options(tunnel, opened.placed, maxSteps: 2),
+            [TileOption(opened.tileId, opened.rotation)]);
+      });
+
+      test('a purple hex with nothing printed on it takes no tile', () {
+        // Albula and the other markers: colour alone doesn't mean a tile.
+        final marker = title.map.byId('H27')!;
+        expect(marker.opensLater, isFalse);
+        expect(marker.takesTiles, isFalse);
+      });
+    });
+
     test('hexes that never take tiles offer only what is printed', () {
       expect(rules.options(title.map.byId('M18')!, null), // red off-board
           [TileOption.printed]);
@@ -183,6 +222,36 @@ void main() {
       }));
       // And each records how many lays away it is.
       expect(deep.where((o) => o.tileId == '14').first.steps, 2);
+    });
+  });
+
+  group('tunnels', () {
+    test('a tunnel can run any way a tunnel tile turns, but not across a '
+        'printed border or off the map', () {
+      // Gotthard: its south-west side is printed impassable.
+      final paths = rules.tunnelPaths(title.map.byId('H19')!);
+      expect(paths, contains((2, 5))); // Stans to I20, straight through
+      expect(paths, contains((1, 4)));
+      expect(paths.any((p) => p.$1 == 0 || p.$2 == 0), isFalse);
+      // Straight through or a gentle bend, never a sharp one.
+      expect(paths.every((p) => (p.$2 - p.$1) % 6 == 2 ||
+          (p.$2 - p.$1) % 6 == 3 || (p.$2 - p.$1) % 6 == 4), isTrue);
+    });
+
+    test('only the tunnel hexes take tunnels', () {
+      expect(rules.tunnelPaths(title.map.byId('F13')!), isEmpty);
+      expect(rules.tunnelPaths(title.map.byId('I12')!), isNotEmpty);
+    });
+  });
+
+  group('mountain railways', () {
+    test('any of the plates can go on a mountain, and only on a mountain',
+        () {
+      expect(rules.mountainPlates(title.map.byId('G14')!), // Pilatus
+          ['XM1', 'XM2', 'XM3']);
+      expect(rules.mountainPlates(title.map.byId('F13')!), isEmpty);
+      // Gotthard is a mountain to tunnel through, not one to climb.
+      expect(rules.mountainPlates(title.map.byId('H19')!), isEmpty);
     });
   });
 }

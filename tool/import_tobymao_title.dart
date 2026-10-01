@@ -4,13 +4,13 @@
 //
 //   dart run tool/import_tobymao_title.dart 1844
 //
-// fetches lib/engine/game/g_1844/{map,tiles,meta}.rb and the shared
+// fetches lib/engine/game/g_1844/{map,tiles,meta,entities}.rb and the shared
 // lib/engine/config/tile.rb, and writes lib/titles/title_1844.dart. The Ruby
 // files are plain constant hashes, so a small reader for Ruby literals is
 // enough; nothing is executed.
 //
-// Pass `--from <dir>` to read map.rb, tiles.rb, meta.rb and tile.rb from a
-// local directory instead of fetching them.
+// Pass `--from <dir>` to read map.rb, tiles.rb, meta.rb, entities.rb and
+// tile.rb from a local directory instead of fetching them.
 import 'dart:convert';
 import 'dart:io';
 
@@ -44,6 +44,7 @@ Future<void> main(List<String> args) async {
   }
   final tilesSource = await load('tiles.rb', '$gameDir/tiles.rb');
   final metaSource = await load('meta.rb', '$gameDir/meta.rb');
+  final entitiesSource = await load('entities.rb', '$gameDir/entities.rb');
   final standardSource = await load('tile.rb', '$_base/config/tile.rb');
   if (standardSource == null) {
     stderr.writeln('Could not load the standard tile list (config/tile.rb)');
@@ -54,6 +55,9 @@ Future<void> main(List<String> args) async {
   final tiles = tilesSource == null ? map : RubyConstants.parse(tilesSource);
   final standard = RubyConstants.parse(standardSource);
   final meta = metaSource == null ? RubyConstants({}) : RubyConstants.parse(metaSource);
+  final entities = entitiesSource == null
+      ? RubyConstants({})
+      : RubyConstants.parse(entitiesSource);
 
   if (map['LAYOUT'] != 'pointy') {
     stderr.writeln('$title uses a ${map['LAYOUT']} layout; only pointy-top '
@@ -97,9 +101,11 @@ Future<void> main(List<String> args) async {
       }
       (color, code) = standardTile;
     }
-    // Hidden tiles are laid by the game itself, not by players.
-    if (hidden) return;
-    tileEntries.add("    TileData('$id', '$color', ${_dartString(code)}, count: $count),");
+    // Tiles marked hidden are laid by the game itself rather than by a
+    // player -- 1844's Gotthard tunnel opening, say -- but they do appear on
+    // the board, so they are imported and marked.
+    tileEntries.add("    TileData('$id', '$color', ${_dartString(code)}, "
+        "count: $count${hidden ? ', laidByGame: true' : ''}),");
   });
 
   final names = (map['LOCATION_NAMES'] as Map?) ?? {};
@@ -121,6 +127,64 @@ Future<void> main(List<String> args) async {
     });
   });
 
+  // The companies whose station tokens go on the board, with their token
+  // colours and home cities, for recognising tokens in photos.
+  final companyEntries = <String>[];
+  void addCompany(Map company) {
+    final sym = company['sym'];
+    if (sym == null) return;
+    var home = company['coordinates'];
+    if (home is List) home = home.isEmpty ? null : home.first;
+    final city = (company['city'] as num?)?.toInt();
+    final text = company['text_color'] as String?;
+    final kind = company['type'] as String?;
+    companyEntries.add("    CompanyData('$sym', "
+        "${_dartString('${company['name'] ?? sym}')}, "
+        "${_dartString('${company['color'] ?? 'white'}')}"
+        "${text == null ? '' : ', textColor: ${_dartString(text)}'}"
+        "${home == null ? '' : ", home: '$home'"}"
+        "${city == null ? '' : ', homeCity: $city'}"
+        "${kind == null ? '' : ', kind: ${_dartString(kind)}'}),");
+  }
+
+  for (final list in [entities['CORPORATIONS'], entities['MINORS']]) {
+    if (list is! List) continue;
+    for (final company in list) {
+      if (company is Map) addCompany(company);
+    }
+  }
+  // 1854 builds its local railways in code from three parallel lists rather
+  // than writing them out; the lists themselves are plain data.
+  final localNames = entities['LOCAL_NAMES'];
+  final localHomes = entities['LOCAL_COORDINATES'];
+  final localCities = entities['LOCAL_CITIES'];
+  if (entities['MINORS'] is! List &&
+      localNames is List &&
+      localHomes is List &&
+      localNames.length == localHomes.length) {
+    for (int i = 0; i < localNames.length; i++) {
+      addCompany({
+        'sym': '${i + 1}',
+        'name': localNames[i],
+        'coordinates': localHomes[i],
+        if (localCities is List && i < localCities.length) 'city': localCities[i],
+        'color': '#000000',
+        'type': 'minor',
+      });
+    }
+  }
+
+  // 1844's tunnels: the hexes a tunnel company may tunnel through, and the
+  // tiles whose narrow track shows which ways a tunnel can run.
+  final tunnelHexes = entities['TUNNEL_HEXES'];
+  final tunnelTiles = entities['TUNNEL_TILES'];
+  // And its mountain railways: the mountains a revenue plate can be assigned
+  // to, and the plates.
+  final mountainHexes = entities['MOUNTAIN_HEXES'];
+  final mountainTiles = entities['MOUNTAIN_TILES'];
+  String words(Object? list) =>
+      list is List ? list.map((w) => "'$w'").join(', ') : '';
+
   final location = meta['GAME_LOCATION'] as String?;
   final designer = meta['GAME_DESIGNER'] as String?;
   final out = StringBuffer()
@@ -141,12 +205,27 @@ Future<void> main(List<String> args) async {
     ..writeln('  tiles: [')
     ..writeAll(tileEntries.map((e) => '$e\n'))
     ..writeln('  ],')
+    ..writeln('  companies: [')
+    ..writeAll(companyEntries.map((e) => '$e\n'))
+    ..writeln('  ],')
+    ..writeln(tunnelHexes is List
+        ? '  tunnelHexes: [${words(tunnelHexes)}],'
+        : '  tunnelHexes: [],')
+    ..writeln(tunnelTiles is List
+        ? '  tunnelTiles: [${words(tunnelTiles)}],'
+        : '  tunnelTiles: [],')
+    ..writeln(mountainHexes is List
+        ? '  mountainHexes: [${words(mountainHexes)}],'
+        : '  mountainHexes: [],')
+    ..writeln(mountainTiles is List
+        ? '  mountainTiles: [${words(mountainTiles)}],'
+        : '  mountainTiles: [],')
     ..writeln(');');
 
   final path = 'lib/titles/title_$title.dart';
   File(path).writeAsStringSync(out.toString());
   stdout.writeln('Wrote $path: ${hexEntries.length} hexes, '
-      '${tileEntries.length} tiles.');
+      '${tileEntries.length} tiles, ${companyEntries.length} companies.');
 }
 
 Future<String?> _fetch(String url) async {

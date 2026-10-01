@@ -107,6 +107,32 @@ void main() {
       expect(fit!.visible, contains(target));
       expect(worstError(fit, truth.then(crop), fit.visible), lessThan(0.25));
     });
+
+    test('a close-up framed a hex off is put right by what is printed where',
+        () async {
+      // Asked for Andermatt (H17), the user lined the outline up on the hex
+      // next door (H15): the grid looks the same either way, but the grey
+      // mountain railways and purple tunnels around Andermatt don't.
+      final target = title.map.byId('H17')!.coord;
+      final framed = title.map.byId('H15')!.coord;
+      const closeRadius = 120.0;
+      final close = await drawBoard(title.map, hexRadius: closeRadius);
+      final truth = boardToDrawn(title.map, closeRadius);
+      final centre = truth.apply(framed.boardCenter);
+      const size = 900;
+      final crop = Homography.similarity(
+        translation: Offset(size / 2 - centre.dx, size / 2 - centre.dy),
+      );
+      final photo = warp(close, crop, width: size, height: size);
+      final guess = Homography.similarity(
+        scale: 0.14 * size,
+        translation: const Offset(size / 2, size / 2) -
+            target.boardCenter * (0.14 * size),
+      );
+      final fit = GridDetector(title.map).fitCloseUp(photo, guess, target);
+      expect(fit, isNotNull);
+      expect(worstError(fit!, truth.then(crop), fit.visible), lessThan(0.25));
+    });
   });
 
   group('snapping a hand-made alignment', () {

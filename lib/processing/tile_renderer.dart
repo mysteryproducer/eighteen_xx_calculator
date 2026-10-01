@@ -30,43 +30,62 @@ class TileRenderer {
         TileColor.purple => const Color(0xFFB39DDB),
       };
 
-  /// Where a station sits inside the hex: at the centre normally, or nudged
-  /// toward the edges it serves when a tile carries more than one station.
+  /// Where a stop sits inside the hex.
+  ///
+  /// Proportions follow tobymao/18xx's own tile rendering (MIT licensed),
+  /// measured against a hex of circumradius 100: a stop with a `loc:` sits 50
+  /// out towards that side (or towards the corner, for a half number), and a
+  /// city slot is a circle of radius 25. Getting this right matters most on
+  /// the complex tiles -- the two- and three-city tiles where guessing puts
+  /// the cities in the wrong places entirely.
   static Offset stationPosition(
     TileDefinition def,
     int stationIndex,
     Offset center,
     double radius,
   ) {
-    if (def.stations.length < 2) return center;
-    final directions = <Offset>[];
-    for (final seg in def.segments) {
-      final endpoints = [seg.a, seg.b];
-      final touchesStation = endpoints.any(
-          (e) => e is StationEndpoint && e.stationIndex == stationIndex);
-      if (!touchesStation) continue;
-      for (final e in endpoints) {
-        if (e is EdgeEndpoint) {
-          final mid = HexGeometry.edgeMidpoint(center, radius, e.edge);
-          directions.add(mid - center);
-        }
-      }
-    }
-    if (directions.isEmpty) return center;
-    var sum = Offset.zero;
-    for (final d in directions) {
-      sum += d;
-    }
-    final avg = sum / directions.length.toDouble();
-    final len = avg.distance;
-    if (len < 0.01) return center;
-    return center + (avg / len) * (radius * 0.42);
+    final station = def.stations.firstWhere((s) => s.index == stationIndex,
+        orElse: () => def.stations.first);
+    final loc = station.loc;
+    if (loc != null) return center + _locDirection(loc) * (radius * _locDistance);
+    // No `loc:`: the middle, but two stops can't both be in the middle.
+    final centred = def.stations.where((s) => s.loc == null).toList();
+    if (centred.length < 2) return center;
+    final place = centred.indexWhere((s) => s.index == stationIndex);
+    final spread = radius * 0.42;
+    return center +
+        Offset(math.cos(_centredAngle), math.sin(_centredAngle)) *
+            (spread * (place * 2 / (centred.length - 1) - 1));
   }
 
-  /// Paints [def] centered in a [size] x [size] square.
-  static void paint(Canvas canvas, TileDefinition def, double size) {
+  /// A stop's `loc:` as a direction from the middle of the hex: towards a
+  /// side's middle for a whole number, towards the corner between two sides
+  /// for a half.
+  static Offset _locDirection(double loc) {
+    final whole = loc.floor();
+    if ((loc - whole).abs() < 0.01) return HexGeometry.edgeNormal(whole);
+    // Side k runs between corners k and k + 1, so the corner between sides
+    // k and k + 1 is corner k + 1.
+    final corner = HexGeometry.vertex(Offset.zero, 1, whole + 1);
+    return corner / corner.distance;
+  }
+
+  /// How far out a stop with a `loc:` sits, as a share of the circumradius.
+  static const double _locDistance = 0.5;
+
+  /// Stops sharing the middle are spread along this line.
+  static const double _centredAngle = 0.5235987755982988; // 30 degrees
+
+  /// The hex's circumradius as a share of the square a tile is drawn in.
+  static const double radiusShare = 0.48;
+
+  /// Paints [def] centered in a [size] x [size] square. [slotTurn] turns
+  /// the row of slots of a city in the middle further, for recognition to
+  /// try each way it could be printed.
+  static void paint(Canvas canvas, TileDefinition def, double size,
+      {int slotTurn = 0}) {
     final center = Offset(size / 2, size / 2);
-    final radius = size * 0.48;
+    final radius = size * radiusShare;
 
     // Hex body.
     final hexPath = Path();
@@ -109,65 +128,292 @@ class TileRenderer {
             stationPosition(def, stationIndex, center, radius),
         };
 
-    // Track. Segments bend toward the hex centre, which makes straights
-    // straight and turns curve the way real tile art does.
+    // Track. A run between two sides is a circular arc that meets each side
+    // square on, which is how tiles are actually drawn: a tight turn hugs the
+    // corner the two sides share and never approaches the middle of the hex.
+    // Bending everything through the centre instead -- which this used to do
+    // -- makes every curve too wide, and a photographed curve then matches no
+    // template well.
     final trackPaint = Paint()
       ..color = trackColor
       ..style = PaintingStyle.stroke
       ..strokeWidth = size * 0.09
       ..strokeCap = StrokeCap.round;
+    // Track for a line that hasn't opened yet is printed faintly on the map,
+    // so it is drawn faintly here: recognition compares against what the hex
+    // looks like, not what a train can use.
+    final futurePaint = Paint()
+      ..color = trackColor.withValues(alpha: 0.45)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = size * 0.05
+      ..strokeCap = StrokeCap.round;
+    // Narrow track -- 1844's tunnels -- is drawn as the tunnel pieces are
+    // printed: a black band broken by white dashes, over whatever else is
+    // on the hex.
+    final tunnels = <Path>[];
     for (final seg in def.segments) {
-      final from = positionOf(seg.a);
-      final to = positionOf(seg.b);
-      final path = Path()..moveTo(from.dx, from.dy);
-      if (seg.a is EdgeEndpoint && seg.b is EdgeEndpoint) {
-        path.quadraticBezierTo(center.dx, center.dy, to.dx, to.dy);
-      } else {
-        path.lineTo(to.dx, to.dy);
+      final paint = seg.future ? futurePaint : trackPaint;
+      if (seg.narrow) {
+        if (seg.a case EdgeEndpoint(edge: final a)) {
+          if (seg.b case EdgeEndpoint(edge: final b)) {
+            tunnels.add(_runPath(center, radius, a, b));
+            continue;
+          }
+        }
       }
-      canvas.drawPath(path, trackPaint);
+      if (seg.a case EdgeEndpoint(edge: final a)) {
+        if (seg.b case EdgeEndpoint(edge: final b)) {
+          _paintRun(canvas, center, radius, a, b, paint);
+          continue;
+        }
+      }
+      final path = Path()
+        ..moveTo(positionOf(seg.a).dx, positionOf(seg.a).dy)
+        ..lineTo(positionOf(seg.b).dx, positionOf(seg.b).dy);
+      canvas.drawPath(path, paint);
     }
 
-    // Revenue centres: cities are open circles, towns are filled bars/dots.
-    for (final station in def.stations) {
-      final pos = stationPosition(def, station.index, center, radius);
-      if (station.kind == StationKind.city) {
-        final r = size * (station.slots > 1 ? 0.15 : 0.13);
-        if (station.slots > 1) {
-          // Multi-slot cities are drawn as a stadium shape, as on real tiles.
-          final rect = Rect.fromCenter(
-            center: pos,
-            width: r * 2 * station.slots,
-            height: r * 2,
-          );
-          final rrect = RRect.fromRectAndRadius(rect, Radius.circular(r));
-          canvas.drawRRect(rrect, Paint()..color = Colors.white);
-          canvas.drawRRect(
-            rrect,
-            Paint()
-              ..color = trackColor
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = size * 0.03,
-          );
-        } else {
-          canvas.drawCircle(pos, r, Paint()..color = Colors.white);
-          canvas.drawCircle(
-            pos,
-            r,
-            Paint()
-              ..color = trackColor
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = size * 0.03,
-          );
+    for (final tunnel in tunnels) {
+      canvas.drawPath(
+          tunnel,
+          Paint()
+            ..color = trackColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = size * 0.07);
+      final dash = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = size * 0.035;
+      for (final metric in tunnel.computeMetrics()) {
+        final step = size * 0.065;
+        for (double d = step / 2; d < metric.length; d += 2 * step) {
+          canvas.drawPath(metric.extractPath(d, d + step), dash);
         }
-      } else {
-        canvas.drawCircle(pos, size * 0.07, Paint()..color = trackColor);
+      }
+    }
+
+    // Revenue centres. A city is a ring per token slot; a town is a bar
+    // across its track where it has one or two, and a dot otherwise, which is
+    // how tiles are actually printed.
+    for (final station in def.stations) {
+      if (station.style == 'hidden') continue;
+      final pos = stationPosition(def, station.index, center, radius);
+      switch (station.kind) {
+        case StationKind.city:
+          _paintCity(canvas, def, station, pos, center, size, radius, slotTurn);
+        case StationKind.town:
+          _paintTown(canvas, def, station, pos, center, size, radius);
+        case StationKind.offboard:
+          break; // the hex's own colour says what it is
       }
     }
   }
 
+  /// A token slot's radius, as a share of the circumradius, for [station].
+  /// Measured on 1844's tiles: a third of the hex for a city of one slot, a
+  /// little less where two share a city. (tobymao draws them at a quarter,
+  /// which made every city tile a poor match for its photo.)
+  static double slotRadiusFor(TileStation station) =>
+      station.slots > 1 ? 0.30 : 0.33;
+
+  /// Which way the row of slots of a city in the middle of a tile runs when
+  /// the tile isn't turned, in degrees clockwise from east, as the tiles are
+  /// printed. Measured on 1844's: 15, 619 and 611 one way, 14 another.
+  /// Recognition doesn't rely on it -- it tries every way -- but the board
+  /// and the editor draw tiles the way they look.
+  static const Map<String, double> _slotRows = {'14': 0};
+  static const double _defaultSlotRow = 120;
+
+  /// Whether [def] has a city of several slots in its middle, whose row of
+  /// slots can run three ways.
+  static bool hasSlotRow(TileDefinition def) => def.stations.any((s) =>
+      s.kind == StationKind.city && s.slots > 1 && s.loc == null &&
+      def.stations.where((t) => t.loc == null).length == 1);
+
+  /// Where each token slot of city [stationIndex] sits, for a hex of
+  /// circumradius [radius] centred on [center]. A city in the middle has its
+  /// slots in a row that turns with the tile (see [_slotRows]), turned a
+  /// further [extraTurn] sixths; a city off to one side has them across the
+  /// direction it faces.
+  static List<Offset> slotPositions(
+    TileDefinition def,
+    int stationIndex,
+    Offset center,
+    double radius, {
+    int extraTurn = 0,
+  }) {
+    final station = def.stations.firstWhere((s) => s.index == stationIndex,
+        orElse: () => def.stations.first);
+    final pos = stationPosition(def, stationIndex, center, radius);
+    final slots = math.max(1, station.slots);
+    if (slots == 1) return [pos];
+    final Offset row;
+    if (pos == center) {
+      final degrees = (_slotRows[def.id] ?? _defaultSlotRow) +
+          60.0 * (station.turn + extraTurn);
+      row = Offset(math.cos(degrees * math.pi / 180),
+          math.sin(degrees * math.pi / 180));
+    } else {
+      final outward = (pos - center) / (pos - center).distance;
+      row = Offset(-outward.dy, outward.dx);
+    }
+    final r = radius * slotRadiusFor(station);
+    if (slots == 2) return [pos - row * r, pos + row * r];
+    // Three or more: round the middle, starting across the row.
+    final ring = r * (slots == 3 ? 1.16 : 1.42);
+    final start = math.atan2(row.dy, row.dx) - math.pi / 2;
+    return [
+      for (int i = 0; i < slots; i++)
+        pos + Offset(math.cos(start + 2 * math.pi * i / slots),
+                math.sin(start + 2 * math.pi * i / slots)) *
+            ring,
+    ];
+  }
+
+  /// A city: one ring per token slot, in a row facing out of the hex.
+  static void _paintCity(
+    Canvas canvas,
+    TileDefinition def,
+    TileStation station,
+    Offset pos,
+    Offset center,
+    double size,
+    double radius,
+    int slotTurn,
+  ) {
+    final ringRadius = radius * slotRadiusFor(station);
+    for (final at in slotPositions(def, station.index, center, radius,
+        extraTurn: slotTurn)) {
+      canvas
+        ..drawCircle(at, ringRadius, Paint()..color = Colors.white)
+        ..drawCircle(
+          at,
+          ringRadius,
+          Paint()
+            ..color = trackColor
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = size * 0.03,
+        );
+    }
+  }
+
+  /// A town: a bar laid across its track, or a dot where it has none to lie
+  /// across (a junction of three or more, or a place printed on the map).
+  static void _paintTown(
+    Canvas canvas,
+    TileDefinition def,
+    TileStation station,
+    Offset pos,
+    Offset center,
+    double size,
+    double radius,
+  ) {
+    final sides = <int>[];
+    for (final seg in def.segments) {
+      final touches = [seg.a, seg.b].any((e) =>
+          e is StationEndpoint && e.stationIndex == station.index);
+      if (!touches) continue;
+      for (final e in [seg.a, seg.b]) {
+        if (e is EdgeEndpoint) sides.add(e.edge);
+      }
+    }
+    final asBar = station.style == 'rect' ||
+        (station.style == null && sides.isNotEmpty && sides.length < 3);
+    if (!asBar) {
+      canvas.drawCircle(pos, radius * _townDot, Paint()..color = trackColor);
+      return;
+    }
+    // Across the track: perpendicular to the way the track runs through.
+    final towards = HexGeometry.edgeMidpoint(center, radius, sides.first) - pos;
+    final along = towards.distance < 0.01
+        ? const Offset(1, 0)
+        : towards / towards.distance;
+    final across = Offset(-along.dy, along.dx);
+    final half = radius * _townBar;
+    canvas.drawLine(
+      pos - across * half,
+      pos + across * half,
+      Paint()
+        ..color = trackColor
+        ..strokeWidth = size * 0.055
+        ..strokeCap = StrokeCap.butt,
+    );
+  }
+
+  /// A town dot's radius and half the length of a town bar, likewise.
+  static const double _townDot = 0.1;
+  static const double _townBar = 0.22;
+
+  /// Draws track from the middle of side [a] to the middle of side [b] as
+  /// tile art does: straight across for opposite sides, otherwise the
+  /// circular arc that leaves both sides at right angles.
+  static void _paintRun(
+    Canvas canvas,
+    Offset center,
+    double radius,
+    int a,
+    int b,
+    Paint paint,
+  ) =>
+      canvas.drawPath(_runPath(center, radius, a, b), paint);
+
+  /// The path [_paintRun] draws.
+  static Path _runPath(Offset center, double radius, int a, int b) {
+    final from = HexGeometry.edgeMidpoint(center, radius, a);
+    final to = HexGeometry.edgeMidpoint(center, radius, b);
+    final centre = _arcCentre(center, radius, a, b);
+    if (centre == null) {
+      return Path()
+        ..moveTo(from.dx, from.dy)
+        ..lineTo(to.dx, to.dy);
+    }
+    final r = (from - centre).distance;
+    final start = math.atan2(from.dy - centre.dy, from.dx - centre.dx);
+    final end = math.atan2(to.dy - centre.dy, to.dx - centre.dx);
+    var sweep = end - start;
+    // Go the short way round: the long way would loop outside the hex.
+    while (sweep <= -math.pi) {
+      sweep += 2 * math.pi;
+    }
+    while (sweep > math.pi) {
+      sweep -= 2 * math.pi;
+    }
+    return Path()
+      ..addArc(Rect.fromCircle(center: centre, radius: r), start, sweep);
+  }
+
+  /// Points along the run [_paintRun] draws from side [a] to side [b] of a
+  /// hex of circumradius [radius] centred on [center], [count] + 1 of them
+  /// evenly spaced from one side to the other.
+  static List<Offset> runPoints(
+      Offset center, double radius, int a, int b, int count) {
+    final metric = _runPath(center, radius, a, b).computeMetrics().first;
+    return [
+      for (int i = 0; i <= count; i++)
+        metric.getTangentForOffset(metric.length * i / count)!.position,
+    ];
+  }
+
+  /// Where the arc's centre sits: on both sides' own lines, since an arc that
+  /// meets a side at right angles has its centre along that side. Null when
+  /// the sides are opposite and the track is straight.
+  static Offset? _arcCentre(Offset center, double radius, int a, int b) {
+    final da = HexGeometry.edgeNormal(a), db = HexGeometry.edgeNormal(b);
+    final ma = center + da * (radius * _apothem);
+    final mb = center + db * (radius * _apothem);
+    final ta = Offset(-da.dy, da.dx), tb = Offset(-db.dy, db.dx);
+    final cross = ta.dx * tb.dy - ta.dy * tb.dx;
+    if (cross.abs() < 1e-9) return null; // opposite sides
+    final diff = mb - ma;
+    final s = (diff.dx * tb.dy - diff.dy * tb.dx) / cross;
+    return ma + ta * s;
+  }
+
+  static const double _apothem = 0.8660254037844386;
+
   /// Rasterizes [def] into an [img.Image] for template matching.
-  static Future<img.Image> rasterize(TileDefinition def, {int size = 64}) async {
+  static Future<img.Image> rasterize(TileDefinition def,
+      {int size = 64, int slotTurn = 0}) async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(
       recorder,
@@ -177,7 +423,7 @@ class TileRenderer {
       Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()),
       Paint()..color = Colors.white,
     );
-    paint(canvas, def, size.toDouble());
+    paint(canvas, def, size.toDouble(), slotTurn: slotTurn);
     final picture = recorder.endRecording();
     final uiImage = await picture.toImage(size, size);
     final data = await uiImage.toByteData(format: ui.ImageByteFormat.rawRgba);

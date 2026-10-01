@@ -1,5 +1,7 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 
@@ -12,6 +14,29 @@ import '../services/photo_pipeline.dart';
 
 /// The photo area, so tests can find it without depending on the widget tree.
 const Key alignCanvasKey = ValueKey('align-canvas');
+
+/// [hexes] laid over the middle of a photo of [size], as large as fits: where
+/// the grid starts when detection has nothing to offer, and where "Fit to
+/// the photo" puts it back. From here every handle is on screen, which a
+/// wrong detection -- a few huge hexes spilling far past the photo -- can't
+/// promise.
+Homography placeOverPhoto(Size size, Iterable<HexCoord> hexes) {
+  var bounds = Rect.zero;
+  var first = true;
+  for (final c in hexes) {
+    final hex = Rect.fromCenter(
+        center: c.boardCenter, width: math.sqrt(3), height: 2);
+    bounds = first ? hex : bounds.expandToInclude(hex);
+    first = false;
+  }
+  if (first) return Homography.identity;
+  final scale = 0.9 *
+      math.min(size.width / bounds.width, size.height / bounds.height);
+  return Homography.similarity(
+    scale: scale,
+    translation: size.center(Offset.zero) - bounds.center * scale,
+  );
+}
 
 /// Finds where the board is in a photo, and lets the user correct it.
 ///
@@ -59,6 +84,11 @@ class _AlignBoardState extends State<AlignBoard> {
   bool _adjusting = false;
   int? _draggingAnchor;
 
+  /// The gesture so far, for turning its running totals into steps.
+  Offset? _lastFocal;
+  double _lastScale = 1;
+  double _lastRotation = 0;
+
   /// The hexes the user drags, and where they have been dragged to.
   late List<MapHex> _anchors;
   List<Offset> _handles = [];
@@ -93,12 +123,17 @@ class _AlignBoardState extends State<AlignBoard> {
           : await widget.pipeline
               .snap(widget.title.map, widget.photo, initial);
       if (!mounted) return;
+      final usable = fit != null && (fit.isConvincing || _onPhoto(fit.boardToImage));
       setState(() {
         _busy = false;
-        _fit = fit;
-        _boardToImage = fit?.boardToImage ?? initial;
-        _adjusting = fit == null || !(fit.isConvincing);
-        _status = _describe(fit);
+        _fit = usable ? fit : null;
+        _boardToImage = usable ? fit.boardToImage : initial ?? _overPhoto;
+        _adjusting = !usable || !fit.isConvincing;
+        _status = usable || fit == null
+            ? _describe(fit)
+            : 'The grid found in this photo doesn\'t fit it, so the map has '
+                'been laid over the photo to start from. Drag the marked '
+                'hexes onto their places, then snap.';
         _syncHandles();
       });
     } catch (e, stack) {
@@ -106,13 +141,40 @@ class _AlignBoardState extends State<AlignBoard> {
       if (!mounted) return;
       setState(() {
         _busy = false;
-        _boardToImage = initial;
+        _boardToImage = initial ?? _overPhoto;
         _adjusting = true;
         _status = 'Something went wrong reading that photo. Place the marked '
             'hexes by hand, or go back and take another.';
         _syncHandles();
       });
     }
+  }
+
+  /// The hexes this photo is meant to show.
+  Iterable<HexCoord> get _hexes => widget.focus ?? widget.title.map.coords;
+
+  /// The map laid over the photo; see [placeOverPhoto].
+  Homography get _overPhoto => placeOverPhoto(
+      Size(widget.photo.width.toDouble(), widget.photo.height.toDouble()),
+      _hexes);
+
+  /// Whether [h] puts the map somewhere the user can work with it: over the
+  /// photo, and not so large that the handles are out of reach.
+  bool _onPhoto(Homography h) {
+    final width = widget.photo.width.toDouble();
+    final height = widget.photo.height.toDouble();
+    var bounds = Rect.zero;
+    var first = true;
+    for (final c in _hexes) {
+      final p = h.apply(c.boardCenter);
+      if (!p.dx.isFinite || !p.dy.isFinite) return false;
+      bounds = first ? Rect.fromLTWH(p.dx, p.dy, 0, 0) : bounds.expandToInclude(
+          Rect.fromLTWH(p.dx, p.dy, 0, 0));
+      first = false;
+    }
+    return bounds.width <= 3 * width &&
+        bounds.height <= 3 * height &&
+        bounds.overlaps(Rect.fromLTWH(0, 0, width, height));
   }
 
   String _describe(GridFit? fit) {
@@ -208,55 +270,59 @@ class _AlignBoardState extends State<AlignBoard> {
                 (constraints.maxWidth - _displaySize.width) / 2,
                 (constraints.maxHeight - _displaySize.height) / 2,
               );
-              return GestureDetector(
-                key: alignCanvasKey,
-                behavior: HitTestBehavior.opaque,
-                onPanStart: !_adjusting ? null : _startDrag,
-                onPanUpdate: !_adjusting ? null : _drag,
-                onPanEnd: !_adjusting ? null : (_) => setState(() {
-                      _draggingAnchor = null;
-                    }),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Center(
-                      child: Image.memory(
-                        widget.previewBytes,
-                        fit: BoxFit.contain,
-                        gaplessPlayback: true,
-                      ),
-                    ),
-                    IgnorePointer(
-                      child: CustomPaint(
-                        painter: _AlignPainter(
-                          title: widget.title,
-                          boardToImage: _boardToImage,
-                          fit: _fit,
-                          toDisplay: _toDisplay,
-                          anchors: _adjusting ? _anchors : const [],
-                          handles: _adjusting ? _handles : const [],
-                          focus: widget.focus,
+              return Listener(
+                onPointerSignal: _pointerSignal,
+                child: GestureDetector(
+                  key: alignCanvasKey,
+                  behavior: HitTestBehavior.opaque,
+                  onScaleStart: !_adjusting ? null : _startGesture,
+                  onScaleUpdate: !_adjusting ? null : _updateGesture,
+                  onScaleEnd: !_adjusting ? null : (_) => setState(() {
+                        _draggingAnchor = null;
+                        _lastFocal = null;
+                      }),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Center(
+                        child: Image.memory(
+                          widget.previewBytes,
+                          fit: BoxFit.contain,
+                          gaplessPlayback: true,
                         ),
                       ),
-                    ),
-                    if (_busy)
-                      Container(
-                        color: Colors.black54,
-                        alignment: Alignment.center,
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const CircularProgressIndicator(),
-                            const SizedBox(height: 12),
-                            Text(_status,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(color: Colors.white)),
-                          ],
+                      IgnorePointer(
+                        child: CustomPaint(
+                          painter: _AlignPainter(
+                            title: widget.title,
+                            boardToImage: _boardToImage,
+                            fit: _fit,
+                            toDisplay: _toDisplay,
+                            anchors: _adjusting ? _anchors : const [],
+                            handles: _adjusting ? _handles : const [],
+                            focus: widget.focus,
+                          ),
                         ),
                       ),
-                  ],
+                      if (_busy)
+                        Container(
+                          color: Colors.black54,
+                          alignment: Alignment.center,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const CircularProgressIndicator(),
+                              const SizedBox(height: 12),
+                              Text(_status,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(color: Colors.white)),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               );
             }),
@@ -267,33 +333,94 @@ class _AlignBoardState extends State<AlignBoard> {
     );
   }
 
-  void _startDrag(DragStartDetails details) {
-    final point = details.localPosition;
-    double best = double.infinity;
+  void _startGesture(ScaleStartDetails details) {
+    _lastFocal = details.localFocalPoint;
+    _lastScale = 1;
+    _lastRotation = 0;
     int? index;
-    for (int i = 0; i < _handles.length; i++) {
-      final d = (_toDisplay(_handles[i]) - point).distance;
-      if (d < best) {
-        best = d;
-        index = i;
-      }
-    }
-    setState(() => _draggingAnchor = best <= 44 ? index : null);
-  }
-
-  void _drag(DragUpdateDetails details) {
-    setState(() {
-      final index = _draggingAnchor;
-      if (index != null) {
-        _handles[index] = _toImage(details.localPosition);
-      } else {
-        // Dragging anywhere else slides the whole grid.
-        final delta = details.delta / _scale;
-        for (int i = 0; i < _handles.length; i++) {
-          _handles[i] += delta;
+    if (details.pointerCount <= 1) {
+      final point = details.localFocalPoint;
+      double best = double.infinity;
+      for (int i = 0; i < _handles.length; i++) {
+        final d = (_toDisplay(_handles[i]) - point).distance;
+        if (d < best) {
+          best = d;
+          index = i;
         }
       }
+      if (best > 44) index = null;
+    }
+    setState(() => _draggingAnchor = index);
+  }
+
+  void _updateGesture(ScaleUpdateDetails details) {
+    setState(() {
+      final index = _draggingAnchor;
+      if (index != null && details.pointerCount <= 1) {
+        _handles[index] = _toImage(details.localFocalPoint);
+      } else {
+        // Anywhere else moves the whole grid; two fingers (or a trackpad
+        // pinch) also size and turn it, about the point between them.
+        _draggingAnchor = null;
+        final focal = _toImage(details.localFocalPoint);
+        _transformGrid(
+          about: focal,
+          shift: focal - _toImage(_lastFocal ?? details.localFocalPoint),
+          scale: details.scale / _lastScale,
+          radians: details.rotation - _lastRotation,
+        );
+      }
+      _lastFocal = details.localFocalPoint;
+      _lastScale = details.scale;
+      _lastRotation = details.rotation;
       _handlesMoved();
+    });
+  }
+
+  /// A mouse wheel sizes the grid about the pointer.
+  void _pointerSignal(PointerSignalEvent event) {
+    if (!_adjusting || _busy || event is! PointerScrollEvent) return;
+    setState(() {
+      _transformGrid(
+        about: _toImage(event.localPosition),
+        scale: math.exp(-event.scrollDelta.dy / 400),
+      );
+      _handlesMoved();
+    });
+  }
+
+  /// Moves every handle by [shift], then scales by [scale] and turns by
+  /// [radians] about [about] (photo pixels): the grid moves as one piece.
+  void _transformGrid({
+    required Offset about,
+    Offset shift = Offset.zero,
+    double scale = 1,
+    double radians = 0,
+  }) {
+    final c = math.cos(radians) * scale, s = math.sin(radians) * scale;
+    for (int i = 0; i < _handles.length; i++) {
+      final v = _handles[i] + shift - about;
+      _handles[i] = about + Offset(c * v.dx - s * v.dy, s * v.dx + c * v.dy);
+    }
+  }
+
+  /// The buttons' version of a pinch or a twist, about the middle of the
+  /// photo.
+  void _stepGrid({double scale = 1, double radians = 0}) {
+    setState(() {
+      _transformGrid(
+        about: Offset(widget.photo.width / 2, widget.photo.height / 2),
+        scale: scale,
+        radians: radians,
+      );
+      _handlesMoved();
+    });
+  }
+
+  void _resetToPhoto() {
+    setState(() {
+      _boardToImage = _overPhoto;
+      _syncHandles();
     });
   }
 
@@ -318,12 +445,39 @@ class _AlignBoardState extends State<AlignBoard> {
             if (_adjusting)
               Text(
                 'Drag each labelled circle onto that hex on the board; drag '
-                'anywhere else to move the whole grid.',
-                maxLines: 2,
+                'anywhere else to move the whole grid, and pinch, scroll or '
+                'use the buttons to size and turn it.',
+                maxLines: 3,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             const SizedBox(height: 4),
+            if (_adjusting)
+              Row(
+                children: [
+                  IconButton(
+                    tooltip: 'Smaller',
+                    onPressed: _busy ? null : () => _stepGrid(scale: 1 / 1.1),
+                    icon: const Icon(Icons.zoom_out),
+                  ),
+                  IconButton(
+                    tooltip: 'Bigger',
+                    onPressed: _busy ? null : () => _stepGrid(scale: 1.1),
+                    icon: const Icon(Icons.zoom_in),
+                  ),
+                  IconButton(
+                    tooltip: 'Turn a quarter',
+                    onPressed:
+                        _busy ? null : () => _stepGrid(radians: math.pi / 2),
+                    icon: const Icon(Icons.rotate_90_degrees_cw),
+                  ),
+                  IconButton(
+                    tooltip: 'Fit to the photo',
+                    onPressed: _busy ? null : _resetToPhoto,
+                    icon: const Icon(Icons.fit_screen),
+                  ),
+                ],
+              ),
             Row(
               children: [
                 TextButton.icon(

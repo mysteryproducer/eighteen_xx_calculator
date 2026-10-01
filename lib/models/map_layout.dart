@@ -31,17 +31,24 @@ class MapHex {
   });
 
   /// Whether players can lay tiles here. Red off-board areas, grey
-  /// pre-printed hexes, water and special hexes keep their printing all game,
-  /// so they are never scanned for tiles.
-  bool get takesTiles => switch (printed.color) {
+  /// pre-printed hexes, water, and the purple hexes a game converts by itself
+  /// (1844's Gotthard tunnel and the other mountain lines) keep their
+  /// printing, so they are never scanned for tiles.
+  bool get takesTiles =>
+      switch (printed.color) {
         TileColor.plain ||
         TileColor.yellow ||
         TileColor.green ||
         TileColor.brown =>
           true,
-        TileColor.purple => true,
         _ => false,
-      };
+      } ||
+      // A line printed for later opening does get a tile: the game lays it
+      // when the line opens, and the board changes.
+      opensLater;
+
+  /// Whether the hex carries track printed for a line that hasn't opened.
+  bool get opensLater => printed.segments.any((s) => s.future);
 
   String get displayName => name == null ? id : '$id $name';
 

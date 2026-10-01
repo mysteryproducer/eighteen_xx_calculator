@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:camera_macos/camera_macos.dart';
 import 'package:flutter/material.dart';
 
+import '../services/app_settings.dart';
 import 'capture.dart';
 
 /// Photographs the board with a Mac's webcam, for trying the app on a
@@ -23,6 +24,12 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
   final GlobalKey _cameraKey = GlobalKey(debugLabel: 'mac-webcam');
   CameraMacOSController? _controller;
   bool _capturing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    AppSettings.shared.load();
+  }
 
   @override
   void dispose() {
@@ -114,6 +121,8 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
               children: [
                 CaptureInstructions(guide?.instruction ??
                     'Fit the whole board in the frame, as square-on as you can.'),
+                if (guide != null && guide.tiles.isNotEmpty)
+                  const OverlayOpacityControl(),
                 Padding(
                   padding: const EdgeInsets.all(12),
                   child: FilledButton.icon(
@@ -142,7 +151,7 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
     return Center(
       child: AspectRatio(
         aspectRatio: size.width / size.height,
-        child: CustomPaint(painter: CaptureGuidePainter(guide)),
+        child: CaptureGuideOverlay(guide),
       ),
     );
   }

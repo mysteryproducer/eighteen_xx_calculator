@@ -7,9 +7,12 @@ import 'package:eighteen_xx_calculator/models/tile_rules.dart';
 import 'package:eighteen_xx_calculator/processing/board_reader.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
 import 'package:eighteen_xx_calculator/processing/hex_patch.dart';
+import 'package:eighteen_xx_calculator/processing/mountain_detector.dart';
 import 'package:eighteen_xx_calculator/processing/tile_classifier.dart';
 import 'package:eighteen_xx_calculator/processing/tile_renderer.dart';
+import 'package:eighteen_xx_calculator/processing/gray_image.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 
 import 'support/synthetic_board.dart';
 
@@ -53,6 +56,7 @@ void main() {
         options: options,
         keyOf: (o) => keyOf(hex, o),
         colourOf: (o) => rules.contentOf(hex, o)!.color,
+        exitsOf: (o) => rules.contentOf(hex, o)!.exitStrengths,
         colours: renderedColours,
         reference: reference,
       );
@@ -156,13 +160,22 @@ void main() {
 
   group('reading a whole board', () {
     test('tiles laid on a photographed board are found', () async {
-      // Three tiles on an otherwise untouched 1844 board.
-      // Whatever the rules allow on each of these, so the test can't ask for
-      // a lay that would be illegal (and so never considered when reading).
+      // Three tiles on an otherwise untouched 1844 board, well inside the
+      // map so a photo taken at an angle still has them in frame. Each is
+      // whatever the rules allow there, so the test can't ask for a lay that
+      // would be illegal (and so never considered when reading).
+      final middle = title.map.boardBounds.center;
+      final inland = title.map.hexes
+          .where((h) =>
+              h.takesTiles && h.coord.neighbors.every(title.map.contains))
+          .toList()
+        ..sort((a, b) => (a.coord.boardCenter - middle)
+            .distance
+            .compareTo((b.coord.boardCenter - middle).distance));
       final laid = {
-        for (final id in ['C12', 'C14', 'D13'])
-          title.map.byId(id)!.coord: rules
-              .options(title.map.byId(id)!, null, maxSteps: 1)
+        for (final hex in inland.take(3))
+          hex.coord: rules
+              .options(hex, null, maxSteps: 1)
               .where((o) => !o.isPrinted)
               .map((o) => o.placed!)
               .first,
@@ -245,6 +258,240 @@ void main() {
       // The far side of the board is untouched by this photo.
       expect(session.tileAt(chur)?.tileId, '57');
       expect(session.stateOf(chur).source, HexSource.manual);
+    });
+
+    test('a tile the app misread is taken back by a clear photo, but not one '
+        'the user set', () async {
+      // A close-up framed a hex off once read a straight on bare map, and was
+      // sure of it. Tiles are never taken up in play, so without a way back
+      // that mistake would stay for good.
+      final misread = title.map.byId('H15')!;
+      final set = title.map.byId('H11')!;
+      final session = GameSession.start(
+          title: title, name: 'test', startedEmpty: true);
+      session.recordReading(misread,
+          tile: const PlacedTile('9', rotation: 2),
+          confidence: 0.83,
+          source: HexSource.closeUp);
+      session.setManually(set, const PlacedTile('9', rotation: 2));
+
+      const radius = 120.0;
+      final board = await drawBoard(title.map, hexRadius: radius);
+      final truth = boardToDrawn(title.map, radius);
+      final centre = truth.apply(title.map.byId('H13')!.coord.boardCenter);
+      const size = 900;
+      final crop = Homography.similarity(
+          translation: Offset(size / 2 - centre.dx, size / 2 - centre.dy));
+      final photo = warp(board, crop, width: size, height: size);
+      final readings = await BoardReader(title).read(
+        photo: photo,
+        boardToImage: truth.then(crop),
+        hexes: [misread.coord, set.coord],
+        context: title.map.around([misread.coord, set.coord], 1),
+        session: session,
+      );
+      BoardReader.apply(session, readings, source: HexSource.closeUp);
+
+      expect(session.tileAt(misread), isNull);
+      expect(session.tileAt(set)?.tileId, '9');
+    });
+
+    test('a tunnel piece is found, and no tunnel where there is none',
+        () async {
+      // Gotthard with a tunnel from Stans to I20 across it, drawn as the
+      // pieces are printed, and every other tunnel hex bare.
+      final gotthard = title.map.byId('H19')!;
+      final withTunnel = gotthard.printed.withSegments([
+        TileSegment(EdgeEndpoint(2), EdgeEndpoint(5), narrow: true),
+      ]);
+      const radius = 60.0;
+      final board = await drawBoard(title.map,
+          hexRadius: radius, drawn: {gotthard.coord: withTunnel});
+      final readings = BoardReader(title).readTunnels(
+        photo: board,
+        boardToImage: boardToDrawn(title.map, radius),
+        hexes: title.map.coords,
+      );
+      final found = {
+        for (final r in readings)
+          if (r.path != null) r.hex.id: r.path,
+      };
+      expect(found, {'H19': (2, 5)});
+      expect(readings.firstWhere((r) => r.hex.id == 'H19').confidence,
+          greaterThan(0.5));
+    });
+
+    group('mountain railways', () {
+      const radius = 60.0;
+      final toImage = boardToDrawn(title.map, radius);
+      final pilatus = title.map.byId('G14')!;
+
+      /// The board with a plate on Pilatus, as a camera under a lamp sees
+      /// it: exposed darker than the drawing, and with a veil of glare of
+      /// [glare] over Pilatus, fading out over a few hexes.
+      Future<img.Image> photographed({double glare = 0}) async {
+        final board = await drawBoard(title.map, hexRadius: radius);
+        // A plate as printed: pale card, with a box per phase in the phase's
+        // colour, left to right. 1844 prints brown's box salmon.
+        void fill(double left, double right, double half, img.Color colour) {
+          final a =
+              toImage.apply(pilatus.coord.boardCenter + Offset(left, -half));
+          final b =
+              toImage.apply(pilatus.coord.boardCenter + Offset(right, half));
+          img.fillRect(board,
+              x1: a.dx.round(), y1: a.dy.round(),
+              x2: b.dx.round(), y2: b.dy.round(),
+              color: colour);
+        }
+        fill(-0.62, 0.62, 0.22, img.ColorRgb8(240, 236, 226));
+        final boxes = [
+          img.ColorRgb8(240, 215, 60),
+          img.ColorRgb8(80, 165, 95),
+          img.ColorRgb8(235, 160, 150),
+          img.ColorRgb8(170, 170, 170),
+        ];
+        for (int i = 0; i < boxes.length; i++) {
+          final left = -0.56 + i * 0.29;
+          fill(left, left + 0.25, 0.14, boxes[i]);
+        }
+        final centre = toImage.apply(pilatus.coord.boardCenter);
+        for (final p in board) {
+          final d = (Offset(p.x.toDouble(), p.y.toDouble()) - centre).distance /
+              (radius * 2.5);
+          final veil = glare * (1 - d * d).clamp(0.0, 1.0);
+          num lit(num c) => c * 0.75 + (255 - c * 0.75) * veil;
+          p
+            ..r = lit(p.r)
+            ..g = lit(p.g)
+            ..b = lit(p.b);
+        }
+        return board;
+      }
+
+      List<MountainReading> read(img.Image photo) =>
+          BoardReader(title).readMountains(
+            photo: photo,
+            boardToImage: toImage,
+            hexes: title.map.coords,
+          );
+
+      test('a plate is found, and none on a bare mountain', () async {
+        final readings = read(await photographed());
+        expect({for (final r in readings) r.hex.id}, title.mountainHexes);
+        expect({for (final r in readings) if (r.present) r.hex.id}, {'G14'});
+        for (final r in readings) {
+          expect(r.confidence, greaterThan(0.5), reason: '$r');
+        }
+      });
+
+      test('a plate faded by glare is still found', () async {
+        final readings = read(await photographed(glare: 0.6));
+        final reading = readings.firstWhere((r) => r.hex == pilatus);
+        expect(reading.present, isTrue, reason: '$reading');
+      });
+
+      test('under glare, a bare mountain is not sure it is bare', () async {
+        // The same glare over Pilatus with no plate on it: the colours of a
+        // plate could have faded out of sight, so this says little.
+        final board = await drawBoard(title.map, hexRadius: radius);
+        final centre = toImage.apply(pilatus.coord.boardCenter);
+        for (final p in board) {
+          final d = (Offset(p.x.toDouble(), p.y.toDouble()) - centre).distance /
+              (radius * 2.5);
+          final veil = 0.9 * (1 - d * d).clamp(0.0, 1.0);
+          num lit(num c) => c * 0.75 + (255 - c * 0.75) * veil;
+          p
+            ..r = lit(p.r)
+            ..g = lit(p.g)
+            ..b = lit(p.b);
+        }
+        final reading = read(board).firstWhere((r) => r.hex == pilatus);
+        expect(reading.present, isFalse);
+        expect(reading.confidence, lessThan(0.5));
+        // And says why, for the user.
+        expect(reading.washout, greaterThan(0.5));
+      });
+    });
+
+    group('glare', () {
+      const radius = 40.0;
+      final truth = boardToDrawn(title.map, radius);
+      final langnau = title.map.byId('F13')!;
+
+      /// [board] as a camera under a lamp sees it: exposed darker than the
+      /// drawing's near-white paper, with glare over Langnau -- white light
+      /// added, most in the middle, fading out over a few hexes.
+      img.Image glared(img.Image board) {
+        final out = img.Image.from(board);
+        final centre = truth.apply(langnau.coord.boardCenter);
+        for (final p in out) {
+          final d = (Offset(p.x.toDouble(), p.y.toDouble()) - centre).distance /
+              (radius * 3.5);
+          final veil = 0.8 * (1 - d * d).clamp(0.0, 1.0);
+          num lit(num c) => c * 0.75 + (255 - c * 0.75) * veil;
+          p
+            ..r = lit(p.r)
+            ..g = lit(p.g)
+            ..b = lit(p.b);
+        }
+        return out;
+      }
+
+      test('glare is found where it is, and only there', () async {
+        final photo = glared(await drawBoard(title.map, hexRadius: radius));
+        final glare = BoardReader(title).measureGlare(
+            RgbImage.fromImage(photo), truth, title.map.coords.toSet());
+        expect(glare[langnau.coord], greaterThan(0.6));
+        expect(glare[title.map.byId('K22')!.coord], lessThan(0.1));
+      });
+
+      test('under glare, bare map is not taken as read', () async {
+        // A game joined part-way: the app can't know Langnau's neighbour is
+        // bare, and glare could be hiding a tile there.
+        final photo = glared(await drawBoard(title.map, hexRadius: radius));
+        final session = GameSession.start(
+            title: title, name: 'test', startedEmpty: false);
+        final underGlare = title.map.byId('E12')!; // beside Langnau
+        final clear = title.map.byId('J21')!;
+        final readings = await BoardReader(title).read(
+          photo: photo,
+          boardToImage: truth,
+          hexes: [underGlare.coord, clear.coord],
+          context: title.map.coords,
+          session: session,
+        );
+        final read = {for (final r in readings) r.hex.id: r};
+        expect(read['E12']!.glare, greaterThan(0.3));
+        expect(read['E12']!.reading.isReliable, isFalse);
+        expect(read['J21']!.tile, isNull);
+        expect(read['J21']!.reading.isReliable, isTrue);
+      });
+
+      test('calibration measures each colour from what the game knows, and '
+          'leaves glare out', () async {
+        final yellowHexes = ['C10', 'E14', 'G10', 'I8', 'K12'];
+        final laid = {
+          for (final id in yellowHexes)
+            title.map.byId(id)!.coord: const PlacedTile('9'),
+        };
+        final photo =
+            glared(await drawBoard(title.map, hexRadius: radius, laid: laid));
+        final session = GameSession.start(
+            title: title, name: 'test', startedEmpty: true);
+        for (final id in yellowHexes) {
+          session.setManually(title.map.byId(id)!, const PlacedTile('9'));
+        }
+        final result = BoardReader(title).calibrate(
+            photo: photo,
+            boardToImage: truth,
+            hexes: title.map.coords,
+            session: session);
+        final yellow = result.profile.colours[TileColor.yellow]!;
+        expect((yellow - renderedColours.expected(TileColor.yellow)).distance,
+            lessThan(0.06));
+        expect(result.samples[TileColor.plain], greaterThan(30));
+        expect(result.glare, contains(langnau.coord));
+      });
     });
 
     test('a photo of the bare board is remembered rather than read', () async {

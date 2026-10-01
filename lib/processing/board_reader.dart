@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' show Offset;
 
@@ -6,6 +7,7 @@ import 'package:image/image.dart' as img;
 import '../geometry/homography.dart';
 import '../models/board.dart';
 import '../models/board_graph.dart';
+import '../models/company.dart';
 import '../models/game_session.dart';
 import '../models/game_title.dart';
 import '../models/map_layout.dart';
@@ -16,6 +18,8 @@ import 'hex_patch.dart';
 import 'tile_classifier.dart';
 import 'tile_renderer.dart';
 import 'token_detector.dart';
+import 'mountain_detector.dart';
+import 'tunnel_detector.dart';
 
 /// What one photo showed on one hex.
 class HexReading {
@@ -29,12 +33,23 @@ class HexReading {
   /// Station token colours seen, by station id.
   final Map<String, TokenDetection> tokens;
 
+  /// Whether what was read is an upgrade of what the session last knew was
+  /// there: a later colour of tile, keeping its track. Only an upgrade
+  /// replaces a tile the user set by hand.
+  final bool isUpgrade;
+
+  /// How washed out by glare the hex was, 0..1 (see
+  /// `BoardReader.measureGlare`).
+  final double glare;
+
   const HexReading({
     required this.hex,
     required this.reading,
     required this.patch,
     required this.picture,
     required this.tokens,
+    this.isUpgrade = false,
+    this.glare = 0,
   });
 
   PlacedTile? get tile => reading.option.placed;
@@ -55,9 +70,11 @@ class BoardReader {
   BoardReader(
     this.title, {
     TileClassifier? classifier,
-    this.tokenDetector = const TokenDetector(),
+    TokenDetector? tokenDetector,
   })  : rules = TileRules(title),
-        classifier = classifier ?? TileClassifier();
+        classifier = classifier ?? TileClassifier(),
+        tokenDetector =
+            tokenDetector ?? TokenDetector(companies: title.companies);
 
   /// Reads [hexes] from [photo], where [boardToImage] places the map.
   /// [context] is every map hex fully in the photo, used as the colour
@@ -68,31 +85,29 @@ class BoardReader {
     required Iterable<HexCoord> hexes,
     required Iterable<HexCoord> context,
     required GameSession session,
+    Map<HexCoord, double> glarePrior = const {},
   }) async {
     final rgb = RgbImage.fromImage(photo);
+    final inView = {...context, ...hexes}.where(title.map.contains).toSet();
+    // Glare measured here, or remembered from the board under the same
+    // light (see [GameSession.glare]), whichever is stronger.
+    final measured = measureGlare(rgb, boardToImage, inView);
+    final glare = {
+      for (final c in inView)
+        c: math.max(measured[c] ?? 0, _priorWeight * (glarePrior[c] ?? 0)),
+    };
 
     // Colour of every hex in view, and which of them are known to show the
     // plain map, as the local reference for "no tile here".
     final chroma = <HexCoord, Offset>{};
     final patches = <HexCoord, HexPatch>{};
-    for (final c in {...context, ...hexes}) {
-      if (title.map.at(c) == null) continue;
+    for (final c in inView) {
       final patch = HexPatch.fromPhoto(rgb, boardToImage, c);
       patches[c] = patch;
       chroma[c] = patch.chroma;
     }
-    final plain = <HexCoord>[
-      for (final c in chroma.keys)
-        if (_knownPlain(title.map.at(c)!, session)) c,
-    ];
-    final reference = plain.length >= 3 ? plain : chroma.keys.toList();
-    Offset localPlain(HexCoord c) {
-      final near = reference.where((r) => r.distanceTo(c) <= 3 && r != c).toList();
-      return _median([for (final r in near.length >= 3 ? near : reference) chroma[r]!]);
-    }
-
-    final relative = {for (final c in chroma.keys) c: chroma[c]! - localPlain(c)};
-    final colours = _colourModel(relative, session);
+    final relative = _relativeToPlain(chroma, session);
+    final colours = _colourModel(relative, session, glare);
 
     // Everything each hex could be, and the templates to compare with.
     final options = <HexCoord, List<TileOption>>{};
@@ -101,8 +116,21 @@ class BoardReader {
       final hex = title.map.at(c);
       if (hex == null || !hex.takesTiles || patches[c] == null) continue;
       final state = session.stateOf(hex);
+      // Three lays ahead of what was last known: bare map to brown is three,
+      // and a game photographed now and then skips rounds. Each lay costs a
+      // little evidence, so a long jump needs a clear picture.
       final list = rules.options(hex, state.basis,
-          maxSteps: state.basisKnown ? 2 : 4);
+          maxSteps: state.basisKnown ? 3 : 4);
+      // Tiles are never taken up in play, so the rules only look forward
+      // from what was there -- which makes a tile the app misread
+      // permanent. Where the app read the tile itself (never where the user
+      // set it), bare map stays on offer, at a price only clear evidence
+      // pays.
+      if (state.basis != null &&
+          state.source != HexSource.manual &&
+          !list.any((o) => o.isPrinted)) {
+        list.add(const TileOption(null, 0, steps: _misreadSteps));
+      }
       options[c] = list;
       for (final o in list) {
         final def = rules.contentOf(hex, o);
@@ -115,26 +143,195 @@ class BoardReader {
     options.forEach((c, list) {
       final hex = title.map.at(c)!;
       final state = session.stateOf(hex);
-      final reading = classifier.classify(
+      final washedOut = glare[c] ?? 0;
+      final classified = classifier.classify(
         patch: patches[c]!,
         relativeChroma: relative[c]!,
         options: list,
         keyOf: (o) => _key(hex, o),
         colourOf: (o) => rules.contentOf(hex, o)?.color ?? hex.printed.color,
+        exitsOf: (o) => rules.contentOf(hex, o)?.exitStrengths ?? const {},
         colours: colours,
+        // "It probably hasn't changed" only counts for a hex the app has
+        // actually seen; on one it has never read, a tile is no less likely
+        // than bare map.
+        stepPenalty: state.basisKnown ? 1.0 : 0.25,
         reference: state.reference == null
             ? null
             : HexPatch.decode(state.reference!, state.referenceChroma ?? Offset.zero),
+        // Glare washes colour out before it hides track.
+        colourWeight: 1 - 0.75 * washedOut,
       );
+      // Glare can hide a tile, but it can't put track where there is none.
+      // So under it, "nothing here" is never taken as read where it would
+      // be news -- where the app didn't already know the hex was bare.
+      final knownBare = state.basisKnown && state.basis == null;
+      final reading = classified.option.isPrinted && !knownBare && washedOut > 0
+          ? TileReading(
+              option: classified.option,
+              confidence: classified.confidence * (1 - 0.6 * washedOut),
+              ranked: classified.ranked,
+            )
+          : classified;
       results.add(HexReading(
         hex: hex,
         reading: reading,
         patch: patches[c]!,
         picture: img.encodePng(HexPatch.picture(rgb, boardToImage, c)),
-        tokens: _tokens(photo, boardToImage, hex, rules.contentOf(hex, reading.option)),
+        tokens: (glare[c] ?? 0) > 0.5
+            ? const {}
+            : _tokens(rgb, boardToImage, hex, reading.option),
+        isUpgrade: _isUpgrade(state.basis, reading.option),
+        glare: washedOut,
       ));
     });
-    return results;
+    return _openLinesTogether(results);
+  }
+
+  /// A line printed for later opening opens all at once -- 1844's Gotthard
+  /// line is one piece laid over five hexes -- so its hexes are decided
+  /// together: the evidence from every hex of the line in view is added up,
+  /// and they all read as opened or all as printed. Each hex alone is a
+  /// close call (the piece reprints most of what is under it), and one hex
+  /// in shadow shouldn't split the line.
+  List<HexReading> _openLinesTogether(List<HexReading> results) {
+    final byCoord = {
+      for (final r in results)
+        if (r.hex.opensLater) r.hex.coord: r,
+    };
+    final seen = <HexCoord>{};
+    final decided = <HexCoord, HexReading>{};
+    for (final start in byCoord.keys) {
+      if (!seen.add(start)) continue;
+      // The hexes of this line in view: those joined to [start].
+      final line = <HexReading>[];
+      final queue = [start];
+      while (queue.isNotEmpty) {
+        final c = queue.removeLast();
+        line.add(byCoord[c]!);
+        for (final n in c.neighbors) {
+          if (byCoord.containsKey(n) && seen.add(n)) queue.add(n);
+        }
+      }
+      double lead = 0; // for opening, over staying as printed
+      for (final r in line) {
+        double? printed, opened;
+        for (final (o, score) in r.reading.ranked) {
+          if (o.isPrinted) {
+            printed ??= score;
+          } else {
+            opened ??= score;
+          }
+        }
+        if (printed == null || opened == null) continue;
+        lead += opened - printed;
+      }
+      final confidence = TileClassifier.confidenceFor(lead.abs());
+      for (final r in line) {
+        final option = r.reading.ranked
+            .map((e) => e.$1)
+            .firstWhere((o) => o.isPrinted == (lead <= 0),
+                orElse: () => r.reading.option);
+        decided[r.hex.coord] = HexReading(
+          hex: r.hex,
+          reading: TileReading(
+              option: option, confidence: confidence, ranked: r.reading.ranked),
+          patch: r.patch,
+          picture: r.picture,
+          tokens: r.tokens,
+          isUpgrade: r.isUpgrade && option == r.reading.option,
+          glare: r.glare,
+        );
+      }
+    }
+    return [for (final r in results) decided[r.hex.coord] ?? r];
+  }
+
+  /// Looks for tunnels on the hexes of [hexes] that can take one.
+  List<TunnelReading> readTunnels({
+    required img.Image photo,
+    required Homography boardToImage,
+    required Iterable<HexCoord> hexes,
+  }) {
+    final tunnelHexes = [
+      for (final c in hexes)
+        if (title.map.at(c) case final hex? when rules.tunnelPaths(hex).isNotEmpty)
+          hex,
+    ];
+    if (tunnelHexes.isEmpty) return const [];
+    final rgb = RgbImage.fromImage(photo);
+    return [
+      for (final hex in tunnelHexes)
+        const TunnelDetector()
+            .detect(rgb, boardToImage, hex, rules.tunnelPaths(hex)),
+    ];
+  }
+
+  /// Folds [readings] into [session], as tokens are: a tunnel the user set
+  /// stays as it is; one the app placed without being sure is replaced by
+  /// what a later photo shows, or taken away if that photo clearly shows
+  /// none. Tunnels aren't removed in play, so a sure one is kept.
+  static void applyTunnels(GameSession session, List<TunnelReading> readings) {
+    for (final r in readings) {
+      final id = r.hex.id;
+      final current = session.tunnels[id];
+      final open = current == null || session.tunnelDoubts.contains(id);
+      if (!open || r.confidence < _tokenConfidence) continue;
+      final path = r.path;
+      if (path != null) {
+        session.tunnels[id] = path;
+        if (r.confidence >= _sureTunnel) {
+          session.tunnelDoubts.remove(id);
+        } else {
+          session.tunnelDoubts.add(id);
+        }
+      } else if (current != null) {
+        session.tunnels.remove(id);
+        session.tunnelDoubts.remove(id);
+      }
+    }
+  }
+
+  static const double _sureTunnel = 0.8;
+
+  /// Looks for mountain railway plates on the mountains among [hexes]. A
+  /// mountain cut off by the edge of the photo is left unread.
+  List<MountainReading> readMountains({
+    required img.Image photo,
+    required Homography boardToImage,
+    required Iterable<HexCoord> hexes,
+  }) {
+    final mountains = [
+      for (final c in hexes)
+        if (title.map.at(c) case final hex? when rules.mountainPlates(hex).isNotEmpty)
+          hex,
+    ];
+    if (mountains.isEmpty) return const [];
+    final rgb = RgbImage.fromImage(photo);
+    return [
+      for (final hex in mountains)
+        const MountainDetector().detect(rgb, boardToImage, hex),
+    ];
+  }
+
+  /// Folds [readings] into [session], as tunnels are. A photo can tell that
+  /// a plate is there but not which one, so a plate it finds is recorded as
+  /// [GameSession.unknownPlate] and flagged for the user to name.
+  static void applyMountains(
+      GameSession session, List<MountainReading> readings) {
+    for (final r in readings) {
+      final id = r.hex.id;
+      final current = session.mountains[id];
+      final open = current == null || session.mountainDoubts.contains(id);
+      if (!open || r.confidence < _tokenConfidence) continue;
+      if (r.present) {
+        session.mountains[id] = current ?? GameSession.unknownPlate;
+        session.mountainDoubts.add(id);
+      } else if (current != null) {
+        session.mountains.remove(id);
+        session.mountainDoubts.remove(id);
+      }
+    }
   }
 
   /// Takes a photo as showing the board exactly as printed and remembers how
@@ -181,6 +378,91 @@ class BoardReader {
     return results;
   }
 
+  /// A later colour of tile than [from], reached by the upgrade rules.
+  bool _isUpgrade(PlacedTile? from, TileOption to) {
+    if (from == null || to.isPrinted || to.steps < 1) return false;
+    final before = tilePhases.indexOf(title.tiles[from.tileId]?.color ?? TileColor.plain);
+    final after = tilePhases.indexOf(title.tiles[to.tileId]?.color ?? TileColor.plain);
+    return before >= 0 && after > before;
+  }
+
+  /// How washed out by glare each hex of [hexes] is in [photo], 0..1.
+  ///
+  /// Glare off a board under a lamp lifts everything towards white in a
+  /// broad patch, and the tiles, which are glossier than the board, worst of
+  /// all: a yellow tile under it photographs nearly white and its track a
+  /// faint grey. Being white light added on top, it lifts every colour
+  /// channel, the weakest included; a lamp that is merely brighter in one
+  /// place lifts the colours it already has and leaves the weakest -- blue,
+  /// under a warm lamp -- low. So what is measured is the weakest channel of
+  /// each beige or yellow hex's background, against the photo's middle
+  /// value, smoothed over neighbours since glare is broad and one hex's
+  /// printing shouldn't decide it.
+  Map<HexCoord, double> measureGlare(
+    RgbImage photo,
+    Homography boardToImage,
+    Set<HexCoord> hexes,
+  ) {
+    final light = <HexCoord, double>{};
+    final rgb = List<double>.filled(3, 0);
+    for (final c in hexes) {
+      final colour = title.map.at(c)!.printed.color;
+      if (colour != TileColor.plain && colour != TileColor.yellow) continue;
+      final samples = <double>[];
+      for (double y = -0.6; y <= 0.61; y += 0.06) {
+        for (double x = -0.6; x <= 0.61; x += 0.06) {
+          final p = boardToImage.apply(c.boardCenter + Offset(x, y));
+          if (!photo.contains(p.dx, p.dy)) continue;
+          photo.sample(p.dx, p.dy, rgb);
+          samples.add(math.min(rgb[0], math.min(rgb[1], rgb[2])));
+        }
+      }
+      if (samples.length < 100) continue;
+      samples.sort();
+      // The background: brighter than the printing, short of the white
+      // city circles.
+      light[c] = samples[samples.length * 6 ~/ 10];
+    }
+    if (light.isEmpty) return const {};
+    final sorted = light.values.toList()..sort();
+    final middle = sorted[sorted.length ~/ 2];
+    final raw = {
+      for (final e in light.entries)
+        e.key: math.max(
+          // Brighter than the rest of the photo -- where there is enough of
+          // it to say what the rest looks like.
+          light.length >= 7
+              ? ((e.value - middle - _glareMargin) / _glareSpan).clamp(0.0, 1.0)
+              : 0.0,
+          // Or washed out outright: even the weakest colour near the top of
+          // the range. A close-up holds few hexes, and when glare covers
+          // most of them the photo's middle value is glare too.
+          ((e.value - _clippedFrom) / _clippedSpan).clamp(0.0, 1.0),
+        ),
+    };
+    return {
+      for (final c in hexes)
+        c: () {
+          final near = [
+            for (final e in raw.entries)
+              if (e.key.distanceTo(c) <= 1) e.value,
+          ]..sort();
+          return near.isEmpty ? 0.0 : near[near.length ~/ 2];
+        }(),
+    };
+  }
+
+  /// How much brighter than the photo's middle a background has to be
+  /// before it counts as glare, and over how much more it becomes total.
+  /// Yellow tiles are a little brighter than the beige map in any light.
+  static const double _glareMargin = 15;
+  static const double _glareSpan = 30;
+
+  /// Where a background's weakest colour channel starts to count as washed
+  /// out whatever the rest of the photo does, and where it is wholly so.
+  static const double _clippedFrom = 215;
+  static const double _clippedSpan = 30;
+
   static String _key(MapHex hex, TileOption o) =>
       o.isPrinted ? 'map:${hex.id}' : 'tile:${o.tileId}@${o.rotation}';
 
@@ -192,9 +474,30 @@ class BoardReader {
 
   /// Colours measured on hexes whose content the session is sure of stand in
   /// for the defaults, where there are enough of them.
-  ColourModel _colourModel(Map<HexCoord, Offset> relative, GameSession session) {
+  /// Each hex's background colour against the bare map near it, which
+  /// takes out most of the light's own colour.
+  Map<HexCoord, Offset> _relativeToPlain(
+      Map<HexCoord, Offset> chroma, GameSession session) {
+    final plain = <HexCoord>[
+      for (final c in chroma.keys)
+        if (_knownPlain(title.map.at(c)!, session)) c,
+    ];
+    final reference = plain.length >= 3 ? plain : chroma.keys.toList();
+    Offset localPlain(HexCoord c) {
+      final near = reference.where((r) => r.distanceTo(c) <= 3 && r != c).toList();
+      return _median([for (final r in near.length >= 3 ? near : reference) chroma[r]!]);
+    }
+
+    return {for (final c in chroma.keys) c: chroma[c]! - localPlain(c)};
+  }
+
+  /// The colours of the hexes whose content the session is sure of, by the
+  /// colour they should be, leaving out any washed out by glare.
+  Map<TileColor, List<Offset>> _knownColours(Map<HexCoord, Offset> relative,
+      GameSession session, Map<HexCoord, double> glare) {
     final byColour = <TileColor, List<Offset>>{};
     relative.forEach((c, colour) {
+      if ((glare[c] ?? 0) > _glaredOut) return;
       final hex = title.map.at(c)!;
       final state = session.stateOf(hex);
       if (state.isDoubtful || !state.basisKnown) return;
@@ -203,29 +506,99 @@ class BoardReader {
           : title.tiles[state.tile!.tileId] ?? hex.printed;
       byColour.putIfAbsent(def.color, () => []).add(colour);
     });
-    return ColourModel.defaults.withCentroids({
+    return byColour;
+  }
+
+  /// The colours to expect: the defaults, then the session's own profile if
+  /// it has one, then whatever this photo shows clearly enough of.
+  ColourModel _colourModel(Map<HexCoord, Offset> relative, GameSession session,
+      Map<HexCoord, double> glare) {
+    final byColour = _knownColours(relative, session, glare);
+    return ColourModel.defaults
+        .withCentroids(session.colourProfile?.colours ?? const {})
+        .withCentroids({
       for (final e in byColour.entries)
         if (e.value.length >= 3) e.key: _median(e.value),
     });
   }
 
+  /// How much remembered glare counts against what a photo shows itself:
+  /// the light is the same, but a close-up is taken from somewhere else.
+  static const double _priorWeight = 0.8;
+
+  /// Glare above which a hex's colours aren't trusted as a sample.
+  static const double _glaredOut = 0.3;
+
+  /// Measures how the board's colours look in [photo], for a session's
+  /// [ColourProfile]: each colour from the hexes [session] is sure of,
+  /// leaving out any under glare, which is reported instead.
+  Calibration calibrate({
+    required img.Image photo,
+    required Homography boardToImage,
+    required Iterable<HexCoord> hexes,
+    required GameSession session,
+  }) {
+    final rgb = RgbImage.fromImage(photo);
+    final inView = hexes.where(title.map.contains).toSet();
+    final glare = measureGlare(rgb, boardToImage, inView);
+    final chroma = {
+      for (final c in inView)
+        c: HexPatch.fromPhoto(rgb, boardToImage, c).chroma,
+    };
+    final byColour =
+        _knownColours(_relativeToPlain(chroma, session), session, glare);
+    final colours = {
+      for (final e in byColour.entries)
+        if (e.value.length >= 2) e.key: _median(e.value),
+    };
+    return Calibration(
+      profile: ColourProfile(colours: colours, measured: DateTime.now()),
+      samples: {for (final e in byColour.entries) e.key: e.value.length},
+      glare: {
+        for (final e in glare.entries)
+          if (e.value > _glaredOut) e.key,
+      },
+    );
+  }
+
+  /// What each city on [hex] holds, read as [option]: per station, the
+  /// first of its slots with a token in, or else what the first slot
+  /// showed.
   Map<String, TokenDetection> _tokens(
-    img.Image photo,
+    RgbImage photo,
     Homography boardToImage,
     MapHex hex,
-    TileDefinition? content,
+    TileOption option,
   ) {
     final result = <String, TokenDetection>{};
-    if (content == null) return result;
+    final content = rules.contentOf(hex, option);
+    if (content == null || content.cityCount == 0) return result;
     final centre = hex.coord.boardCenter;
-    final radius = boardToImage.localScale(centre);
+    final white = TokenDetector.localWhite(photo, boardToImage, centre);
     for (final station in content.stations) {
       if (station.kind != StationKind.city) continue;
-      final p = boardToImage.apply(
-          TileRenderer.stationPosition(content, station.index, centre, 1));
-      result['${hex.coord.row}_${hex.coord.col}_${station.index}'] =
-          tokenDetector.detect(photo, p.dx.round(), p.dy.round(),
-              (radius * 0.16).round().clamp(2, 1000));
+      Company? home;
+      for (final c in title.companies) {
+        if (c.isHomeOf(hex.id, station.index)) home = c;
+      }
+      TokenDetection? seen;
+      for (final slot
+          in TileRenderer.slotPositions(content, station.index, centre, 1)) {
+        final detection = tokenDetector.detect(
+          photo: photo,
+          boardToImage: boardToImage,
+          slot: slot,
+          slotRadius: TileRenderer.slotRadiusFor(station),
+          white: white,
+          onTile: !option.isPrinted,
+          home: home,
+        );
+        if (seen == null || (detection.present && !seen.present)) {
+          seen = detection;
+        }
+        if (detection.present) break;
+      }
+      result['${hex.coord.row}_${hex.coord.col}_${station.index}'] = seen!;
     }
     return result;
   }
@@ -237,8 +610,15 @@ class BoardReader {
     return Offset(xs[xs.length ~/ 2], ys[ys.length ~/ 2]);
   }
 
-  /// Folds [readings] into [session]: tiles and confidence per hex, plus any
-  /// clear token colours for city slots the session hasn't got an owner for.
+  /// Folds [readings] into [session]: tiles and confidence per hex, and the
+  /// station tokens seen.
+  ///
+  /// A token the user has set or confirmed stays as it is. One the app put
+  /// there itself without being sure whose it is (see
+  /// `GameSession.tokenDoubts`) is replaced by what a later photo shows, or
+  /// taken away if that photo clearly shows the slot empty. Tokens are only
+  /// read where the tile was read confidently: where it wasn't, the app
+  /// doesn't know where the cities are.
   static void apply(
     GameSession session,
     List<HexReading> readings, {
@@ -252,16 +632,51 @@ class BoardReader {
         source: source,
         reference: r.patch.encodeDarkness(),
         referenceChroma: r.patch.chroma,
+        upgrade: r.isUpgrade,
       );
       if (!r.reading.isReliable) continue;
       r.tokens.forEach((stationId, detection) {
-        if (session.tokens.containsKey(stationId)) return;
-        if (detection.looksEmpty || detection.company == null) return;
-        if (detection.confidence < 0.15) return;
-        session.tokens[stationId] = detection.company!.id;
+        final current = session.tokens[stationId];
+        final open = current == null || session.tokenDoubts.contains(stationId);
+        if (!open || detection.confidence < _tokenConfidence) return;
+        final company = detection.company;
+        if (detection.present && company != null) {
+          session.tokens[stationId] = company.id;
+          if (detection.companyConfidence >= _tokenConfidence) {
+            session.tokenDoubts.remove(stationId);
+          } else {
+            session.tokenDoubts.add(stationId);
+          }
+        } else if (!detection.present && current != null) {
+          session.tokens.remove(stationId);
+          session.tokenDoubts.remove(stationId);
+        }
       });
     }
   }
+
+  /// What taking back a tile the app read costs, in upgrade steps.
+  static const int _misreadSteps = 3;
+
+  /// How sure a token reading has to be to change the session.
+  static const double _tokenConfidence = 0.5;
+}
+
+/// What [BoardReader.calibrate] found.
+class Calibration {
+  final ColourProfile profile;
+
+  /// How many hexes each colour was measured from.
+  final Map<TileColor, int> samples;
+
+  /// Hexes under glare, left out of the measurement.
+  final Set<HexCoord> glare;
+
+  const Calibration({
+    required this.profile,
+    required this.samples,
+    required this.glare,
+  });
 }
 
 /// A close-up for the user to take: [target] in the middle of the frame,

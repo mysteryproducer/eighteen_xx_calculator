@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 
 import '../models/board.dart';
 import '../models/board_graph.dart';
-import '../models/company.dart';
 import '../models/game_session.dart';
 import '../models/game_title.dart';
 import '../models/map_layout.dart';
@@ -64,6 +63,9 @@ class BoardMapPainter extends CustomPainter {
   /// Marks a tile that can't be right.
   static const Color wrong = Color(0xFFE53935);
 
+  /// Marks a hex the user set where a photo since shows something else.
+  static const Color suggested = Color(0xFF8E24AA);
+
   BoardMapPainter({
     required this.title,
     required this.session,
@@ -117,9 +119,12 @@ class BoardMapPainter extends CustomPainter {
           Paint()..color = Colors.blueAccent.withValues(alpha: 0.3),
         );
       }
-      final doubtful = hex.takesTiles && session.stateOf(hex).isDoubtful;
+      final doubtful = (hex.takesTiles && session.stateOf(hex).isDoubtful) ||
+          session.tunnelDoubts.contains(hex.id) ||
+          session.mountainDoubts.contains(hex.id);
+      final disputed = session.stateOf(hex).suggestion != null;
       final misfit = misfits.contains(hex.coord);
-      if (doubtful || misfit || hex.coord == highlighted ||
+      if (doubtful || disputed || misfit || hex.coord == highlighted ||
           selected.contains(hex.coord)) {
         canvas.drawPath(
           _outline(centre, boardMapScale * 0.97),
@@ -130,7 +135,9 @@ class BoardMapPainter extends CustomPainter {
                 ? Colors.blueAccent
                 : misfit
                     ? wrong
-                    : uncertain,
+                    : disputed
+                        ? suggested
+                        : uncertain,
         );
       }
     }
@@ -173,11 +180,13 @@ class BoardMapPainter extends CustomPainter {
       final centre = geometry.stationPosition(def, station);
       final radius = boardMapScale *
           (station.kind == StationKind.city ? 0.2 : 0.16);
-      final company = Company.byId(station.companyId);
+      final company = title.companyById(station.companyId);
       if (company != null) {
         canvas.drawCircle(centre, radius * 0.85, Paint()..color = company.color);
       }
-      final flagged = station.revenueSource == RevenueSource.unverified;
+      // Whose token this is was guessed from a photo, or the revenue is.
+      final flagged = station.revenueSource == RevenueSource.unverified ||
+          (company != null && session.tokenDoubts.contains(station.id));
       if (onRoute.contains(station.id) || flagged) {
         canvas.drawCircle(
           centre,

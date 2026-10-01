@@ -6,6 +6,9 @@ import 'package:flutter/material.dart';
 import '../geometry/homography.dart';
 import '../models/board.dart';
 import '../models/map_layout.dart';
+import '../models/tile_definition.dart';
+import '../processing/tile_renderer.dart';
+import '../services/app_settings.dart';
 import 'camera_capture.dart';
 import 'mac_webcam_capture.dart';
 
@@ -24,12 +27,18 @@ class CaptureGuide {
   /// The hexes drawn, usually [target] and its neighbours.
   final List<MapHex> hexes;
 
+  /// The tiles the game already has on those hexes, drawn faintly inside the
+  /// outline: something to line up with besides a grid that looks the same
+  /// everywhere.
+  final Map<HexCoord, TileDefinition> tiles;
+
   final String instruction;
 
   const CaptureGuide({
     required this.target,
     required this.hexes,
     required this.instruction,
+    this.tiles = const {},
   });
 
   /// The target hex's circumradius as a share of the frame's shorter side.
@@ -59,15 +68,34 @@ Future<String?> capturePhoto(BuildContext context, {CaptureGuide? guide}) =>
           : CameraCapture(guide: guide),
     ));
 
-/// Draws a [CaptureGuide]'s hexes over the camera preview.
+/// Draws a [CaptureGuide]'s hexes over the camera preview, with the tiles
+/// already on them at [tileOpacity].
 class CaptureGuidePainter extends CustomPainter {
   final CaptureGuide guide;
+  final double tileOpacity;
 
-  const CaptureGuidePainter(this.guide);
+  const CaptureGuidePainter(this.guide,
+      {this.tileOpacity = AppSettings.defaultOverlayOpacity});
 
   @override
   void paint(Canvas canvas, Size size) {
     final h = guide.homographyFor(size);
+    if (tileOpacity > 0 && guide.tiles.isNotEmpty) {
+      // The guide is a plain scale and shift, so each tile is drawn the way
+      // the board map draws it, just smaller or larger.
+      final radius = h.localScale(guide.target.boardCenter);
+      final tileSize = radius / TileRenderer.radiusShare;
+      canvas.saveLayer(Offset.zero & size,
+          Paint()..color = Colors.black.withValues(alpha: tileOpacity));
+      guide.tiles.forEach((coord, tile) {
+        final centre = h.apply(coord.boardCenter);
+        canvas.save();
+        canvas.translate(centre.dx - tileSize / 2, centre.dy - tileSize / 2);
+        TileRenderer.paint(canvas, tile, tileSize);
+        canvas.restore();
+      });
+      canvas.restore();
+    }
     for (final hex in guide.hexes) {
       final isTarget = hex.coord == guide.target;
       final path = Path();
@@ -112,7 +140,54 @@ class CaptureGuidePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CaptureGuidePainter oldDelegate) =>
-      oldDelegate.guide != guide;
+      oldDelegate.guide != guide || oldDelegate.tileOpacity != tileOpacity;
+}
+
+/// The guide over a camera preview, following the overlay setting.
+class CaptureGuideOverlay extends StatelessWidget {
+  final CaptureGuide guide;
+
+  const CaptureGuideOverlay(this.guide, {super.key});
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<double>(
+        valueListenable: AppSettings.shared.overlayOpacity,
+        builder: (context, opacity, _) => CustomPaint(
+          painter: CaptureGuidePainter(guide, tileOpacity: opacity),
+        ),
+      );
+}
+
+/// How strongly the tiles already laid show over the preview, remembered
+/// from one close-up to the next.
+class OverlayOpacityControl extends StatelessWidget {
+  const OverlayOpacityControl({super.key});
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<double>(
+        valueListenable: AppSettings.shared.overlayOpacity,
+        builder: (context, opacity, _) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Text('Tiles shown', style: Theme.of(context).textTheme.bodySmall),
+              Expanded(
+                child: Slider(
+                  value: opacity,
+                  divisions: 10,
+                  label: '${(opacity * 100).round()}%',
+                  onChanged: (v) => AppSettings.shared.setOverlayOpacity(v),
+                ),
+              ),
+              SizedBox(
+                width: 40,
+                child: Text('${(opacity * 100).round()}%',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ),
+            ],
+          ),
+        ),
+      );
 }
 
 /// The instruction bar shown under a guided preview.

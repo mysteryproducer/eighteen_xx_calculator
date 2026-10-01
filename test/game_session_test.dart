@@ -1,12 +1,20 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show Color, Offset;
 
 import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/board_graph.dart';
 import 'package:eighteen_xx_calculator/models/game_session.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
+import 'package:eighteen_xx_calculator/models/tile_rules.dart';
 import 'package:eighteen_xx_calculator/models/tile_definition.dart';
+import 'package:eighteen_xx_calculator/models/map_layout.dart';
 import 'package:eighteen_xx_calculator/processing/board_reader.dart';
+import 'package:eighteen_xx_calculator/processing/hex_patch.dart';
+import 'package:eighteen_xx_calculator/processing/mountain_detector.dart';
+import 'package:eighteen_xx_calculator/processing/tile_classifier.dart';
+import 'package:eighteen_xx_calculator/processing/token_detector.dart';
+import 'package:eighteen_xx_calculator/processing/tunnel_detector.dart';
 import 'package:eighteen_xx_calculator/services/session_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -17,6 +25,37 @@ GameSession newGame({bool startedEmpty = true}) => GameSession.start(
       name: 'Test game',
       startedEmpty: startedEmpty,
     );
+
+/// Bern, BLS's home city, and the id of its station.
+final bern = title.map.byId('F11')!;
+final bernStation = '${bern.coord.row}_${bern.coord.col}_0';
+
+/// A reading of [hex] as unchanged, [sure] of that, whose one city showed
+/// [token].
+HexReading readingWith(MapHex hex, TokenDetection token, {double sure = 0.9}) =>
+    HexReading(
+      hex: hex,
+      reading: TileReading(
+        option: TileOption.printed,
+        confidence: sure,
+        ranked: const [(TileOption.printed, 0.0)],
+      ),
+      patch: HexPatch(Float32List(HexPatch.size * HexPatch.size), Offset.zero,
+          Float32List(6)),
+      picture: Uint8List(0),
+      tokens: {'${hex.coord.row}_${hex.coord.col}_0': token},
+    );
+
+TokenDetection tokenOf(String companyId, {double whose = 0.9}) => TokenDetection(
+      present: true,
+      confidence: 0.9,
+      color: const Color(0xFFC1B22B),
+      company: title.companyById(companyId),
+      companyConfidence: whose,
+    );
+
+const emptySlot =
+    TokenDetection(present: false, confidence: 0.9, color: Color(0xFFFFFFFF));
 
 void main() {
   group('what the session believes', () {
@@ -79,19 +118,55 @@ void main() {
           source: HexSource.closeUp);
       final state = session.stateOf(basel);
       expect(state.tile?.tileId, '5');
-      // But it is flagged, so someone looks again.
-      expect(state.isDoubtful, isTrue);
+      // Nor does it unsettle it: a hex the user set stays theirs, so a
+      // confident photo later can't quietly put it back.
+      expect(state.source, HexSource.manual);
+      expect(state.isDoubtful, isFalse);
+      expect(state.suggestion, isNull);
     });
 
-    test('a confident reading does pick up a tile laid since', () {
+    test('a confident reading does pick up an upgrade laid since', () {
       final session = newGame();
       final basel = title.map.byId('C12')!;
       session.setManually(basel, const PlacedTile('57'));
       session.recordReading(basel,
           tile: const PlacedTile('14'),
           confidence: 0.95,
-          source: HexSource.closeUp);
+          source: HexSource.closeUp,
+          upgrade: true);
       expect(session.stateOf(basel).tile?.tileId, '14');
+      expect(session.stateOf(basel).suggestion, isNull);
+    });
+
+    test('a confident reading that is no upgrade is kept for review, not taken',
+        () {
+      final session = newGame();
+      final basel = title.map.byId('C12')!;
+      session.setManually(basel, const PlacedTile('57', rotation: 1));
+      session.recordReading(basel,
+          tile: const PlacedTile('57', rotation: 3),
+          confidence: 0.9,
+          source: HexSource.closeUp);
+      final state = session.stateOf(basel);
+      expect(state.tile?.rotation, 1);
+      expect(state.source, HexSource.manual);
+      expect(state.suggestion?.tile?.rotation, 3);
+      expect(session.suggestedHexes(title.map), {basel.coord});
+
+      // A photo that agrees with the user settles it again...
+      session.recordReading(basel,
+          tile: const PlacedTile('57', rotation: 1),
+          confidence: 0.9,
+          source: HexSource.closeUp);
+      expect(session.stateOf(basel).suggestion, isNull);
+
+      // ...and so does the user, whatever they choose.
+      session.recordReading(basel,
+          tile: null, confidence: 0.9, source: HexSource.overview);
+      expect(session.stateOf(basel).suggestion?.tile, isNull);
+      expect(session.suggestedHexes(title.map), {basel.coord});
+      session.setManually(basel, const PlacedTile('57', rotation: 1));
+      expect(session.suggestedHexes(title.map), isEmpty);
     });
   });
 
@@ -128,6 +203,35 @@ void main() {
           contains(langnau.coord));
     });
 
+    test('a tunnel carries nothing until the game opens it', () {
+      final session = newGame();
+      final tunnel = title.map.byId('H19')!; // Gotthard, printed for later
+      final andermatt = title.map.byId('H17')!; // its town
+
+      // Printed, the line is only a promise: the track shows on the map but
+      // carries nothing, so the town on it reaches nowhere.
+      expect(session.content(title)[tunnel.coord]!.edges, isNotEmpty);
+      expect(session.content(title)[tunnel.coord]!.routableEdges, isEmpty);
+      final before = session.graph(title);
+      expect(
+          before.edgesFrom(
+              before.stations.firstWhere((s) => s.hex == andermatt.coord)),
+          isEmpty);
+
+      // The game opens the line by laying its own tiles, and the same track
+      // starts carrying trains.
+      final rules = TileRules(title);
+      for (final hex in [andermatt, tunnel]) {
+        session.setManually(hex, rules.options(hex, null, maxSteps: 1).last.placed);
+      }
+      final after = session.content(title);
+      expect(after[tunnel.coord]!.routableEdges,
+          session.content(title)[tunnel.coord]!.edges);
+      // Andermatt's town now has track reaching the tunnel beside it.
+      expect(after[andermatt.coord]!.routableEdges,
+          contains(andermatt.printed.edges.first));
+    });
+
     test('tokens are remembered per station', () {
       final session = newGame();
       final basel = title.map.byId('C12')!;
@@ -135,6 +239,153 @@ void main() {
       session.tokens[id] = 'red';
       expect(session.graph(title).stations
           .firstWhere((s) => s.id == id).companyId, 'red');
+    });
+  });
+
+  group('tunnels', () {
+    test('a tunnel adds narrow track through whatever is on the hex', () {
+      final session = newGame();
+      final gotthard = title.map.byId('H19')!;
+      session.tunnels['H19'] = (2, 5);
+      final content = session.content(title)[gotthard.coord]!;
+      expect(content.segments.where((s) => s.narrow), hasLength(1));
+      expect(content.routableEdges, containsAll(<int>{2, 5}));
+    });
+
+    TunnelReading tunnel((int, int)? path, double sure) =>
+        TunnelReading(title.map.byId('H19')!, path, sure);
+
+    test('a tunnel the user set is never changed by a photo', () {
+      final session = newGame();
+      session.tunnels['H19'] = (1, 4);
+      BoardReader.applyTunnels(session, [tunnel((2, 5), 1)]);
+      BoardReader.applyTunnels(session, [tunnel(null, 1)]);
+      expect(session.tunnels['H19'], (1, 4));
+    });
+
+    test('an uncertain tunnel is flagged, and later photos settle it', () {
+      final session = newGame();
+      BoardReader.applyTunnels(session, [tunnel((2, 5), 0.6)]);
+      expect(session.tunnels['H19'], (2, 5));
+      expect(session.tunnelDoubts, {'H19'});
+      BoardReader.applyTunnels(session, [tunnel(null, 0.9)]);
+      expect(session.tunnels, isEmpty);
+      expect(session.tunnelDoubts, isEmpty);
+      BoardReader.applyTunnels(session, [tunnel((2, 5), 0.95)]);
+      expect(session.tunnels['H19'], (2, 5));
+      expect(session.tunnelDoubts, isEmpty);
+    });
+  });
+
+  group('mountain railways', () {
+    final pilatus = title.map.byId('G14')!;
+
+    int pays(GameSession session) => session
+        .content(title)[pilatus.coord]!
+        .stations
+        .single
+        .revenueIn(session.phase);
+
+    test('a mountain pays nothing until a plate is put on it, then what the '
+        'plate pays in each phase', () {
+      final session = newGame();
+      expect(pays(session), 0);
+      session.mountains['G14'] = 'XM2'; // 10, 40, 50, 60
+      expect(pays(session), 10);
+      session.phase = TileColor.green;
+      expect(pays(session), 40);
+      session.phase = TileColor.grey;
+      expect(pays(session), 60);
+    });
+
+    test('a plate seen but not yet named pays nothing', () {
+      final session = newGame();
+      session.mountains['G14'] = GameSession.unknownPlate;
+      expect(pays(session), 0);
+    });
+
+    MountainReading plate(bool present, double sure) =>
+        MountainReading(pilatus, present, sure);
+
+    test('a plate seen in a photo is recorded, for the user to name', () {
+      final session = newGame();
+      BoardReader.applyMountains(session, [plate(true, 0.9)]);
+      expect(session.mountains['G14'], GameSession.unknownPlate);
+      expect(session.mountainDoubts, {'G14'});
+      // Seeing it again says no more about which plate it is.
+      BoardReader.applyMountains(session, [plate(true, 1)]);
+      expect(session.mountainDoubts, {'G14'});
+    });
+
+    test('a plate the user named is never changed by a photo', () {
+      final session = newGame();
+      session.mountains['G14'] = 'XM1';
+      BoardReader.applyMountains(session, [plate(false, 1)]);
+      BoardReader.applyMountains(session, [plate(true, 1)]);
+      expect(session.mountains['G14'], 'XM1');
+      expect(session.mountainDoubts, isEmpty);
+    });
+
+    test('only a clear photo of a bare mountain takes away a plate a photo '
+        'found', () {
+      final session = newGame();
+      BoardReader.applyMountains(session, [plate(true, 0.9)]);
+      BoardReader.applyMountains(session, [plate(false, 0.3)]);
+      expect(session.mountains['G14'], GameSession.unknownPlate);
+      BoardReader.applyMountains(session, [plate(false, 0.9)]);
+      expect(session.mountains, isEmpty);
+      expect(session.mountainDoubts, isEmpty);
+    });
+  });
+
+  group('station tokens from photos', () {
+    void read(GameSession session, TokenDetection token, {double sure = 0.9}) =>
+        BoardReader.apply(session, [readingWith(bern, token, sure: sure)],
+            source: HexSource.closeUp);
+
+    test('a token seen in a photo is recorded as that company\'s', () {
+      final session = newGame();
+      read(session, tokenOf('BLS'));
+      expect(session.tokens[bernStation], 'BLS');
+      expect(session.tokenDoubts, isEmpty);
+    });
+
+    test('a token whose company was a guess is marked for checking', () {
+      final session = newGame();
+      read(session, tokenOf('BLS', whose: 0.2));
+      expect(session.tokens[bernStation], 'BLS');
+      expect(session.tokenDoubts, contains(bernStation));
+    });
+
+    test('a later photo can settle a guess', () {
+      final session = newGame();
+      read(session, tokenOf('BLS', whose: 0.2));
+      read(session, tokenOf('GB'));
+      expect(session.tokens[bernStation], 'GB');
+      expect(session.tokenDoubts, isEmpty);
+    });
+
+    test('a guess a later photo shows was never there is taken away', () {
+      final session = newGame();
+      read(session, tokenOf('BLS', whose: 0.2));
+      read(session, emptySlot);
+      expect(session.tokens, isEmpty);
+      expect(session.tokenDoubts, isEmpty);
+    });
+
+    test('a token the user set stays as they set it', () {
+      final session = newGame();
+      session.tokens[bernStation] = 'GB';
+      read(session, tokenOf('BLS'));
+      read(session, emptySlot);
+      expect(session.tokens[bernStation], 'GB');
+    });
+
+    test('no tokens are read off a hex whose tile was in doubt', () {
+      // Where the tile is unsure, so is where its cities are.
+      final session = newGame();
+      read(session, tokenOf('BLS'), sure: 0.3);
+      expect(session.tokens, isEmpty);
     });
   });
 
@@ -153,6 +404,21 @@ void main() {
       session.phase = TileColor.green;
       session.setManually(title.map.byId('C12')!, const PlacedTile('57', rotation: 4));
       session.tokens['x'] = 'blue';
+      session.tokenDoubts.add('x');
+      session.tunnels['H19'] = (2, 5);
+      session.tunnelDoubts.add('H19');
+      session.mountains['G14'] = 'XM3';
+      session.mountains['L23'] = GameSession.unknownPlate;
+      session.mountainDoubts.add('L23');
+      session.colourProfile = ColourProfile(
+          colours: {TileColor.yellow: const Offset(0.02, 0.15)},
+          measured: DateTime(2026, 10, 1, 11, 40));
+      final f13 = title.map.byId('F13')!;
+      session.setManually(f13, const PlacedTile('58', rotation: 4));
+      session.recordReading(f13,
+          tile: const PlacedTile('3', rotation: 2),
+          confidence: 0.8,
+          source: HexSource.closeUp);
       session.revenueOverrides['x'] = 90;
       await store.save(session);
 
@@ -162,6 +428,19 @@ void main() {
       expect(loaded.phase, TileColor.green);
       expect(loaded.tileAt(title.map.byId('C12')!)?.rotation, 4);
       expect(loaded.tokens['x'], 'blue');
+      expect(loaded.tokenDoubts, {'x'});
+      expect(loaded.tunnels['H19'], (2, 5));
+      expect(loaded.colourProfile?.colours[TileColor.yellow],
+          const Offset(0.02, 0.15));
+      expect(loaded.colourProfile?.measured, DateTime(2026, 10, 1, 11, 40));
+      expect(loaded.tunnelDoubts, {'H19'});
+      expect(loaded.mountains,
+          {'G14': 'XM3', 'L23': GameSession.unknownPlate});
+      expect(loaded.mountainDoubts, {'L23'});
+      final suggestion = loaded.stateOf(title.map.byId('F13')!).suggestion;
+      expect(suggestion?.tile?.tileId, '3');
+      expect(suggestion?.tile?.rotation, 2);
+      expect(suggestion?.confidence, 0.8);
       expect(loaded.revenueOverrides['x'], 90);
     });
 

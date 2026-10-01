@@ -88,13 +88,43 @@ class TileStation {
   /// Empty when the revenue is a single figure.
   final Map<TileColor, int> phaseRevenue;
 
+  /// Where on the hex this stop is printed, as tobymao/18xx's `loc:`: a side
+  /// number, or a half number for the corner between two sides. Null means
+  /// the middle of the hex.
+  final double? loc;
+
+  /// `style:` from the tile string, when it overrides how the stop is drawn
+  /// (`dot`, `rect`, `hidden`).
+  final String? style;
+
+  /// How many sixths of a turn the tile this stop is on has been turned. A
+  /// city with several slots in the middle of a tile has them printed in a
+  /// row that turns with the tile.
+  final int turn;
+
   const TileStation({
     required this.index,
     required this.kind,
     required this.revenue,
     this.slots = 1,
     this.phaseRevenue = const {},
+    this.loc,
+    this.style,
+    this.turn = 0,
   });
+
+  /// This stop turned [steps] sixths of a turn clockwise, since [loc] is
+  /// measured against the hex's sides.
+  TileStation rotated(int steps) => TileStation(
+        index: index,
+        kind: kind,
+        revenue: revenue,
+        slots: slots,
+        phaseRevenue: phaseRevenue,
+        loc: loc == null ? null : (loc! + steps) % 6,
+        style: style,
+        turn: (turn + steps) % 6,
+      );
 
   /// What this stop pays once the game has reached [phase]: the value for the
   /// latest phase printed that isn't past [phase].
@@ -118,7 +148,12 @@ class TileSegment {
   /// for later train rules; it still connects for now.
   final bool narrow;
 
-  const TileSegment(this.a, this.b, {this.narrow = false});
+  /// Track printed on the map for a line that hasn't opened yet (1844's
+  /// Gotthard tunnel). It is there to be seen -- so recognition should expect
+  /// it -- but nothing can run over it.
+  final bool future;
+
+  const TileSegment(this.a, this.b, {this.narrow = false, this.future = false});
 }
 
 class TileDefinition {
@@ -147,10 +182,38 @@ class TileDefinition {
   int get cityCount => stations.where((s) => s.kind == StationKind.city).length;
   int get townCount => stations.where((s) => s.kind == StationKind.town).length;
 
-  /// The hex edges this tile's track reaches.
+  /// The hex edges this tile's printing reaches, including track that can't
+  /// be run over yet -- this is what a photo of the hex shows.
   Set<int> get edges => {
         for (int e = 0; e < 6; e++)
           if (touchesEdge(e)) e,
+      };
+
+  /// How strongly the printing should run off each edge it reaches, for
+  /// recognition: 1 for track, and [futureExit] where the only track is a
+  /// line that hasn't opened, which the map prints as a thin dotted line.
+  /// That difference is what tells an opened line -- solid track on a tile
+  /// laid over it -- from the printing underneath.
+  Map<int, double> get exitStrengths => {
+        for (final e in edges)
+          e: segments.any((seg) => !seg.future && _touches(seg, e))
+              ? 1.0
+              : futureExit,
+      };
+
+  static const double futureExit = 0.35;
+
+  static bool _touches(TileSegment seg, int edge) =>
+      (seg.a is EdgeEndpoint && (seg.a as EdgeEndpoint).edge == edge) ||
+      (seg.b is EdgeEndpoint && (seg.b as EdgeEndpoint).edge == edge);
+
+  /// The edges a train could actually leave by.
+  Set<int> get routableEdges => {
+        for (final seg in segments)
+          if (!seg.future) ...[
+            if (seg.a case EdgeEndpoint(:final edge)) edge,
+            if (seg.b case EdgeEndpoint(:final edge)) edge,
+          ],
       };
 
   /// True if any segment on this tile touches hex edge [edge].
@@ -173,16 +236,56 @@ class TileDefinition {
     return TileDefinition(
       id: id,
       color: color,
-      stations: stations,
+      stations: [for (final station in stations) station.rotated(s)],
       label: label,
       impassable: {for (final e in impassable) (e + s) % 6},
       segments: [
         for (final seg in segments)
           TileSegment(rotateEndpoint(seg.a), rotateEndpoint(seg.b),
-              narrow: seg.narrow),
+              narrow: seg.narrow, future: seg.future),
       ],
     );
   }
+
+  /// A copy that pays what [plate] pays: 1844's mountain railways put a
+  /// revenue plate on a mountain printed as paying nothing.
+  TileDefinition withRevenueFrom(TileDefinition plate) {
+    final source = plate.stations.where((s) => s.kind == StationKind.offboard);
+    if (source.isEmpty) return this;
+    return TileDefinition(
+      id: id,
+      color: color,
+      label: label,
+      impassable: impassable,
+      segments: segments,
+      stations: [
+        for (final s in stations)
+          s.kind == StationKind.offboard
+              ? TileStation(
+                  index: s.index,
+                  kind: s.kind,
+                  revenue: source.first.revenue,
+                  slots: s.slots,
+                  phaseRevenue: source.first.phaseRevenue,
+                  loc: s.loc,
+                  style: s.style,
+                  turn: s.turn,
+                )
+              : s,
+      ],
+    );
+  }
+
+  /// A copy with [extra] track added: 1844's tunnels are narrow track laid
+  /// through whatever is already on the hex.
+  TileDefinition withSegments(List<TileSegment> extra) => TileDefinition(
+        id: id,
+        color: color,
+        stations: stations,
+        label: label,
+        impassable: impassable,
+        segments: [...segments, ...extra],
+      );
 
   static TileEndpoint _parseEndpoint(String raw) {
     final v = raw.trim();
@@ -233,6 +336,8 @@ class TileDefinition {
         case 'offboard':
           int revenue = 0;
           int slots = 1;
+          double? loc;
+          String? style;
           var phaseRevenue = const <TileColor, int>{};
           for (final sp in subParts) {
             final kv = sp.split(':');
@@ -242,6 +347,8 @@ class TileDefinition {
               phaseRevenue = _parsePhaseRevenue(kv[1]);
             }
             if (kv[0] == 'slots') slots = int.tryParse(kv[1]) ?? 1;
+            if (kv[0] == 'loc') loc = double.tryParse(kv[1]);
+            if (kv[0] == 'style') style = kv[1];
           }
           stations.add(TileStation(
             index: stations.length,
@@ -253,6 +360,8 @@ class TileDefinition {
             revenue: revenue,
             slots: slots,
             phaseRevenue: phaseRevenue,
+            loc: loc,
+            style: style,
           ));
           break;
         case 'path':
@@ -266,10 +375,9 @@ class TileDefinition {
             if (kv[0] == 'b') b = _parseEndpoint(kv[1]);
             if (kv[0] == 'track') track = kv[1];
           }
-          // Future track (1844's Gotthard tunnel before it opens, say) is
-          // printed on the map but can't be run yet.
-          if (a != null && b != null && track != 'future') {
-            segments.add(TileSegment(a, b, narrow: track == 'narrow'));
+          if (a != null && b != null) {
+            segments.add(TileSegment(a, b,
+                narrow: track == 'narrow', future: track == 'future'));
           }
           break;
         case 'label':

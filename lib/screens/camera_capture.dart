@@ -1,6 +1,7 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
+import '../services/app_settings.dart';
 import 'capture.dart';
 
 /// Photographs the board with the device camera and returns the file path.
@@ -26,6 +27,7 @@ class _CameraCaptureState extends State<CameraCapture> {
   @override
   void initState() {
     super.initState();
+    AppSettings.shared.load();
     _initCamera();
   }
 
@@ -99,9 +101,7 @@ class _CameraCaptureState extends State<CameraCapture> {
                   : _isInitialized && _controller != null
                       ? CameraPreview(
                           _controller!,
-                          child: guide == null
-                              ? null
-                              : CustomPaint(painter: CaptureGuidePainter(guide)),
+                          child: guide == null ? null : CaptureGuideOverlay(guide),
                         )
                       : const CircularProgressIndicator(),
             ),
@@ -113,6 +113,8 @@ class _CameraCaptureState extends State<CameraCapture> {
               children: [
                 CaptureInstructions(guide?.instruction ??
                     'Fit the whole board in the frame, as square-on as you can.'),
+                if (guide != null && guide.tiles.isNotEmpty)
+                  const OverlayOpacityControl(),
                 Padding(
                   padding: const EdgeInsets.all(12),
                   child: FilledButton.icon(

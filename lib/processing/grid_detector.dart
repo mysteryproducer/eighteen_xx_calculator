@@ -83,14 +83,31 @@ class GridDetector {
     var work = _Working.of(photo, workingSize);
     log?.call('working ${work.lines.width}x${work.lines.height}, '
         'line threshold ${work.threshold.toStringAsFixed(3)}');
-    var lattice = _estimateLattice(work.lines, log: log);
+    final maxSpacing = _largestSpacing(work.lines.width, work.lines.height);
+    final minSpacing = _smallestSpacing(work.lines.width, work.lines.height);
+    var lattice = _estimateLattice(work.lines,
+        log: log, maxSpacing: maxSpacing, minSpacing: minSpacing);
+    if (lattice == null) {
+      // A photo taken at a steep angle repeats at one spacing on the near
+      // side of the board and two thirds of it on the far side, and over
+      // the whole photo the repeat smears out. The middle of the photo
+      // varies much less.
+      log?.call('no repeat found; looking in the middle of the photo');
+      final w = work.lines.width, h = work.lines.height;
+      lattice = _estimateLattice(
+          work.lines.cropped(w ~/ 5, h ~/ 5, w * 3 ~/ 5, h * 3 ~/ 5),
+          log: log,
+          maxSpacing: maxSpacing,
+          minSpacing: minSpacing);
+    }
     if (lattice == null) {
       // Perhaps the board fills the frame and its outlines are thick; look
       // again with a filter for wider lines.
       log?.call('no repeat found; trying again for thicker lines');
       work = _Working.of(photo, workingSize,
           hexSpacing: work.lines.width / 6);
-      lattice = _estimateLattice(work.lines, log: log);
+      lattice = _estimateLattice(work.lines,
+          log: log, maxSpacing: maxSpacing, minSpacing: minSpacing);
     }
     if (lattice == null) return null;
     log?.call('lattice east ${lattice.east} south-east ${lattice.southEast} '
@@ -131,7 +148,8 @@ class GridDetector {
     final nearby = map.around([target], 3);
 
     Homography h;
-    final lattice = _estimateLattice(work.lines, log: log);
+    final lattice = _estimateLattice(work.lines,
+        log: log, expected: _latticeOf(guessWork, target.boardCenter));
     log?.call('close-up lattice: ${lattice == null ? 'none' : 'east ${lattice.east} '
         'strength ${lattice.strength.toStringAsFixed(2)}'}');
     if (lattice != null) {
@@ -146,7 +164,67 @@ class GridDetector {
       h = _refine(work, guessWork, _visibleHexes(work.lines, guessWork, nearby),
           searchFractions: const [0.45, 0.3, 0.2, 0.12, 0.08]);
     }
+    h = _settleShift(work, h, target);
     return _result(work, h, restrictTo: nearby);
+  }
+
+  /// A close-up framed a whole hex off looks just like one framed right:
+  /// the grid is the same everywhere, so the guide is all that says which
+  /// hex is which, and lining an outline of seven hexes up on the wrong
+  /// seven is an easy slip. What does differ is what is printed where --
+  /// grey mountain railways, purple tunnels, red off-board areas and blue
+  /// lakes never move -- so the placements one hex each way are tried
+  /// against the colours in the photo, and one is taken only if it matches
+  /// them clearly better than where the guide put the grid. In the middle
+  /// of a plain stretch of map there is nothing to tell them apart, and the
+  /// guide stands.
+  Homography _settleShift(_Working work, Homography h, HexCoord target) {
+    final cells = <HexCoord>[];
+    const reach = 4;
+    for (int dz = -reach; dz <= reach; dz++) {
+      for (int dx = -reach; dx <= reach; dx++) {
+        if ((dx + dz).abs() > reach) continue;
+        final c = HexCoord.fromCube(target.cubeX + dx, target.cubeZ + dz);
+        // A close-up holds few whole hexes; the colour of a part-hex at the
+        // edge of the frame counts as well.
+        if (_inside(work.lines, h.apply(c.boardCenter), 0)) cells.add(c);
+      }
+    }
+    final colours = _cellColours(work, h, cells);
+    final hexes = map.around([target], 3);
+    // Only yellow against blue: that is what sets the beige map and its
+    // tiles apart from grey and purple hexes and lakes. Red against green
+    // varies with the light and the printing more than it tells hexes apart.
+    double agreement(int dx, int dz) {
+      final expected = <double>[];
+      final measured = <double>[];
+      for (final c in hexes) {
+        final seen = colours[(c.cubeX + dx, c.cubeZ + dz)];
+        if (seen == null) continue;
+        expected.add(_printedChroma(map.at(c)!.printed.color).dy);
+        measured.add(seen.dy);
+      }
+      return _correlation(expected, measured);
+    }
+
+    final guided = agreement(0, 0);
+    var best = (0, 0);
+    var bestScore = guided;
+    for (final (dx, dz) in const [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]) {
+      final score = agreement(dx, dz);
+      if (score > bestScore) {
+        best = (dx, dz);
+        bestScore = score;
+      }
+    }
+    log?.call('close-up colours: as guided ${guided.toStringAsFixed(2)}, '
+        'best step $best ${bestScore.toStringAsFixed(2)}');
+    if (best == (0, 0) || bestScore < 0.4 || bestScore - guided < 0.3) return h;
+    // Map hex c goes where the grid had c + step.
+    final step = HexCoord.fromCube(target.cubeX + best.$1, target.cubeZ + best.$2)
+            .boardCenter -
+        target.boardCenter;
+    return Homography.similarity(translation: step).then(h);
   }
 
   /// Pulls a hand-made alignment [guess] (board to photo pixels) onto the
@@ -172,7 +250,10 @@ class GridDetector {
     }
 
     var h = guessWork;
-    final lattice = target == null ? null : _estimateLattice(work.lines);
+    final lattice = target == null
+        ? null
+        : _estimateLattice(work.lines,
+            expected: _latticeOf(guessWork, target.boardCenter));
     if (lattice != null && target != null) {
       work = work.normalized(lattice.east.distance);
       final phase = _estimatePhase(
@@ -182,6 +263,47 @@ class GridDetector {
     }
     h = _grow(work, h, map.coords, target ?? const HexCoord(0, 0));
     return _result(work, h);
+  }
+
+  /// The longest hex repeat, in pixels, a photo of the whole board can have:
+  /// the one at which the map would be two and a half times the size of a
+  /// [width] x [height] frame, whichever way round it is. A photo that cuts
+  /// off the edges of the board still fits well inside that; a lattice of
+  /// every fourth hex, which also repeats, doesn't.
+  double _largestSpacing(int width, int height) {
+    final bounds = map.boardBounds;
+    double fit(double w, double h) =>
+        math.min(w / bounds.width, h / bounds.height);
+    final scale = math.max(fit(width.toDouble(), height.toDouble()),
+        fit(height.toDouble(), width.toDouble()));
+    return 2.5 * scale * math.sqrt(3);
+  }
+
+  /// The shortest hex repeat, in pixels, a photo of the whole board can have:
+  /// the one at which the map would span only half of a [width] x [height]
+  /// frame. A photo taken at an angle blurs the real repeat -- the far side
+  /// of the board repeats at two thirds the spacing of the near side -- and
+  /// then a pattern at half the spacing, or structure close around every
+  /// hex, can repeat more strongly, putting a tiny grid in one corner.
+  double _smallestSpacing(int width, int height) {
+    final bounds = map.boardBounds;
+    final scale = 0.5 *
+        math.max(width, height) /
+        math.max(bounds.width, bounds.height);
+    return scale * math.sqrt(3);
+  }
+
+  /// The hex repeat [h] implies around [at]: where a step to the eastern and
+  /// south-eastern neighbours lands.
+  static _Lattice _latticeOf(Homography h, Offset at) {
+    final centre = h.apply(at);
+    const east = Offset(1.7320508075688772, 0);
+    const southEast = Offset(0.8660254037844386, 1.5);
+    return _Lattice(
+      east: h.apply(at + east) - centre,
+      southEast: h.apply(at + southEast) - centre,
+      strength: 0,
+    );
   }
 
   /// How far apart hex centres should be, in working pixels, if [guess] is
@@ -230,7 +352,19 @@ class GridDetector {
   /// photo shifted by exactly one hex lines up with itself, so the strongest
   /// peaks away from zero shift sit at the six neighbour offsets, 60 degrees
   /// apart.
-  static _Lattice? _estimateLattice(GrayImage lines, {void Function(String)? log}) {
+  /// Finds the hex repeat in [lines]. [expected] is what the repeat should be
+  /// if a guide or hand-made placement is roughly right, which turns a blind
+  /// search into a look in the right place -- worth a lot on a close-up,
+  /// where only a few hexes are in frame and the repeat away from the
+  /// horizontal is weak. [maxSpacing] and [minSpacing] (pixels of [lines])
+  /// rule out repeats too long or too short to be neighbouring hexes.
+  static _Lattice? _estimateLattice(
+    GrayImage lines, {
+    void Function(String)? log,
+    _Lattice? expected,
+    double? maxSpacing,
+    double? minSpacing,
+  }) {
     const n = 512;
     const fitSide = 256;
     final scale = math.min(1.0, fitSide / math.max(lines.width, lines.height));
@@ -264,6 +398,118 @@ class GridDetector {
 
     final rMin = 4;
     final rMax = math.min(w, h) ~/ 2;
+
+    double atF(Offset d) {
+      final x0 = d.dx.floor(), y0 = d.dy.floor();
+      final ax = d.dx - x0, ay = d.dy - y0;
+      return at(x0, y0) * (1 - ax) * (1 - ay) +
+          at(x0 + 1, y0) * ax * (1 - ay) +
+          at(x0, y0 + 1) * (1 - ax) * ay +
+          at(x0 + 1, y0 + 1) * ax * ay;
+    }
+
+
+    /// Whether the photo really repeats at [d], rather than [d] just sitting
+    /// on the slope of the central peak, where every short shift scores well.
+    bool isPeak(Offset d) {
+      final v = atF(d);
+      if (v <= 0.02) return false;
+      if (v <= atF(d * 0.75) || v <= atF(d * 1.3)) return false;
+      for (int oy = -1; oy <= 1; oy++) {
+        for (int ox = -1; ox <= 1; ox++) {
+          if (ox == 0 && oy == 0) continue;
+          if (atF(d + Offset(ox.toDouble(), oy.toDouble())) > v) return false;
+        }
+      }
+      return true;
+    }
+
+    bool peakWithinPixel(Offset d) {
+      for (int oy = -1; oy <= 1; oy++) {
+        for (int ox = -1; ox <= 1; ox++) {
+          if (isPeak(d + Offset(ox.toDouble(), oy.toDouble()))) return true;
+        }
+      }
+      return false;
+    }
+
+    /// The strongest genuine repeat within [spread] of [v] in length and
+    /// [degrees] of its direction.
+    Offset? peakNear(Offset v, {double spread = 0.35, double degrees = 20}) {
+      final length = v.distance;
+      if (length < rMin) return null;
+      final cosLimit = math.cos(degrees * math.pi / 180);
+      Offset? best;
+      double bestValue = 0;
+      final limit = math.min(rMax.toDouble(), length * (1 + spread)).ceil();
+      for (int dy = -limit; dy <= limit; dy++) {
+        for (int dx = -limit; dx <= limit; dx++) {
+          final d = Offset(dx.toDouble(), dy.toDouble());
+          final ratio = d.distance / length;
+          if (ratio < 1 - spread || ratio > 1 + spread) continue;
+          if ((d.dx * v.dx + d.dy * v.dy) / (d.distance * length) < cosLimit) {
+            continue;
+          }
+          final value = at(dx, dy);
+          if (value > bestValue && isPeak(d)) {
+            bestValue = value;
+            best = d;
+          }
+        }
+      }
+      return best;
+    }
+
+    if (expected != null && log != null) {
+      final e = expected.east * scale;
+      log('expected east ${e.dx.toStringAsFixed(1)},${e.dy.toStringAsFixed(1)} '
+          '(len ${e.distance.toStringAsFixed(1)})');
+      final profile = <String>[];
+      for (int k = 6; k <= 60; k += 2) {
+        final d = e / e.distance * k.toDouble();
+        profile.add('$k:${atF(d).toStringAsFixed(2)}');
+      }
+      log('along east: ${profile.join(' ')}');
+      final se = expected.southEast * scale;
+      final profile2 = <String>[];
+      for (int k = 6; k <= 60; k += 2) {
+        final d = se / se.distance * k.toDouble();
+        profile2.add('$k:${atF(d).toStringAsFixed(2)}');
+      }
+      log('along south-east: ${profile2.join(' ')}');
+    }
+
+    if (expected != null) {
+      Offset turn60(Offset v) => Offset(
+            v.dx * 0.5 - v.dy * 0.8660254037844386,
+            v.dx * 0.8660254037844386 + v.dy * 0.5,
+          );
+
+      // Look along each axis in turn. Either one alone pins the hex size and
+      // the angle, which is what matters: a photo taken at a low angle keeps
+      // the repeat along the rows but loses it across them, because
+      // perspective squeezes the far rows closer together than the near ones.
+      for (final (name, axis) in [
+        ('east', expected.east * scale),
+        ('south-east', expected.southEast * scale),
+      ]) {
+        final found = peakNear(axis);
+        if (found == null) continue;
+        final partner = peakNear(turn60(found), spread: 0.2, degrees: 12);
+        final consistent = partner != null && isPeak(partner - found);
+        final east = name == 'east' ? found : turn60(turn60(turn60(turn60(found))));
+        final southEast = consistent && name == 'east' ? partner : turn60(east);
+        log?.call('lattice from the $name repeat $found'
+            '${consistent ? ' with its partner $partner' : ' alone'}');
+        return _Lattice(
+          east: east / scale,
+          southEast: southEast / scale,
+          strength: atF(found),
+        );
+      }
+      log?.call('nothing at the expected repeat; searching the photo instead');
+    }
+
     final peaks = <_Peak>[];
     for (int dy = 0; dy <= rMax; dy++) {
       for (int dx = -rMax; dx <= rMax; dx++) {
@@ -288,6 +534,8 @@ class GridDetector {
     if (peaks.length < 2) return null;
     peaks.sort((a, b) => b.value.compareTo(a.value));
     final top = peaks.take(24).toList();
+    log?.call('small ${w}x$h, ${peaks.length} peaks: '
+        '${top.take(10).map((p) => '(${p.dx},${p.dy}) ${p.value.toStringAsFixed(2)}').join('  ')}');
     final candidates = [
       for (final p in top) ...[p, _Peak(-p.dx, -p.dy, p.value)],
     ];
@@ -306,13 +554,17 @@ class GridDetector {
       );
     }
 
-    _Triple? best;
+    final longest = maxSpacing == null ? double.infinity : maxSpacing * scale;
+    final shortest = minSpacing == null ? 0.0 : minSpacing * scale;
+    final triples = <_Triple>[];
     for (final p in candidates) {
       for (final q in candidates) {
         final pv = Offset(p.dx.toDouble(), p.dy.toDouble());
         final qv = Offset(q.dx.toDouble(), q.dy.toDouble());
         final cross = pv.dx * qv.dy - pv.dy * qv.dx;
         if (cross <= 0) continue;
+        if (pv.distance > longest || qv.distance > longest) continue;
+        if (pv.distance < shortest || qv.distance < shortest) continue;
         final ratio = qv.distance / pv.distance;
         if (ratio < 0.8 || ratio > 1.25) continue;
         final angle = math.acos(
@@ -321,19 +573,21 @@ class GridDetector {
         if (angle < 45 * math.pi / 180 || angle > 75 * math.pi / 180) continue;
         final r = at(q.dx - p.dx, q.dy - p.dy);
         final score = math.min(p.value, math.min(q.value, r));
-        if (best == null || score > best.score) best = _Triple(p, q, score);
+        // Short shifts along the slope of the central peak are local maxima
+        // too; only a real repeat is worth preferring for being fine. The
+        // third side is the difference of two rounded peaks, so its own
+        // peak may be a pixel away.
+        if (!isPeak(pv) || !isPeak(qv) || !peakWithinPixel(qv - pv)) continue;
+        triples.add(_Triple(p, q, score));
       }
     }
-    if (best == null || best.score < 0.05) return null;
-
-    double atF(Offset d) {
-      final x0 = d.dx.floor(), y0 = d.dy.floor();
-      final ax = d.dx - x0, ay = d.dy - y0;
-      return at(x0, y0) * (1 - ax) * (1 - ay) +
-          at(x0 + 1, y0) * ax * (1 - ay) +
-          at(x0, y0 + 1) * (1 - ax) * ay +
-          at(x0 + 1, y0 + 1) * ax * ay;
+    _Triple? best;
+    for (final t in triples) {
+      if (best == null || t.score > best.score) best = t;
     }
+    log?.call('best triple: ${best == null ? 'none' : '${best.p.dx},${best.p.dy} / '
+        '${best.q.dx},${best.q.dy} score ${best.score.toStringAsFixed(3)}'}');
+    if (best == null || best.score < 0.05) return null;
 
     var p = refine(best.p.dx, best.p.dy);
     var q = refine(best.q.dx, best.q.dy);
@@ -342,14 +596,6 @@ class GridDetector {
     var a = (p * 2 + q - r) / 3;
     var b = (p + q * 2 + r) / 3;
     var strength = best.score;
-
-    // Close to no shift at all, a photo always matches itself, so a candidate
-    // repeat only counts if it is a peak rather than part of that central
-    // rise: it has to beat the shifts just short of and just past it.
-    bool isPeak(Offset d) {
-      final v = atF(d);
-      return v > 0 && v > atF(d * 0.75) && v > atF(d * 1.3);
-    }
 
     // Every other hex, or every third along a diagonal, repeats too. If the
     // strongest repeat is one of those coarser grids of a finer one that is
@@ -674,28 +920,34 @@ class GridDetector {
       expected.add(_printedChroma(hex.printed.color));
       measured.add(seen);
     }
-    if (expected.length < 6) return 0;
-    double corr(double Function(Offset) f) {
-      final n = expected.length;
-      double mx = 0, my = 0;
-      for (int i = 0; i < n; i++) {
-        mx += f(expected[i]);
-        my += f(measured[i]);
-      }
-      mx /= n;
-      my /= n;
-      double sxy = 0, sxx = 0, syy = 0;
-      for (int i = 0; i < n; i++) {
-        final dx = f(expected[i]) - mx, dy = f(measured[i]) - my;
-        sxy += dx * dy;
-        sxx += dx * dx;
-        syy += dy * dy;
-      }
-      if (sxx <= 1e-12 || syy <= 1e-12) return 0;
-      return sxy / math.sqrt(sxx * syy);
-    }
+    return (_correlation([for (final e in expected) e.dx],
+                [for (final m in measured) m.dx]) +
+            _correlation([for (final e in expected) e.dy],
+                [for (final m in measured) m.dy])) /
+        2;
+  }
 
-    return (corr((o) => o.dx) + corr((o) => o.dy)) / 2;
+  /// Correlation (-1..1) between [expected] and [measured]. Zero when there
+  /// are too few to say, or nothing varies.
+  static double _correlation(List<double> expected, List<double> measured) {
+    final n = expected.length;
+    if (n < 6) return 0;
+    double mx = 0, my = 0;
+    for (int i = 0; i < n; i++) {
+      mx += expected[i];
+      my += measured[i];
+    }
+    mx /= n;
+    my /= n;
+    double sxy = 0, sxx = 0, syy = 0;
+    for (int i = 0; i < n; i++) {
+      final dx = expected[i] - mx, dy = measured[i] - my;
+      sxy += dx * dy;
+      sxx += dx * dx;
+      syy += dy * dy;
+    }
+    if (sxx <= 1e-12 || syy <= 1e-12) return 0;
+    return sxy / math.sqrt(sxx * syy);
   }
 
   /// The chromaticity a hex printed in [color] is expected to have, on the
@@ -1081,9 +1333,6 @@ class _Triple {
   final _Peak q;
   final double score;
   const _Triple(this.p, this.q, this.score);
-
-  double get length =>
-      math.sqrt(p.dx * p.dx + p.dy * p.dy) + math.sqrt(q.dx * q.dx + q.dy * q.dy);
 }
 
 /// A way of laying the map on the lattice: turned [rotation] x 60 degrees
