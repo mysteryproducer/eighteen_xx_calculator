@@ -109,3 +109,46 @@ Homography rotate90(img.Image source) => Homography([
       1, 0, 0, //
       0, 0, 1,
     ]);
+
+/// Lays a mountain railway plate on [hex] of a board drawn by [drawBoard],
+/// which [toImage] places: pale card with a box per phase in the phase's
+/// colour, left to right -- 1844 prints brown's box salmon. The boxes are
+/// left blank; a figure in each would be a font the test can't count on.
+void drawPlate(img.Image board, Homography toImage, MapHex hex) {
+  void fill(double left, double right, double half, img.Color colour) {
+    final a = toImage.apply(hex.coord.boardCenter + Offset(left, -half));
+    final b = toImage.apply(hex.coord.boardCenter + Offset(right, half));
+    img.fillRect(board,
+        x1: a.dx.round(), y1: a.dy.round(),
+        x2: b.dx.round(), y2: b.dy.round(),
+        color: colour);
+  }
+
+  fill(-0.62, 0.62, 0.22, img.ColorRgb8(240, 236, 226));
+  final boxes = [
+    img.ColorRgb8(240, 215, 60),
+    img.ColorRgb8(80, 165, 95),
+    img.ColorRgb8(235, 160, 150),
+    img.ColorRgb8(170, 170, 170),
+  ];
+  for (int i = 0; i < boxes.length; i++) {
+    final left = -0.56 + i * 0.29;
+    fill(left, left + 0.25, 0.14, boxes[i]);
+  }
+}
+
+/// [board] as a camera under a lamp sees it: exposed darker than the
+/// drawing's near-white paper, and with a veil of glare of [glare] centred
+/// on [at], fading out over [reach] pixels.
+void underLamp(img.Image board,
+    {double glare = 0, Offset at = Offset.zero, double reach = 1}) {
+  for (final p in board) {
+    final d = (Offset(p.x.toDouble(), p.y.toDouble()) - at).distance / reach;
+    final veil = glare * (1 - d * d).clamp(0.0, 1.0);
+    num lit(num c) => c * 0.75 + (255 - c * 0.75) * veil;
+    p
+      ..r = lit(p.r)
+      ..g = lit(p.g)
+      ..b = lit(p.b);
+  }
+}

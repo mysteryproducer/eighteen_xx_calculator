@@ -9,6 +9,8 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    TextRecognitionPlugin.register(
+      with: flutterViewController.registrar(forPlugin: "TextRecognitionPlugin"))
 
     super.awakeFromNib()
   }

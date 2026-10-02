@@ -197,8 +197,19 @@ class GameSession {
   /// (if [startedEmpty]) or unknown.
   final Map<String, HexState> hexes;
 
-  /// Station token owners, by station id (see [StationNode.id]).
+  /// Station tokens: whose token is in each circle of each city, by circle
+  /// (see [slotId]). A circle not listed is open.
   final Map<String, String> tokens;
+
+  /// The key the token in circle [slot] of station [stationId] (see
+  /// [StationNode.id]) is kept under in [tokens] and [tokenDoubts].
+  static String slotId(String stationId, int slot) => '${stationId}_$slot';
+
+  /// The station a key from [slotId] belongs to, and which of its circles.
+  static (String, int) circleOf(String slotId) {
+    final cut = slotId.lastIndexOf('_');
+    return (slotId.substring(0, cut), int.parse(slotId.substring(cut + 1)));
+  }
 
   /// Stations whose token the app placed from a photo without being sure
   /// whose it is. They are shown for the user to check, and a later photo
@@ -233,6 +244,13 @@ class GameSession {
   /// Revenue the user typed in, by station id.
   final Map<String, int> revenueOverrides;
 
+  /// Which way the board faced in the latest photo of all of it, in radians
+  /// clockwise from the photo's x axis to the map's rows running east: zero
+  /// when photographed from the map's south edge. Players photograph from
+  /// where they sit, so close-ups are framed, and the next photo of the
+  /// board looked for, the same way round.
+  double? facing;
+
   GameSession({
     required this.id,
     required this.titleId,
@@ -251,6 +269,7 @@ class GameSession {
     Map<String, int>? revenueOverrides,
     this.colourProfile,
     Map<String, double>? glare,
+    this.facing,
   })  : glare = glare ?? {},
         hexes = hexes ?? {},
         tokens = tokens ?? {},
@@ -334,9 +353,53 @@ class GameSession {
   BoardGraph graph(GameTitle title) {
     final graph = BoardGraph.fromContent(content(title), phase: phase);
     for (final station in graph.stations) {
-      station.companyId = tokens[station.id];
+      station.tokens = [
+        for (int slot = 0; slot < station.tokens.length; slot++)
+          tokens[slotId(station.id, slot)],
+      ];
     }
     return graph;
+  }
+
+  /// Tokens that can't legally be where they are, by circle (see [slotId]),
+  /// with why. A company keeps a circle free in its home city until its
+  /// home token is down there: no company's starting token can be blocked,
+  /// so a token that fills the last free circle of someone else's home is
+  /// out of place.
+  Map<String, String> tokenProblems(GameTitle title) {
+    final problems = <String, String>{};
+    for (final station in graph(title).stations) {
+      if (station.kind != StationKind.city) continue;
+      final hex = title.map.at(station.hex);
+      if (hex == null) continue;
+      final homes = [
+        for (final c in title.companies)
+          if (c.isHomeOf(hex.id, station.stationIndex)) c,
+      ];
+      final waiting = [
+        for (final c in homes)
+          if (!station.holds(c.id)) c,
+      ];
+      if (waiting.isEmpty) continue;
+      final others = [
+        for (int slot = 0; slot < station.tokens.length; slot++)
+          if (station.tokens[slot] case final t?
+              when !homes.any((c) => c.id == t))
+            slot,
+      ];
+      if (others.length <= station.tokens.length - waiting.length) continue;
+      final names = waiting.map((c) => c.label).join(' and ');
+      final circles = station.tokens.length == 1
+          ? 'its only circle'
+          : 'a circle';
+      for (final slot in others) {
+        problems[slotId(station.id, slot)] =
+            '${hex.displayName} is $names\'s home, and $circles has to stay '
+            'free until ${waiting.length == 1 ? 'its' : 'their'} home token '
+            '${waiting.length == 1 ? 'is' : 'are'} placed.';
+      }
+    }
+    return problems;
   }
 
   /// The user says [hex] holds [tile] (null for nothing laid).
@@ -418,7 +481,8 @@ class GameSession {
   /// Bumped when saved state stops meaning what it used to. Version 2 is
   /// where hex sides were renumbered to match tobymao/18xx (see
   /// [HexGeometry]), which changed what a tile's stored rotation means.
-  static const int version = 2;
+  /// Version 3 keeps a token per circle of a city rather than one per city.
+  static const int version = 3;
 
   Map<String, Object?> toJson() => {
         'version': version,
@@ -445,13 +509,26 @@ class GameSession {
             for (final e in glare.entries)
               if (e.value > 0) e.key: double.parse(e.value.toStringAsFixed(2)),
           },
+        if (facing != null) 'facing': double.parse(facing!.toStringAsFixed(4)),
         'revenueOverrides': revenueOverrides,
       };
 
   static GameSession fromJson(Map<String, Object?> json) {
     final saved = (json['version'] as num?)?.toInt() ?? 1;
     final session = GameSession._fromJson(json);
-    if (saved < version) {
+    if (saved < 3) {
+      // Tokens were kept one per city before each circle had its own: each
+      // goes in its city's first circle.
+      final old = Map.of(session.tokens);
+      session.tokens
+        ..clear()
+        ..addAll({for (final e in old.entries) slotId(e.key, 0): e.value});
+      final doubts = Set.of(session.tokenDoubts);
+      session.tokenDoubts
+        ..clear()
+        ..addAll({for (final id in doubts) slotId(id, 0)});
+    }
+    if (saved < 2) {
       // Tile rotations from before the sides were renumbered would show the
       // tiles turned the wrong way. Keep them on screen as a starting point,
       // but flag every one so it gets checked rather than trusted.
@@ -501,6 +578,7 @@ class GameSession {
           for (final e in (json['glare'] as Map? ?? {}).entries)
             e.key as String: (e.value as num).toDouble(),
         },
+        facing: (json['facing'] as num?)?.toDouble(),
         revenueOverrides: {
           for (final e in (json['revenueOverrides'] as Map? ?? {}).entries)
             e.key as String: (e.value as num).toInt(),

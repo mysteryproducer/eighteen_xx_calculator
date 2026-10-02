@@ -7,6 +7,7 @@ import '../geometry/homography.dart';
 import '../models/board.dart';
 import '../models/map_layout.dart';
 import '../models/tile_definition.dart';
+import '../processing/guide_follower.dart';
 import '../processing/tile_renderer.dart';
 import '../services/app_settings.dart';
 import 'camera_capture.dart';
@@ -34,12 +35,38 @@ class CaptureGuide {
 
   final String instruction;
 
+  /// Which way the board faces in the frame, in radians as
+  /// `GridFit.facing`: the way it faced in the game's last photo of the
+  /// whole board, since players take their close-ups from where they sit.
+  final double turn;
+
+  /// The title's map, for following the board in the camera's preview (see
+  /// `followGuide`); without it the guide stays where it is drawn.
+  final MapLayout? map;
+
+  /// How the guide has been moved to follow the board the camera sees.
+  final GuideAdjustment adjustment;
+
   const CaptureGuide({
     required this.target,
     required this.hexes,
     required this.instruction,
     this.tiles = const {},
+    this.turn = 0,
+    this.map,
+    this.adjustment = GuideAdjustment.none,
   });
+
+  /// This guide, moved by [adjustment].
+  CaptureGuide adjusted(GuideAdjustment adjustment) => CaptureGuide(
+        target: target,
+        hexes: hexes,
+        instruction: instruction,
+        tiles: tiles,
+        turn: turn,
+        map: map,
+        adjustment: adjustment,
+      );
 
   /// The target hex's circumradius as a share of the frame's shorter side.
   /// A hex and its six neighbours span five radii, so this leaves a margin
@@ -49,11 +76,20 @@ class CaptureGuide {
   /// Board to frame coordinates for a frame of [size]. The same relative
   /// placement is used on the preview and on the photo that comes out of it.
   Homography homographyFor(Size size) {
+    final drawn = unadjustedFor(size);
+    return adjustment.isNone ? drawn : drawn.then(adjustment.inFrame(size));
+  }
+
+  /// Where the guide is first drawn, before following the board.
+  Homography unadjustedFor(Size size) {
     final scale = hexShare * math.min(size.width, size.height);
     final centre = Offset(size.width / 2, size.height / 2);
+    final c = math.cos(turn) * scale, s = math.sin(turn) * scale;
+    final at = target.boardCenter;
     return Homography.similarity(
       scale: scale,
-      translation: centre - target.boardCenter * scale,
+      radians: turn,
+      translation: centre - Offset(c * at.dx - s * at.dy, s * at.dx + c * at.dy),
     );
   }
 }
@@ -61,12 +97,22 @@ class CaptureGuide {
 /// Photographs the board, returning the file path, or null if the user backed
 /// out. Phones use the camera; macOS uses the Mac's webcam, so the app can be
 /// tried on a development machine.
-Future<String?> capturePhoto(BuildContext context, {CaptureGuide? guide}) =>
-    Navigator.of(context).push<String>(MaterialPageRoute(
+Future<CapturedPhoto?> capturePhoto(BuildContext context,
+        {CaptureGuide? guide}) =>
+    Navigator.of(context).push<CapturedPhoto>(MaterialPageRoute(
       builder: (_) => !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
           ? MacWebcamCapture(guide: guide)
           : CameraCapture(guide: guide),
     ));
+
+/// A photo taken, and the guide as it was when it was taken: moved to
+/// follow the board in the preview, if it was.
+class CapturedPhoto {
+  final String path;
+  final CaptureGuide? guide;
+
+  const CapturedPhoto(this.path, {this.guide});
+}
 
 /// Draws a [CaptureGuide]'s hexes over the camera preview, with the tiles
 /// already on them at [tileOpacity].
@@ -90,7 +136,9 @@ class CaptureGuidePainter extends CustomPainter {
       guide.tiles.forEach((coord, tile) {
         final centre = h.apply(coord.boardCenter);
         canvas.save();
-        canvas.translate(centre.dx - tileSize / 2, centre.dy - tileSize / 2);
+        canvas.translate(centre.dx, centre.dy);
+        canvas.rotate(guide.turn + guide.adjustment.turn);
+        canvas.translate(-tileSize / 2, -tileSize / 2);
         TileRenderer.paint(canvas, tile, tileSize);
         canvas.restore();
       });

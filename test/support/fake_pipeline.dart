@@ -4,6 +4,7 @@ import 'package:eighteen_xx_calculator/geometry/homography.dart';
 import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/map_layout.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
+import 'package:eighteen_xx_calculator/processing/guide_follower.dart';
 import 'package:eighteen_xx_calculator/services/photo_pipeline.dart';
 import 'package:image/image.dart' as img;
 
@@ -47,12 +48,29 @@ class FakePhotoPipeline implements PhotoPipeline {
     return (photo, Uint8List.fromList(img.encodeJpg(photo)));
   }
 
+  /// The hints the screen passed with its latest fit.
+  BoardHints? lastHints;
+
   @override
-  Future<GridFit?> fitBoard(MapLayout map, img.Image photo) async {
+  Future<GridFit?> fitBoard(MapLayout map, img.Image photo,
+      {BoardHints? hints}) async {
     fitBoardCalls++;
+    lastHints = hints;
     if (failure != null) throw failure!;
     return fit;
   }
+
+  @override
+  Future<GuideAdjustment?> followGuide(
+    MapLayout map, {
+    required Uint8List bytes,
+    required int width,
+    required int height,
+    required int bytesPerRow,
+    required Homography guide,
+    required HexCoord target,
+  }) async =>
+      null;
 
   @override
   Future<GridFit> snap(MapLayout map, img.Image photo, Homography guess) async {
@@ -66,9 +84,11 @@ class FakePhotoPipeline implements PhotoPipeline {
     MapLayout map,
     img.Image photo,
     Homography guess,
-    HexCoord target,
-  ) async {
+    HexCoord target, {
+    BoardHints? hints,
+  }) async {
     closeUpCalls++;
+    lastHints = hints;
     if (failure != null) throw failure!;
     return fit;
   }

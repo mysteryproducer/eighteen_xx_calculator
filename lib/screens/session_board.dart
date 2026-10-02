@@ -14,6 +14,7 @@ import '../models/tile_definition.dart';
 import '../models/tile_rules.dart';
 import '../processing/board_reader.dart';
 import '../processing/grid_detector.dart';
+import '../processing/plate_reader.dart';
 import '../processing/revenue_ocr.dart';
 import '../processing/revenue_resolver.dart';
 import '../processing/route_finder.dart';
@@ -78,6 +79,10 @@ class _SessionBoardState extends State<SessionBoard> {
   /// was set by hand.
   Set<HexCoord> _misfits = {};
 
+  /// Tokens that can't legally be where they are (see
+  /// [GameSession.tokenProblems]).
+  Map<String, String> _tokenProblems = {};
+
   /// The hexes being picked out to photograph, or null when not choosing.
   Set<HexCoord>? _choosing;
 
@@ -87,7 +92,7 @@ class _SessionBoardState extends State<SessionBoard> {
   @override
   void initState() {
     super.initState();
-    _geometry = BoardMapGeometry(_map);
+    _geometry = BoardMapGeometry(_map, turn: widget.title.displayTurn);
     _reader = BoardReader(widget.title);
     _rules = TileRules(widget.title);
     // A token saved before this title had its own companies names a plain
@@ -108,6 +113,7 @@ class _SessionBoardState extends State<SessionBoard> {
         if (_session.tileAt(hex) case final tile?)
           if (!_rules.fits(hex, tile)) hex.coord,
     };
+    _tokenProblems = _session.tokenProblems(widget.title);
     RevenueResolver.apply(
       _graph,
       isTileTrusted: (hex) {
@@ -140,7 +146,7 @@ class _SessionBoardState extends State<SessionBoard> {
 
   /// Photographs the whole board: align, then read every hex in frame.
   Future<void> _photographBoard({bool asPrinted = false}) async {
-    final path = await capturePhoto(context);
+    final path = (await capturePhoto(context))?.path;
     if (path == null || !mounted) return;
     setState(() {
       _busy = true;
@@ -156,10 +162,14 @@ class _SessionBoardState extends State<SessionBoard> {
             title: widget.title,
             photo: photo,
             previewBytes: preview,
+            hints: _hints,
           ),
         ),
       );
       if (boardToImage == null || !mounted) return;
+      // Players photograph from where they sit: close-ups are framed, and
+      // the next photo of the board looked for, the same way round.
+      _session.facing = GridFit.facingOf(boardToImage, _map.boardBounds.center);
       final visible = _visibleHexes(photo, boardToImage);
       if (asPrinted) {
         await _recordAsPrinted(photo, boardToImage, visible);
@@ -178,6 +188,19 @@ class _SessionBoardState extends State<SessionBoard> {
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  /// What the game knows about the board, to help find it in a photo.
+  BoardHints get _hints => BoardHints(
+        colours: {
+          for (final e in _session.content(widget.title).entries)
+            e.key: e.value.color,
+        },
+        tiled: {
+          for (final hex in _map.hexes)
+            if (_session.tileAt(hex) != null) hex.coord,
+        },
+        facing: _session.facing,
+      );
 
   Set<HexCoord> _visibleHexes(img.Image photo, Homography boardToImage) {
     bool inside(Offset p) =>
@@ -233,6 +256,14 @@ class _SessionBoardState extends State<SessionBoard> {
       _busy = true;
       _status = 'Reading ${hexes.length} hexes...';
     });
+    // A grid fitted to faint printed outlines, or to outlines tiles cover,
+    // can sit a fraction of a hex off; the hexes the game is sure of put it
+    // right first.
+    boardToImage = await _reader.alignToKnown(
+        photo: photo,
+        boardToImage: boardToImage,
+        hexes: context,
+        session: _session);
     final before = {
       for (final hex in _map.hexes) hex.id: _session.tileAt(hex)?.tileId,
     };
@@ -265,7 +296,15 @@ class _SessionBoardState extends State<SessionBoard> {
     // at the edge of a close-up of somewhere else.
     final mountains = _reader.readMountains(
         photo: photo, boardToImage: boardToImage, hexes: context);
-    BoardReader.applyMountains(_session, mountains);
+    // Which plate is read off its figures, where they are large enough --
+    // only for plates the user hasn't already named.
+    final plates = await PlateReader(widget.title).readAll(photo, boardToImage, [
+      for (final m in mountains)
+        if (!_session.mountains.containsKey(m.hex.id) ||
+            _session.mountainDoubts.contains(m.hex.id))
+          m,
+    ]);
+    BoardReader.applyMountains(_session, mountains, plates: plates);
     for (final r in readings) {
       await widget.store.saveHexPicture(_session.id, r.hex.id, r.picture);
     }
@@ -308,7 +347,7 @@ class _SessionBoardState extends State<SessionBoard> {
   /// Measures how the board's colours look under this game's light (see
   /// [ColourProfile]), from a photo of the whole board.
   Future<void> _calibrateColours() async {
-    final path = await capturePhoto(context);
+    final path = (await capturePhoto(context))?.path;
     if (path == null || !mounted) return;
     setState(() {
       _busy = true;
@@ -324,6 +363,7 @@ class _SessionBoardState extends State<SessionBoard> {
             title: widget.title,
             photo: photo,
             previewBytes: preview,
+            hints: _hints,
           ),
         ),
       );
@@ -411,6 +451,8 @@ class _SessionBoardState extends State<SessionBoard> {
     final content = _session.content(widget.title);
     final guide = CaptureGuide(
       target: request.target,
+      map: _map,
+      turn: _session.facing ?? widget.title.displayTurn,
       hexes: [for (final c in around) _map.at(c)!],
       tiles: {
         for (final c in around)
@@ -422,8 +464,12 @@ class _SessionBoardState extends State<SessionBoard> {
           'Line the outline up with ${target.displayName} and the hexes '
           'around it.',
     );
-    final path = await capturePhoto(context, guide: guide);
-    if (path == null || !mounted) return false;
+    final shot = await capturePhoto(context, guide: guide);
+    if (shot == null || !mounted) return false;
+    final path = shot.path;
+    // Where the guide was when the photo was taken, if it moved to follow
+    // the board: a much closer start for finding the grid.
+    final framed = shot.guide ?? guide;
 
     setState(() {
       _busy = true;
@@ -431,10 +477,10 @@ class _SessionBoardState extends State<SessionBoard> {
     });
     try {
       final (photo, preview) = await widget.pipeline.load(path);
-      final guess = guide.homographyFor(
+      final guess = framed.homographyFor(
           Size(photo.width.toDouble(), photo.height.toDouble()));
       final fit = await widget.pipeline
-          .fitCloseUp(_map, photo, guess, request.target);
+          .fitCloseUp(_map, photo, guess, request.target, hints: _hints);
       if (!mounted) return false;
       setState(() => _busy = false);
 
@@ -550,10 +596,19 @@ class _SessionBoardState extends State<SessionBoard> {
     for (final station in _graph.stations) {
       final def = content[station.hex];
       if (def == null) continue;
-      final d = (_geometry.stationPosition(def, station) - position).distance;
-      if (d < nearestDistance) {
-        nearestDistance = d;
-        nearest = station;
+      final spots = [
+        _geometry.stationPosition(def, station),
+        if (station.kind == StationKind.city)
+          for (final circle in TileRenderer.slotPositions(
+              def, station.stationIndex, station.hex.boardCenter, 1))
+            _geometry.toScreen(circle),
+      ];
+      for (final spot in spots) {
+        final d = (spot - position).distance;
+        if (d < nearestDistance) {
+          nearestDistance = d;
+          nearest = station;
+        }
       }
     }
     if (nearest != null && nearestDistance <= boardMapScale * 0.3) {
@@ -712,7 +767,8 @@ class _SessionBoardState extends State<SessionBoard> {
                                 child: definition == null
                                     ? const SizedBox.shrink()
                                     : CustomPaint(
-                                        painter: TilePainter(definition)),
+                                        painter: TilePainter(definition,
+                                            turn: widget.title.displayTurn)),
                               ),
                               Text(
                                   tileId == null
@@ -803,6 +859,7 @@ class _SessionBoardState extends State<SessionBoard> {
                           ),
                         const SizedBox(height: 4),
                         _TunnelChoices(
+                          turn: widget.title.displayTurn,
                           base: _rules.contentOf(hex, chosen) ?? hex.printed,
                           paths: tunnelPaths,
                           selected: tunnel,
@@ -934,9 +991,16 @@ class _SessionBoardState extends State<SessionBoard> {
   Future<void> _bankCorrection(MapHex hex, PlacedTile? tile) async {
     final log = widget.trainingLog;
     if (log == null) return;
+    // What the photos said, taken now: the caller sets the hex as soon as
+    // this yields. Where the user had already set the hex, the latest photo's
+    // view is its suggestion, if it disagreed.
+    final state = _session.stateOf(hex);
+    final suggestion = state.suggestion;
+    final readAs = suggestion == null ? state.tile : suggestion.tile;
+    final readConfidence =
+        suggestion == null ? state.confidence : suggestion.confidence;
     final picture = await widget.store.hexPicture(_session.id, hex.id);
     if (picture == null) return; // never photographed; nothing to learn from
-    final state = _session.stateOf(hex);
     final when = DateTime.now();
     try {
       await log.record(
@@ -945,9 +1009,9 @@ class _SessionBoardState extends State<SessionBoard> {
           hexId: hex.id,
           tileId: tile?.tileId,
           rotation: tile?.rotation ?? 0,
-          readAsTileId: state.tile?.tileId,
-          readAsRotation: state.tile?.rotation,
-          readConfidence: state.confidence,
+          readAsTileId: readAs?.tileId,
+          readAsRotation: readAs?.rotation,
+          readConfidence: readConfidence,
           when: when,
           picture: TrainingLog.pictureName(_session.id, hex.id, when),
         ),
@@ -983,21 +1047,50 @@ class _SessionBoardState extends State<SessionBoard> {
 
   Future<void> _editStation(StationNode station) async {
     final controller = TextEditingController(text: station.revenue.toString());
-    var companyId = station.companyId;
+    final chosen = List<String?>.of(station.tokens);
     final hex = _map.at(station.hex);
     final reading = _revenueReadings[station.id];
     final companies = [
       ...widget.title.companies,
       // A token set before the title had its own companies still shows.
-      if (widget.title.companyById(companyId) case final c?
-          when !widget.title.companies.contains(c))
-        c,
+      for (final id in chosen)
+        if (widget.title.companyById(id) case final c?
+            when !widget.title.companies.contains(c))
+          c,
     ];
+    // Whose home this city is: each keeps a circle free until its home
+    // token is down.
+    final homes = [
+      if (hex != null)
+        for (final c in widget.title.companies)
+          if (c.isHomeOf(hex.id, station.stationIndex)) c,
+    ];
+    String? blocking() {
+      final waiting = [
+        for (final c in homes)
+          if (!chosen.contains(c.id)) c,
+      ];
+      final others = chosen
+          .where((t) => t != null && !homes.any((c) => c.id == t))
+          .length;
+      if (waiting.isEmpty || others <= chosen.length - waiting.length) {
+        return null;
+      }
+      return '${hex?.displayName ?? 'This city'} is '
+          '${waiting.map((c) => c.label).join(' and ')}\'s home: '
+          '${chosen.length == 1 ? 'its only circle' : 'a circle'} has to stay '
+          'free until the home token is placed, so this token is not '
+          'allowed here.';
+    }
 
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
+      // A city of several circles offers a row of companies for each; they
+      // scroll, and Apply stays below them, on a small window too.
+      constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.85),
       builder: (context) => Padding(
         padding: EdgeInsets.only(
             left: 16, right: 16, bottom: MediaQuery.of(context).viewInsets.bottom + 24),
@@ -1006,6 +1099,12 @@ class _SessionBoardState extends State<SessionBoard> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Flexible(
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
               Text(
                 '${switch (station.kind) {
                   StationKind.city => 'City',
@@ -1039,41 +1138,61 @@ class _SessionBoardState extends State<SessionBoard> {
                     label: const Text('Read the figure off the photo'),
                   ),
                 ),
-              if (station.kind == StationKind.city) ...[
-                const SizedBox(height: 8),
-                const Text('Station token'),
-                if (_session.tokenDoubts.contains(station.id))
-                  Text(
-                    'Seen in a photo, but whose it is was a guess. Pick the '
-                    'right company to settle it.',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(color: BoardMapPainter.uncertain),
-                  ),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: [
-                    ChoiceChip(
-                      label: const Text('None'),
-                      selected: companyId == null,
-                      onSelected: (_) => setSheetState(() => companyId = null),
+              if (station.kind == StationKind.city)
+                for (int slot = 0; slot < chosen.length; slot++) ...[
+                  const SizedBox(height: 8),
+                  Text(chosen.length == 1
+                      ? 'Station token'
+                      : 'Station token, circle ${slot + 1} of ${chosen.length}'),
+                  if (_session.tokenDoubts
+                      .contains(GameSession.slotId(station.id, slot)))
+                    Text(
+                      'Seen in a photo, but whose it is was a guess. Pick the '
+                      'right company to settle it.',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(color: BoardMapPainter.uncertain),
                     ),
-                    for (final company in companies)
-                      Tooltip(
-                        message: company.name,
-                        child: ChoiceChip(
-                          avatar: CircleAvatar(backgroundColor: company.color),
-                          label: Text(company.label),
-                          selected: companyId == company.id,
-                          onSelected: (_) =>
-                              setSheetState(() => companyId = company.id),
-                        ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      ChoiceChip(
+                        label: const Text('None'),
+                        selected: chosen[slot] == null,
+                        onSelected: (_) =>
+                            setSheetState(() => chosen[slot] = null),
                       ),
-                  ],
+                      for (final company in companies)
+                        Tooltip(
+                          message: company.name,
+                          child: ChoiceChip(
+                            avatar:
+                                CircleAvatar(backgroundColor: company.color),
+                            label: Text(company.label),
+                            selected: chosen[slot] == company.id,
+                            onSelected: (_) => setSheetState(
+                                () => chosen[slot] = company.id),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              if (station.kind == StationKind.city)
+                if (blocking() case final why?)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(why,
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: BoardMapPainter.wrong)),
+                  ),
+                    ],
+                  ),
                 ),
-              ],
+              ),
               const SizedBox(height: 16),
               Align(
                 alignment: Alignment.centerRight,
@@ -1083,14 +1202,17 @@ class _SessionBoardState extends State<SessionBoard> {
                     if (value != null && value != station.revenue) {
                       _session.revenueOverrides[station.id] = value;
                     }
-                    if (companyId == null) {
-                      _session.tokens.remove(station.id);
-                    } else {
-                      _session.tokens[station.id] = companyId!;
+                    for (int slot = 0; slot < chosen.length; slot++) {
+                      final id = GameSession.slotId(station.id, slot);
+                      if (chosen[slot] case final company?) {
+                        _session.tokens[id] = company;
+                      } else {
+                        _session.tokens.remove(id);
+                      }
+                      // The user has looked at it: whatever it is now is
+                      // settled.
+                      _session.tokenDoubts.remove(id);
                     }
-                    // The user has looked at it: whatever it is now is
-                    // settled.
-                    _session.tokenDoubts.remove(station.id);
                     Navigator.of(context).pop();
                     _refresh();
                   },
@@ -1150,14 +1272,16 @@ class _SessionBoardState extends State<SessionBoard> {
     final company = _company;
     final homes = company == null
         ? <StationNode>[]
-        : _graph.stations.where((s) => s.companyId == company.id).toList();
+        : _graph.stations.where((s) => s.holds(company.id)).toList();
     RouteResult result;
     if (homes.isEmpty) {
       result = RouteFinder.bestRouteAnywhere(_graph, _maxStops);
     } else {
       result = const RouteResult(stops: [], track: [], revenue: 0);
       for (final home in homes) {
-        final candidate = RouteFinder.bestRouteThrough(_graph, home, _maxStops);
+        final candidate = RouteFinder.bestRouteThrough(
+            _graph, home, _maxStops,
+            company: company?.id);
         if (candidate.revenue > result.revenue) result = candidate;
       }
     }
@@ -1313,6 +1437,7 @@ class _SessionBoardState extends State<SessionBoard> {
                             route: _route,
                             highlighted: _highlighted,
                             misfits: _misfits,
+                            tokenProblems: _tokenProblems,
                             selected: _choosing ?? const {},
                           ),
                         ),
@@ -1446,8 +1571,10 @@ class _SessionBoardState extends State<SessionBoard> {
               '$tiles ${tiles == 1 ? 'tile' : 'tiles'} laid, '
               '${_graph.stations.length} revenue centres. '
               '${toCheck.isEmpty ? '' : '${toCheck.join(', ')} to check (ringed). '}'
-              '${_misfits.isEmpty ? 'Tap a hex or a circle to correct it.' : '${_misfits.length} in red '
-                  '${_misfits.length == 1 ? "doesn't fit" : "don't fit"} the map -- tap to see why.'}',
+              '${_misfits.isEmpty && _tokenProblems.isEmpty ? 'Tap a hex or a circle to correct it.' : '${[
+                  if (_misfits.isNotEmpty) '${_misfits.length} ${_misfits.length == 1 ? 'tile' : 'tiles'}',
+                  if (_tokenProblems.isNotEmpty) '${_tokenProblems.length} ${_tokenProblems.length == 1 ? 'token' : 'tokens'}',
+                ].join(' and ')} in red ${_misfits.length + _tokenProblems.length == 1 ? "isn't" : "aren't"} allowed there -- tap to see why.'}',
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 4),
@@ -1574,7 +1701,11 @@ class _TunnelChoices extends StatelessWidget {
   final (int, int)? selected;
   final ValueChanged<(int, int)?> onSelected;
 
+  /// How far tiles are turned to look as printed.
+  final double turn;
+
   const _TunnelChoices({
+    this.turn = 0,
     required this.base,
     required this.paths,
     required this.selected,
@@ -1609,7 +1740,8 @@ class _TunnelChoices extends StatelessWidget {
                       : Colors.black26,
                 ),
               ),
-              child: CustomPaint(painter: TilePainter(drawn)),
+              child: CustomPaint(
+                  painter: TilePainter(drawn, turn: turn)),
             ),
             Text(path == null ? 'no tunnel' : 'tunnel',
                 style: Theme.of(context).textTheme.labelSmall),

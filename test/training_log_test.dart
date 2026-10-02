@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:eighteen_xx_calculator/models/board_graph.dart';
 import 'package:eighteen_xx_calculator/models/game_session.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/screens/session_board.dart';
@@ -106,6 +107,10 @@ void main() {
       expect(await log.tally(), (2, 1));
     });
 
+    test('bare map read as bare map was right, whatever the turn', () {
+      expect(example(tileId: null, readAs: null).wasRight, isTrue);
+    });
+
     test('examples pile up across games', () async {
       for (final id in ['C12', 'C14', 'D13']) {
         await log.record(example(hexId: id), Uint8List.fromList([1]));
@@ -144,7 +149,9 @@ void main() {
         view.resetDevicePixelRatio();
       });
 
-      final store = FakeSessionStore();
+      // Pictures come off the disk asynchronously, as they really do: what
+      // was read has to be taken before the correction replaces it.
+      final store = _DiskLikeStore();
       final banked = FakeTrainingLog();
       final session =
           GameSession.start(title: title, name: 'g', startedEmpty: true);
@@ -180,6 +187,48 @@ void main() {
       expect(banked.pictures.single, aPicture);
     });
 
+    testWidgets('a hex already set by hand banks what the photo suggested',
+        (tester) async {
+      final view = TestWidgetsFlutterBinding.instance.platformDispatcher.views.first;
+      view.physicalSize = const Size(900, 1400);
+      view.devicePixelRatio = 1;
+      addTearDown(() {
+        view.resetPhysicalSize();
+        view.resetDevicePixelRatio();
+      });
+
+      final store = _DiskLikeStore();
+      final banked = FakeTrainingLog();
+      final session =
+          GameSession.start(title: title, name: 'g', startedEmpty: true);
+      final basel = title.map.byId('C12')!;
+      session.setManually(basel, const PlacedTile('57', rotation: 1));
+      // A later photo saw something else, and was sure of it.
+      session.recordReading(basel,
+          tile: const PlacedTile('6', rotation: 2),
+          confidence: 0.9,
+          source: HexSource.closeUp);
+      await store.saveHexPicture(session.id, 'C12', aPicture);
+
+      await tester.pumpWidget(MaterialApp(
+        home: SessionBoard(
+          title: title,
+          session: session,
+          store: store,
+          trainingLog: banked,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tapHexBody(tester, 'C12');
+      await chooseTile(tester, '57');
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+
+      final entry = banked.banked.single;
+      expect(entry.readAsTileId, '6');
+      expect(entry.readConfidence, closeTo(0.9, 0.001));
+    });
+
     testWidgets('a hex never photographed banks nothing', (tester) async {
       final view = TestWidgetsFlutterBinding.instance.platformDispatcher.views.first;
       view.physicalSize = const Size(900, 1400);
@@ -210,4 +259,11 @@ void main() {
       expect(session.tileAt(title.map.byId('C12')!)?.tileId, '57');
     });
   });
+}
+
+/// A store whose pictures arrive a moment after they are asked for.
+class _DiskLikeStore extends FakeSessionStore {
+  @override
+  Future<Uint8List?> hexPicture(String id, String hexId) =>
+      Future.microtask(() => pictures['$id/$hexId']);
 }

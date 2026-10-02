@@ -17,6 +17,20 @@ class RevenueReading {
   String toString() => recognized ? '$value' : 'unread("$rawText")';
 }
 
+/// A word the platform's text recognizer read, and where it lies across the
+/// image: from 0 at the left edge to 1 at the right.
+class RecognizedWord {
+  final String text;
+  final double left;
+  final double right;
+
+  const RecognizedWord(this.text, this.left, this.right);
+
+  @override
+  String toString() =>
+      '$text@${left.toStringAsFixed(2)}-${right.toStringAsFixed(2)}';
+}
+
 /// Thrown when the platform has no text recognizer, such as a desktop build.
 class TextRecognitionUnavailable implements Exception {
   final String message;
@@ -31,9 +45,9 @@ class TextRecognitionUnavailable implements Exception {
 /// This is the fallback source of revenue, used where a tile wasn't
 /// recognized confidently enough to trust its tile data (see
 /// `RevenueResolver`). Recognition itself is done natively on each platform,
-/// behind the [channel]: Apple's Vision framework on iOS
-/// (`ios/Runner/TextRecognitionPlugin.swift`) and ML Kit on Android
-/// (`TextRecognitionChannel.kt`). Neither needs a Flutter plugin, which keeps
+/// behind the [channel]: Apple's Vision framework on iOS and macOS
+/// (`TextRecognitionPlugin.swift` in each runner) and ML Kit on Android
+/// (`TextRecognitionChannel.kt`). None needs a Flutter plugin, which keeps
 /// the iOS build free of CocoaPods.
 ///
 /// The channel takes PNG bytes under `image` and returns the recognized lines
@@ -70,19 +84,54 @@ class RevenueOcr {
       );
     }
 
+    return parseRecognizedText(await recognize(crop));
+  }
+
+  /// The text the platform recognizer finds in [image], a line at a time;
+  /// empty if it fails on this image. Throws [TextRecognitionUnavailable]
+  /// if there is no recognizer at all.
+  static Future<String> recognize(img.Image image) async {
     try {
       final text = await channel.invokeMethod<String>(
         'recognizeText',
-        {'image': img.encodePng(crop)},
+        {'image': img.encodePng(image)},
       );
-      return parseRecognizedText(text ?? '');
+      return text ?? '';
     } on MissingPluginException {
       throw const TextRecognitionUnavailable(
         'Text recognition is not available on this device.',
       );
     } on PlatformException catch (e) {
       debugPrint('Text recognition failed: ${e.code} ${e.message}');
-      return const RevenueReading(value: null, rawText: '');
+      return '';
+    }
+  }
+
+  /// The words the platform recognizer finds in [image], with where each
+  /// lies across it; empty if it fails on this image. Throws
+  /// [TextRecognitionUnavailable] if the platform can't say where words are
+  /// (Android's recognizer answers only [recognize]).
+  static Future<List<RecognizedWord>> recognizeWords(img.Image image) async {
+    try {
+      final words = await channel.invokeListMethod<Map<Object?, Object?>>(
+        'recognizeTextWords',
+        {'image': img.encodePng(image)},
+      );
+      return [
+        for (final word in words ?? const <Map<Object?, Object?>>[])
+          RecognizedWord(
+            word['text'] as String,
+            (word['left'] as num).toDouble(),
+            (word['right'] as num).toDouble(),
+          ),
+      ];
+    } on MissingPluginException {
+      throw const TextRecognitionUnavailable(
+        'Word positions are not available on this device.',
+      );
+    } on PlatformException catch (e) {
+      debugPrint('Text recognition failed: ${e.code} ${e.message}');
+      return const [];
     }
   }
 

@@ -244,6 +244,43 @@ void main() {
     });
   });
 
+  group("a title's own upgrade rules", () {
+    test("Aarau's two small cities join on its first tile", () {
+      // tobymao's 1844: the printed yellow D15 upgrades only to 14, 15 or
+      // 619, one city of two circles -- whatever the usual rule says.
+      final aarau = title.map.byId('D15')!;
+      final first = rules.options(aarau, null, maxSteps: 1)
+          .where((o) => !o.isPrinted)
+          .map((o) => o.tileId)
+          .toSet();
+      expect(first, {'14', '15', '619'});
+      // Each keeps the track printed on the hex.
+      for (final o in rules.options(aarau, null, maxSteps: 1)) {
+        if (o.isPrinted) continue;
+        expect(rules.contentOf(aarau, o)!.edges, containsAll({2, 4}));
+      }
+      // So the brown tile laid there in the game is allowed.
+      expect(rules.explain(aarau, const PlacedTile('611', rotation: 1)), isNull);
+    });
+
+    test('an OO tile on Aarau is still refused, and says why', () {
+      final aarau = title.map.byId('D15')!;
+      expect(rules.explain(aarau, const PlacedTile('59')), isNotNull);
+    });
+
+    test('the reason a tile is refused counts circles as well as cities', () {
+      // Basel prints one city with one circle; a brown OO tile has two
+      // cities.
+      final basel = title.map.byId('C12')!;
+      expect(rules.explain(basel, const PlacedTile('64')),
+          contains('1 city printed'));
+      // And a city of two circles says so.
+      final langnau = title.map.byId('F13')!; // a town
+      expect(rules.explain(langnau, const PlacedTile('611')),
+          contains('1 city with 2 circles'));
+    });
+  });
+
   group('mountain railways', () {
     test('any of the plates can go on a mountain, and only on a mountain',
         () {

@@ -22,6 +22,7 @@ import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/processing/board_reader.dart';
 import 'package:eighteen_xx_calculator/processing/gray_image.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
+import 'package:eighteen_xx_calculator/processing/plate_reader.dart';
 import 'package:eighteen_xx_calculator/screens/capture.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
@@ -42,24 +43,48 @@ void main() {
     );
     final guess = guide
         .homographyFor(Size(photo.width.toDouble(), photo.height.toDouble()));
-    // ignore: avoid_print
-    final fit = GridDetector(map, log: print)
-        .fitCloseUp(photo, guess, target.coord);
-    expect(fit, isNotNull);
-    fit!;
-    final at = fit.boardToImage.apply(target.coord.boardCenter);
-    // ignore: avoid_print
-    print('coverage ${fit.coverage.toStringAsFixed(2)}, ${target.id} at '
-        '(${at.dx.round()}, ${at.dy.round()})');
-
     final saved = env['CLOSEUP_SESSION'];
     final session = saved == null
         ? GameSession.start(title: title, name: 'close-up test', startedEmpty: false)
         : GameSession.fromJson(
             jsonDecode(File(saved).readAsStringSync()) as Map<String, Object?>);
+    // ignore: avoid_print
+    final found = GridDetector(map, log: print).fitCloseUp(
+        photo, guess, target.coord,
+        hints: saved == null
+            ? null
+            : BoardHints(
+                colours: {
+                  for (final e in session.content(title).entries)
+                    e.key: e.value.color,
+                },
+                tiled: {
+                  for (final hex in map.hexes)
+                    if (session.tileAt(hex) != null) hex.coord,
+                },
+              ));
+    expect(found, isNotNull);
+    var fit = found!;
+    final at = fit.boardToImage.apply(target.coord.boardCenter);
+    // ignore: avoid_print
+    print('coverage ${fit.coverage.toStringAsFixed(2)}, ${target.id} at '
+        '(${at.dx.round()}, ${at.dy.round()})');
     final around =
         map.around([target.coord], int.parse(env['CLOSEUP_RADIUS'] ?? '1'));
     final reader = BoardReader(title);
+    // As the app does: lined up with what the game knows is there.
+    final aligned = await reader.alignToKnown(
+        photo: photo,
+        boardToImage: fit.boardToImage,
+        hexes: fit.visible,
+        session: session,
+        // ignore: avoid_print
+        log: print);
+    fit = GridFit(
+        boardToImage: aligned,
+        visible: fit.visible,
+        coverage: fit.coverage,
+        hexCoverage: fit.hexCoverage);
     final glareFrom = env['CLOSEUP_GLARE_FROM'];
     var prior = <HexCoord, double>{};
     if (glareFrom != null) {
@@ -96,10 +121,24 @@ void main() {
       // ignore: avoid_print
       print('$t');
     }
+    final plates = PlateReader(title);
+    final outPath = env['CLOSEUP_OUT'] ?? '/tmp/closeup.png';
     for (final m in reader.readMountains(
         photo: photo, boardToImage: fit.boardToImage, hexes: fit.visible)) {
       // ignore: avoid_print
       print('$m');
+      // The strip the plate's figures are read from, to check by eye or
+      // run through a text recognizer.
+      final strip = plates.strip(
+          RgbImage.fromImage(photo), fit.boardToImage, m);
+      if (strip != null) {
+        final path = outPath.replaceFirst('.png', '_plate_${m.hex.id}.png');
+        File(path).writeAsBytesSync(img.encodePng(strip));
+        File(path.replaceFirst('.png', '_ink.png'))
+            .writeAsBytesSync(img.encodePng(PlateReader.inked(strip)));
+        // ignore: avoid_print
+        print('  plate strip: $path (and _ink)');
+      }
     }
 
     final out = img.Image.from(photo);
@@ -119,7 +158,6 @@ void main() {
           y: c.dy.round() - 12,
           color: img.ColorRgb8(255, 0, 60));
     }
-    final outPath = env['CLOSEUP_OUT'] ?? '/tmp/closeup.png';
     File(outPath).writeAsBytesSync(img.encodePng(out));
     // ignore: avoid_print
     print('wrote $outPath');

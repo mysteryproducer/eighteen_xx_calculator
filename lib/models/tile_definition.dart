@@ -309,7 +309,11 @@ class TileDefinition {
       final kv = part.split('_');
       if (kv.length != 2) continue;
       final value = int.tryParse(kv[1]);
-      if (value != null) result[tileColorFromName(kv[0])] = value;
+      // Phases are named by tile colour, except the last in some titles:
+      // 1889's off-boards pay by "diesel", which comes after brown.
+      final phase =
+          kv[0] == 'diesel' ? TileColor.grey : tileColorFromName(kv[0]);
+      if (value != null) result[phase] = value;
     }
     return result;
   }

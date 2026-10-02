@@ -1,12 +1,13 @@
 # Recognition & Route Plotting
 
-Status: fifth pass. The app knows the title it is looking at, finds the hex
+Status: sixth pass. The app knows the title it is looking at, finds the hex
 grid in a photo by itself and corrects the camera's angle, keeps a game session
 between photos, and asks for close-ups of the hexes it isn't sure about. It has
-been through a real game's first rounds: tiles up to brown, 1844's five-hex
-Furka-Oberalp piece, station tokens, tunnels, mountain railways, and photos
-taken under glare. Train rules are still the one big thing missing (see
-Deferred).
+been through most of a real game of 1844: tiles up to brown, the five-hex
+Furka-Oberalp piece, station tokens, tunnels, mountain railways with their
+plates read, and photos taken under glare and in evening light. 1889, whose
+board is flat-topped, is imported for the next game. Train rules are still the
+one big thing missing (see Deferred).
 
 ## Context
 
@@ -68,8 +69,28 @@ towns, off-board revenue by phase, pre-printed track, labels, impassable
 borders), place names, the tiles in the box with their counts, and the
 companies that put tokens on the board, with their token colours and home
 cities. 1844 has 131 hexes, 62 tile designs and 15 companies; 1854 has 100, 42
-and 17. (1854 builds its six local railways in code from three plain lists;
-the importer reads the lists.)
+and 17; 1889 has 52, 40 and 7. (1854 builds its six local railways in code
+from three plain lists; the importer reads the lists.)
+
+**Flat-topped boards.** 1889's map is printed with flat-topped hexes, lettered
+by column and numbered by row. The app keeps every map pointy-topped: a
+flat-topped board turned a twelfth of a turn clockwise is exactly a
+pointy-topped one, and each side keeps its number (side 0, the bottom of a flat
+hex, becomes the lower left of a pointy one), so the title's tiles carry over
+unchanged. Stepping across side k is the same step on both, which makes
+tobymao's flat doubled coordinates (x, y) the pointy doubled coordinates
+((3x - y) / 2, (x + y) / 2) -- `MapLayout.coordFromFlatId`. Everything that
+reads photos works on the turned map as it does on 1844's (the grid detector
+finds a flat board photographed as printed with no change), and everything
+that draws turns it back by `GameTitle.displayTurn`: the board, the tile
+pictures, the close-up guide and the align screen's starting grid.
+
+The importer also skips a tile printed exactly like one already listed --
+1889's beginner variant lists 6 again as Beg6, and so on, and two identical
+drawings would always tie in recognition -- and reads 1889's "diesel" phase
+revenue as the last phase's. Where the printed pieces place cities
+differently from tobymao's rule (see Reading the hexes), a small table in the
+importer gives their places.
 
 **Which side is which.** tobymao numbers a pointy-top hex's sides from the
 south-west, running clockwise: 0=SW, 1=W, 2=NW, 3=NE, 4=E, 5=SE. This is not
@@ -177,6 +198,62 @@ tiles apart from grey and purple, while red against green varies with the
 light). In a plain stretch of map there is nothing to go on, and the guide
 stands.
 
+**What the game already knows.** By the fourth round of photos a third of the
+board was tiles, and tiles cover the printed outlines the grid is fitted to:
+on the evening photo of the whole board only 73 of 206 cells showed an
+outline, the map was placed upside down, and a close-up of Basel was fitted
+two-thirds of a hex out. The session knows a great deal that the photo can be
+checked against, and three things use it (`BoardHints`):
+
+- Placing the map compares the photo's colours with the colours the session
+  expects -- each tile's, where one is laid -- instead of the printed map's.
+  The agreement now counts for as much of the map as it covers (a placement
+  overlapping a handful of cells could agree with them by chance and won
+  before), the shortlist of placements takes any that fit the outlines half
+  as well as the best (tiles hide outlines), and colour counts double. The
+  evening photo is placed right; every earlier photo still is, with a wider
+  margin.
+- Which way the board faced in the last photo of it (`GridFit.facing`, kept
+  in the session) is preferred unless the photo clearly says otherwise, and
+  turns the close-up guide to match: players photograph from where they sit.
+  A close-up taken from the side of the board fails without it and fits with
+  it.
+- After fitting, the hexes the session is sure of -- tiles it knows, printed
+  cities and towns -- are matched against their drawings a little way around
+  where the grid put them (`BoardReader.alignToKnown`): first all together,
+  since one hex can match by chance a little way off but not all of them the
+  same way, then each a little further for any turn or perspective. The
+  correction is only as flexible as they are spread: a plain shift for a
+  cluster, a slight turn and scaling over a few hexes, perspective across a
+  whole board. Likeness is a correlation of darkness, not a distance: by
+  distance a blank hex is a near miss for a misplaced tile, so the search
+  wandered off onto plain map. Basel's close-up comes back into line (the
+  tiles there go from 0.2 to 0.9 alike) and reads both tiles at 99%; the
+  evening board reads 43 hexes as tiles and leaves 7 doubtful, against 35 and
+  27. It takes a quarter of a second, on a coarse picture of each hex.
+
+A colour-only version of the last step (lining up expected colour regions)
+was tried first and dropped: under evening light the beige map and pale
+yellow tiles barely differ, and it turned the Basel close-up four degrees the
+wrong way.
+
+**Following the board in the preview.** Close-ups taken with the camera turned
+20-30 degrees from the guide were the commonest failure in the fifth round of
+photos: the fit locked onto the hexes next door, so plates went unseen and
+brown tiles unread. On the Mac the capture screen now looks at a preview frame
+about once a second (`processing/guide_follower.dart`) and moves the guide to
+match: a turn of up to 25 degrees, a quarter bigger or smaller, and under
+three-quarters of a hex across -- small enough that it can't swing onto other
+hexes. Each look starts from where the guide was first drawn, never from the
+last correction, so it can't drift; when the board is lost the guide eases
+back. The photo is fitted starting from the guide as it was when taken. Frames
+are read by brightness alone, since the webcam's byte order isn't fixed, which
+the line-finding doesn't need. (Phones stream frames in the sensor's own
+orientation, a quarter turn from the screen on most, so they don't follow yet.)
+The close-up fit itself now looks for the grid up to 28 degrees either way of
+the guide, rather than 20, and lining up with known hexes no longer trusts a
+best match at the edge of its search.
+
 **When detection fails anyway**, the align screen starts from the map laid over
 the middle of the photo rather than from nothing, or from a wrong fit whose
 handles are off screen. The grid moves by dragging, sizes by pinching (touch
@@ -232,6 +309,29 @@ through it and a dot when it doesn't; and two things sharing the centre spread
 30 degrees apart. Their own renderer could not be pre-rendered headlessly to get
 this -- it is Opal and Snabberb, Ruby compiled to run in a browser -- so the
 constants come from `assets/app/view/game/part/*.rb`.
+
+Some titles have upgrade rules of their own, in tobymao's game code rather
+than its data, and those are kept by hand (`GameTitle.specialUpgrades`): 1844's
+Aarau (D15) is printed with two small cities that its first tile joins into
+one city of two circles, so it takes 14, 15 or 619 and then the usual browns.
+When a tile is refused, the reason counts circles as well as cities ("1 city
+with 2 circles"), since "1 city" alone read as one place for a token.
+
+Where stops go is worked out as the tiles are printed. A stop on its own sits
+in the middle, unless it is a town on a run of track from side to side, which
+sits halfway along the run with its bar across it (tiles 3 and 58 had been
+drawn as a V through the middle). Where there are several -- the OO tiles --
+each stop leans towards one of its sides, chosen by tobymao's rule (the least
+crowded of its own sides), and sits on its own run of track about 0.4 of a
+radius out: a straight, a tight turn round the corner, or a gentle curve
+round the next hex's centre, as tiles draw them. tobymao applies its rule to
+the tile as turned, which gets 1844's tile 67 wrong; applied to the tile as
+printed and turned with it, it matches the tile photographed at Fribourg, one
+city on each run, stacked on the east side. Some pieces are designed their own
+way: the printed OO hexes (Romont and Fribourg one above the other,
+Winterthur and Frauenfeld rising to the right) and tile 59, whose second city
+sits out by side 4 with its track curving round to it. Those come from the
+photos, through the importer's table.
 
 City slots are the exception, measured off the real tiles instead, because
 tobymao's are drawn for a screen: its slots are a quarter of the radius, and
@@ -385,8 +485,8 @@ and the mountain's off-board revenue becomes the plate's
 for close-ups, and the hex editor's Mountain railway row picks the plate, each
 drawn as printed.
 
-A photo can say a plate is there but not which one: the figures are what
-differ, and a whole-board photo is too small to read them. So the detector
+A photo can see a plate by its colours; which plate it is lies in the figures.
+The detector
 ([processing/mountain_detector.dart](../../lib/processing/mountain_detector.dart))
 looks for the boxes' colours. A mountain is printed grey and black, so a patch
 of yellow, one of green and one of salmon side by side, left to right, at the
@@ -395,6 +495,26 @@ neighbouring tile, the map's own colours -- doesn't form the row. A plate found 
 photo is recorded as "some plate", ringed, and listed to check, for the user to
 name; a plate the user named is never changed by a photo; and only a clear
 photo of a bare mountain takes away a plate a photo found.
+
+The figures are read by the platform's text recognizer -- Apple's Vision,
+now on macOS as well as iOS (`TextRecognitionPlugin.swift` in each runner),
+which also brings revenue reading to the Mac;
+[processing/plate_reader.dart](../../lib/processing/plate_reader.dart)). The
+row of boxes the detector found
+is cut out of the photo through the fit, so it comes out straight whichever way
+the camera was held, and read twice: as photographed, and as ink on white
+(each pixel's brightest channel, stretched against the paper around it), since
+the dark green box loses its figure otherwise. What matters as much as the
+figures is which box each was read in: 10, 50 and 80 could be XM1 or XM3, but
+50 in the third box and 80 in the fourth is only XM1. Vision places whole
+words, not characters, so a figure's box is judged from where it falls in its
+word ("(50(80)" spanning the right half of the strip is 50 in the third box and
+80 in the fourth). Every figure read settles the plate; two or more that only
+one plate has name it, flagged for checking. On the third round's photos that
+reads all three plates in close-ups (two settled) and, surprisingly, all three
+on a whole-board photo from the 1920-pixel webcam -- clear plates are about 11
+pixels tall there. Single boxes on their own can't be read: Vision finds no
+text in a strip with only one figure in it.
 
 Glare matters more here than anywhere: the boxes are pale to start with. The
 third round's close-ups showed why close-ups suffer most. In the close-ups of
@@ -474,6 +594,17 @@ company's token is looked for, by its colour; anywhere else there it says it
 can't tell, and nothing changes. Measured on the first real token (BLS's, on a
 tile on Bern) and the printed cities around it, that rule gets every one right.
 
+Most token errors turn out to be where the slots are looked for, not what is
+seen in them: a slot sampled a fifth of a hex off reads the tile beside it --
+a tan "MOB" on a brown tile, a pale green "FNM" on a green one. Drawing the OO
+tiles as printed and lining the grid up with the known hexes removed three of
+the four false tokens on the evening photo of the board (25 cities right).
+Lining each city's hex up on its own before reading its slots was tried and
+dropped: a token darkens its slot, which pulls the match the wrong way, and it
+broke a token it had read right. What would help next is finding the slots
+themselves -- white or coloured discs of a known size -- rather than trusting
+where the drawing says they are.
+
 Whose token it is comes from colour, compared against each company's colour as
 it photographs rather than tobymao's deeper screen colour, and from where it
 is: companies printed in the same colour (1844's BLS and GB are both mustard)
@@ -481,6 +612,17 @@ can only be told apart by home. A token placed without being sure whose it is
 is kept, ringed on the board, and listed as "to check"; a later photo may
 change it, and setting it by hand settles it. Tokens the user set are never
 changed by a photo.
+
+Every circle of a city holds its own token (`GameSession.tokens` is kept by
+circle, `GameSession.slotId`; games saved before put their one token per city
+in its first circle). Each is drawn in its circle where the tile prints it,
+read from photos circle by circle, and set in the station editor a row per
+circle. A company keeps a circle free in its home city until its home token
+is down -- no company's starting token can be blocked -- so a token filling
+the last free circle of another company's home is shown in red with why
+(`GameSession.tokenProblems`): FNM on Altdorf's one circle before the
+Gotthardbahn had started, say. As with a tile that can't belong, the app shows
+what is on the board and says it is wrong rather than refusing it.
 
 ## The rest
 
@@ -496,8 +638,11 @@ impassable borders block connections. Off-board revenue follows the session's
 phase.
 
 **Route search** ([processing/route_finder.dart](../../lib/processing/route_finder.dart))
-is as before, with one rule added: a route can end at an off-board area but not
-run through it. `maxStops` still stands in for train length.
+is as before, with two rules added: a route can end at an off-board area but not
+run through it, and a company's route can end at a city whose every circle holds
+another company's token but not run through it (`StationNode.blocks`); a city
+with an open circle, or one of the company's own tokens, lets it through.
+`maxStops` still stands in for train length.
 
 **Revenue** comes from tile and map data. Where a hex is doubtful, the station
 editor can read the printed figure off that hex's stored picture using the
@@ -542,17 +687,19 @@ needs a hand-built `libtensorflowlite_c` on macOS and ships as a pod on iOS,
 which would undo this project's CocoaPods-free iOS build for a model small
 enough to write out as a list of doubles.
 
+(Until the fourth pass every record said recognition had read exactly what
+the user then set: the editor sets the hex while the picture is still being
+loaded, and what was read was taken after that. It is now taken first, and
+for a hex the user had already set, what the latest photo suggested is what
+counts as read. Records from before then can't say what was read.)
+
 ## Deferred
 
-- Real train rules: train types, "+" trains, E/D trains, city slot availability,
-  token requirements, route groupings. `maxStops` is the placeholder.
+- Real train rules: train types, "+" trains, E/D trains, route groupings.
+  `maxStops` is the placeholder.
 - Company logos. Companies, colours and homes are imported; a token away from
   home in a colour two companies share is left for the user to name.
-- One token per city: a two-slot city with two companies' tokens records the
-  first. `GameSession.tokens` would need a list per station.
 - Tokens on printed cities other than the company's home; see Station tokens.
-- Titles whose maps are flat-top rather than pointy-top; the importer refuses
-  them rather than importing something wrong.
 - Maps printed in two pieces (1854's local railways may be a separate inset on
   the physical board). The detector places one connected map; if a title's map is
   in two pieces, the second would need its own placement.
@@ -563,16 +710,14 @@ enough to write out as a list of doubles.
   tile, but only the one the game lays when the line opens -- the importer
   keeps those tiles, marked `laidByGame`, and the rules offer nothing else
   there.
-- Which mountain railway plate is on a mountain. The photo only says there
-  is one; the user names it. Apple's Vision text recognizer, already used for
-  revenue on iOS, reads the four figures off a plate in a clear close-up (10,
-  40, 50, 60 is XM2) but only part of them on a softer one, and nothing under
-  glare, so a macOS port of `TextRecognitionPlugin` could suggest the plate,
-  not settle it.
-- Two cities printed on one hex without a `loc:` (1844's OO hexes) are drawn
-  on a 30-degree line; the board prints Fribourg and Romont one above the
-  other. Recognition of OO tiles and tokens on them will suffer until the
-  layout matches.
+- Android's text recognizer answers lines only, not where words are, so a
+  plate is read there by the order of its figures, which says less.
+- 1844's OO tiles 64, 65 and 68 haven't been photographed, and 66 only at an
+  angle: they are drawn by the general rule, which 59 and 66 show isn't always
+  the print's. An upright close-up of each would let the importer's table
+  place their cities.
+- 1889's own rules (the private companies, the Kouchi port) beyond its map,
+  tiles and companies.
 - Hexes at the very edge of the map (red off-board areas, the grey mountain
   railways) are printed as part-hexes running off the board, so a close-up
   centred on one has little grid to lock onto. The planner aims at hexes that
@@ -607,6 +752,13 @@ enough to write out as a list of doubles.
 
 ## Notes for the next pass
 
+- **The fourth round of photos** (1 October, evening): a whole-board photo
+  that had to be placed by hand (now placed automatically from the session's
+  tiles), close-ups of C12 (fitted two-thirds of a hex out, now lined up by
+  its tiles), G8, I6, I10 and twice around L21, and eleven tokens set or
+  corrected by hand. Still weak: the false token on Lausanne's second city
+  (I4, tile 901), and Chur (G26), where even the lined-up grid is half a hex
+  off the tile -- both slots sampled on tile; see Station tokens.
 - **The third round of photos** (1 October, early afternoon, same lamp):
   brown tiles, three mountain railway plates, a second tunnel and a token on
   D15, in five whole-board photos and five close-ups. Two whole-board photos

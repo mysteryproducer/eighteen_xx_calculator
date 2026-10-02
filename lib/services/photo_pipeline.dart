@@ -8,6 +8,7 @@ import '../geometry/homography.dart';
 import '../models/board.dart';
 import '../models/map_layout.dart';
 import '../processing/grid_detector.dart';
+import '../processing/guide_follower.dart' as follower;
 
 /// The heavy per-photo work, kept off the UI thread.
 ///
@@ -47,20 +48,41 @@ class PhotoPipeline {
     });
   }
 
-  /// Finds the whole map in a photo of the board.
-  Future<GridFit?> fitBoard(MapLayout map, img.Image photo) =>
-      Isolate.run(() => GridDetector(map).fitBoard(photo));
+  /// Finds the whole map in a photo of the board, helped by what the game
+  /// already knows.
+  Future<GridFit?> fitBoard(MapLayout map, img.Image photo,
+          {BoardHints? hints}) =>
+      Isolate.run(() => GridDetector(map).fitBoard(photo, hints: hints));
 
   /// Tightens a hand-made alignment onto the printed lines.
   Future<GridFit> snap(MapLayout map, img.Image photo, Homography guess) =>
       Isolate.run(() => GridDetector(map).snap(photo, guess));
 
-  /// Finds the grid in a close-up framed with a guide.
+  /// How a close-up guide drawn at [guide] (board to the frame's pixels)
+  /// should move to follow the board in a preview frame of four bytes a
+  /// pixel; see [followGuide].
+  Future<follower.GuideAdjustment?> followGuide(
+    MapLayout map, {
+    required Uint8List bytes,
+    required int width,
+    required int height,
+    required int bytesPerRow,
+    required Homography guide,
+    required HexCoord target,
+  }) =>
+      Isolate.run(() => follower.followGuide(map,
+          follower.GrayFrame.fromFourBytes(bytes, width, height, bytesPerRow),
+          guide, target));
+
+  /// Finds the grid in a close-up framed with a guide, helped by what the
+  /// game already knows.
   Future<GridFit?> fitCloseUp(
     MapLayout map,
     img.Image photo,
     Homography guess,
-    HexCoord target,
-  ) =>
-      Isolate.run(() => GridDetector(map).fitCloseUp(photo, guess, target));
+    HexCoord target, {
+    BoardHints? hints,
+  }) =>
+      Isolate.run(() =>
+          GridDetector(map).fitCloseUp(photo, guess, target, hints: hints));
 }

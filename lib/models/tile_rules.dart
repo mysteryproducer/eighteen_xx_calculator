@@ -106,8 +106,15 @@ class TileRules {
     }
     final printed = hex.printed;
     String stops(TileDefinition d) {
+      // Circles too, where a city has more than one: "1 city" alone reads
+      // as one place for a token.
+      final circles = d.stations
+          .where((s) => s.kind == StationKind.city)
+          .fold(0, (total, s) => total + (s.slots < 1 ? 1 : s.slots));
       final parts = [
-        if (d.cityCount > 0) '${d.cityCount} ${d.cityCount == 1 ? 'city' : 'cities'}',
+        if (d.cityCount > 0)
+          '${d.cityCount} ${d.cityCount == 1 ? 'city' : 'cities'}'
+              '${circles > d.cityCount ? ' with $circles circles' : ''}',
         if (d.townCount > 0) '${d.townCount} ${d.townCount == 1 ? 'town' : 'towns'}',
       ];
       return parts.isEmpty ? 'no stop' : parts.join(' and ');
@@ -251,12 +258,19 @@ class TileRules {
     final requiredLabel = base.label ??
         (nextColour == TileColor.yellow ? null : hex.futureLabel);
     final baseEdges = base.edges;
+    // A title's own rule for what goes on this printing, if it has one.
+    final special = from.isPrinted ? title.specialUpgrades[hex.id] : null;
 
     for (final tile in title.tiles.values) {
-      if (tile.color != nextColour) continue;
-      if (tile.label != requiredLabel) continue;
-      if (tile.cityCount != base.cityCount || tile.townCount != base.townCount) {
-        continue;
+      if (special != null) {
+        if (!special.contains(tile.id)) continue;
+      } else {
+        if (tile.color != nextColour) continue;
+        if (tile.label != requiredLabel) continue;
+        if (tile.cityCount != base.cityCount ||
+            tile.townCount != base.townCount) {
+          continue;
+        }
       }
       final signatures = <String>{};
       for (int r = 0; r < 6; r++) {

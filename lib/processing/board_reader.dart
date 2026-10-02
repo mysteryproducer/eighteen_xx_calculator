@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'dart:ui' show Offset;
+import 'dart:ui' show Offset, Rect;
 
 import 'package:image/image.dart' as img;
 
@@ -19,6 +19,7 @@ import 'tile_classifier.dart';
 import 'tile_renderer.dart';
 import 'token_detector.dart';
 import 'mountain_detector.dart';
+import 'plate_reader.dart';
 import 'tunnel_detector.dart';
 
 /// What one photo showed on one hex.
@@ -30,7 +31,7 @@ class HexReading {
   /// The hex as photographed, squared up, as PNG.
   final Uint8List picture;
 
-  /// Station token colours seen, by station id.
+  /// What each city circle showed, by circle (see `GameSession.slotId`).
   final Map<String, TokenDetection> tokens;
 
   /// Whether what was read is an upgrade of what the session last knew was
@@ -75,6 +76,217 @@ class BoardReader {
         classifier = classifier ?? TileClassifier(),
         tokenDetector =
             tokenDetector ?? TokenDetector(companies: title.companies);
+
+  /// Lines [boardToImage] up with what the game already knows is on the
+  /// board, and returns the better fit (or [boardToImage] itself, if what
+  /// is known says nothing clear).
+  ///
+  /// A grid fitted to the printed outlines can sit a fraction of a hex off
+  /// where they are faint, or covered by tiles. So each hex in [hexes] whose
+  /// printing the game knows -- a tile it is sure of, or a printed city or
+  /// town -- is looked for a little way around where the grid puts it, by
+  /// matching its drawing against the photo; and the shifts they agree on
+  /// move the grid: all of it the same way when only one or two hexes say,
+  /// turned and scaled as well when more do, and in perspective when there
+  /// are plenty.
+  Future<Homography> alignToKnown({
+    required img.Image photo,
+    required Homography boardToImage,
+    required Iterable<HexCoord> hexes,
+    required GameSession session,
+    void Function(String)? log,
+  }) async {
+    final anchors = <HexCoord, String>{};
+    final drawings = <String, TileDefinition>{};
+    for (final c in hexes) {
+      final hex = title.map.at(c);
+      if (hex == null || !hex.takesTiles) continue;
+      final state = session.stateOf(hex);
+      final tile = session.tileAt(hex);
+      if (tile != null) {
+        if (state.source != HexSource.manual && state.confidence < _sureEnough) {
+          continue;
+        }
+        final def = title.tiles[tile.tileId];
+        if (def == null) continue;
+        final key = _key(hex, TileOption(tile.tileId, tile.rotation));
+        anchors[c] = key;
+        drawings[key] = def.rotated(tile.rotation);
+      } else if (hex.printed.stations.isNotEmpty) {
+        final key = _key(hex, TileOption.printed);
+        anchors[c] = key;
+        drawings[key] = hex.printed;
+      }
+    }
+    if (anchors.isEmpty) return boardToImage;
+    await classifier.prepare(drawings);
+    final rgb = RgbImage.fromImage(photo);
+
+    double like(HexCoord c, Offset shift) =>
+        classifier.shapeLikeness(anchors[c]!,
+            HexPatch.coarseFromPhoto(rgb, boardToImage, c, shift: shift)) ??
+        0;
+    final still = {for (final c in anchors.keys) c: like(c, Offset.zero)};
+    // Spread over the photo, and not so many that this takes long.
+    final ordered = anchors.keys.toList()
+      ..sort((a, b) => a.row != b.row ? a.row - b.row : a.col - b.col);
+    List<HexCoord> spread(int most) => ordered.length <= most
+        ? ordered
+        : [
+            for (int i = 0; i < most; i++)
+              ordered[i * ordered.length ~/ most],
+          ];
+    final judges = spread(16);
+
+    // First the whole grid moved together, judged on the known hexes at
+    // once: one hex alone can match by chance a little way off, but not all
+    // of them the same way.
+    double together(Offset shift) {
+      double total = 0;
+      for (final c in judges) {
+        total += like(c, shift);
+      }
+      return total / judges.length;
+    }
+
+    final start = together(Offset.zero);
+    var shift = Offset.zero;
+    var best = start;
+    void consider(Offset candidate) {
+      final score = together(candidate);
+      if (score > best) {
+        best = score;
+        shift = candidate;
+      }
+    }
+
+    for (double y = -_reach; y <= _reach + 1e-9; y += 0.1) {
+      for (double x = -_reach; x <= _reach + 1e-9; x += 0.1) {
+        consider(Offset(x, y));
+      }
+    }
+    final coarse = shift;
+    for (double y = -0.075; y <= 0.076; y += 0.025) {
+      for (double x = -0.075; x <= 0.076; x += 0.025) {
+        consider(coarse + Offset(x, y));
+      }
+    }
+    log?.call('known hexes: ${anchors.length}, alike '
+        '${start.toStringAsFixed(3)} where the grid put them, '
+        '${best.toStringAsFixed(3)} at (${shift.dx.toStringAsFixed(3)}, '
+        '${shift.dy.toStringAsFixed(3)})');
+    if (best < start + _clearGain) return boardToImage;
+    // A best match at the edge of where the grid was looked for may only be
+    // the nearest the search came to something further off -- or a hex
+    // matching a neighbour's drawing. Either way it isn't to be trusted.
+    if (shift.dx.abs() > _reach - 0.1 || shift.dy.abs() > _reach - 0.1) {
+      log?.call('the best match is at the edge of the search; left as it is');
+      return boardToImage;
+    }
+
+    // Then each hex a little way around that, for any turn, scaling or
+    // perspective the grid is out by as well.
+    final from = <Offset>[], to = <Offset>[], weights = <double>[];
+    for (final c in spread(30)) {
+      var own = shift;
+      var ownBest = like(c, shift);
+      for (double y = -0.1; y <= 0.101; y += 0.025) {
+        for (double x = -0.1; x <= 0.101; x += 0.025) {
+          final likeness = like(c, shift + Offset(x, y));
+          if (likeness > ownBest) {
+            ownBest = likeness;
+            own = shift + Offset(x, y);
+          }
+        }
+      }
+      log?.call('  ${title.map.at(c)!.id} (${anchors[c]}): '
+          '${still[c]!.toStringAsFixed(3)} -> ${ownBest.toStringAsFixed(3)} at '
+          '(${own.dx.toStringAsFixed(3)}, ${own.dy.toStringAsFixed(3)})');
+      // A hex that doesn't look like its drawing anywhere near says nothing.
+      if (ownBest < _alike) continue;
+      from.add(c.boardCenter);
+      to.add(c.boardCenter + own);
+      weights.add(ownBest);
+    }
+    if (from.isEmpty) {
+      return Homography.similarity(translation: shift).then(boardToImage);
+    }
+    return _correction(from, to, weights).then(boardToImage);
+  }
+
+  /// The board-space correction taking [from] to [to] as closely as they
+  /// can say: a plain shift where they are close together, since a turn or
+  /// scaling fitted to a cluster is mostly its noise; a shift, a slight turn
+  /// and a slight scaling where they spread over a few hexes; and
+  /// perspective as well where there are plenty spread wide.
+  static Homography _correction(
+      List<Offset> from, List<Offset> to, List<double> weights) {
+    double total = 0;
+    var shift = Offset.zero;
+    var mf = Offset.zero, mt = Offset.zero;
+    var bounds = Rect.fromPoints(from.first, from.first);
+    for (int i = 0; i < from.length; i++) {
+      shift += (to[i] - from[i]) * weights[i];
+      mf += from[i] * weights[i];
+      mt += to[i] * weights[i];
+      total += weights[i];
+      bounds = bounds.expandToInclude(Rect.fromPoints(from[i], from[i]));
+    }
+    shift /= total;
+    mf /= total;
+    mt /= total;
+    final plain = Homography.similarity(translation: shift);
+    if (from.length < 3 || bounds.longestSide < _spreadForTurn) return plain;
+    if (from.length >= 6 && bounds.shortestSide >= _spreadForPerspective) {
+      final fitted = Homography.fit(from, to, weights: weights);
+      // Taken only if it agrees with the anchors' plain shift to within a
+      // fraction of a hex across them: it is correcting a fit, not
+      // replacing it.
+      if (fitted != null &&
+          [bounds.topLeft, bounds.topRight, bounds.bottomLeft, bounds.bottomRight]
+              .every((p) => (fitted.apply(p) - p - shift).distance < 0.5)) {
+        return fitted;
+      }
+    }
+    // Weighted Procrustes: the scale, turn and shift taking one set of
+    // points onto the other most closely.
+    double a = 0, b = 0, norm = 0;
+    for (int i = 0; i < from.length; i++) {
+      final p = from[i] - mf, q = to[i] - mt;
+      a += weights[i] * (p.dx * q.dx + p.dy * q.dy);
+      b += weights[i] * (p.dx * q.dy - p.dy * q.dx);
+      norm += weights[i] * (p.dx * p.dx + p.dy * p.dy);
+    }
+    if (norm <= 0) return plain;
+    final scale = math.sqrt(a * a + b * b) / norm;
+    final turn = math.atan2(b, a);
+    if ((scale - 1).abs() > 0.03 || turn.abs() > 3 * math.pi / 180) {
+      return plain;
+    }
+    final cs = math.cos(turn) * scale, sn = math.sin(turn) * scale;
+    final turned = Offset(cs * mf.dx - sn * mf.dy, sn * mf.dx + cs * mf.dy);
+    return Homography.similarity(
+        scale: scale, radians: turn, translation: mt - turned);
+  }
+
+  /// How far apart, in board units, known hexes have to be before they can
+  /// say how the grid is turned, and before they can say how it is in
+  /// perspective. Neighbouring hexes are 1.7 apart.
+  static const double _spreadForTurn = 3.4;
+  static const double _spreadForPerspective = 6;
+
+  /// How far either way, in hex radii, the grid is looked for.
+  static const double _reach = 0.8;
+
+  /// How much more alike their drawings (see [HexPatch.correlationWith])
+  /// the known hexes have to be, on the whole, to say the grid is out.
+  static const double _clearGain = 0.05;
+
+  /// How alike its drawing a known hex has to look to steer the grid.
+  static const double _alike = 0.3;
+
+  /// How sure of a tile the game has to be for it to steer the grid.
+  static const double _sureEnough = 0.8;
 
   /// Reads [hexes] from [photo], where [boardToImage] places the map.
   /// [context] is every map hex fully in the photo, used as the colour
@@ -315,18 +527,29 @@ class BoardReader {
   }
 
   /// Folds [readings] into [session], as tunnels are. A photo can tell that
-  /// a plate is there but not which one, so a plate it finds is recorded as
-  /// [GameSession.unknownPlate] and flagged for the user to name.
+  /// a plate is there, but only its figures say which one: where [plates]
+  /// has them read (by hex id, see `PlateReader`) that plate is recorded --
+  /// settled if every figure was read, flagged if only some were -- and
+  /// otherwise [GameSession.unknownPlate], flagged for the user to name.
   static void applyMountains(
-      GameSession session, List<MountainReading> readings) {
+    GameSession session,
+    List<MountainReading> readings, {
+    Map<String, PlateIdentity> plates = const {},
+  }) {
     for (final r in readings) {
       final id = r.hex.id;
       final current = session.mountains[id];
       final open = current == null || session.mountainDoubts.contains(id);
       if (!open || r.confidence < _tokenConfidence) continue;
       if (r.present) {
-        session.mountains[id] = current ?? GameSession.unknownPlate;
-        session.mountainDoubts.add(id);
+        final read = plates[id];
+        final named = read?.plate;
+        session.mountains[id] = named ?? current ?? GameSession.unknownPlate;
+        if (named != null && read!.sure) {
+          session.mountainDoubts.remove(id);
+        } else {
+          session.mountainDoubts.add(id);
+        }
       } else if (current != null) {
         session.mountains.remove(id);
         session.mountainDoubts.remove(id);
@@ -561,9 +784,8 @@ class BoardReader {
     );
   }
 
-  /// What each city on [hex] holds, read as [option]: per station, the
-  /// first of its slots with a token in, or else what the first slot
-  /// showed.
+  /// What each circle of each city on [hex] holds, read as [option], by
+  /// circle (see `GameSession.slotId`).
   Map<String, TokenDetection> _tokens(
     RgbImage photo,
     Homography boardToImage,
@@ -581,24 +803,21 @@ class BoardReader {
       for (final c in title.companies) {
         if (c.isHomeOf(hex.id, station.index)) home = c;
       }
-      TokenDetection? seen;
-      for (final slot
-          in TileRenderer.slotPositions(content, station.index, centre, 1)) {
-        final detection = tokenDetector.detect(
+      final circles =
+          TileRenderer.slotPositions(content, station.index, centre, 1);
+      for (int slot = 0; slot < circles.length; slot++) {
+        result[GameSession.slotId(
+            '${hex.coord.row}_${hex.coord.col}_${station.index}', slot)] =
+            tokenDetector.detect(
           photo: photo,
           boardToImage: boardToImage,
-          slot: slot,
+          slot: circles[slot],
           slotRadius: TileRenderer.slotRadiusFor(station),
           white: white,
           onTile: !option.isPrinted,
           home: home,
         );
-        if (seen == null || (detection.present && !seen.present)) {
-          seen = detection;
-        }
-        if (detection.present) break;
       }
-      result['${hex.coord.row}_${hex.coord.col}_${station.index}'] = seen!;
     }
     return result;
   }
@@ -635,21 +854,21 @@ class BoardReader {
         upgrade: r.isUpgrade,
       );
       if (!r.reading.isReliable) continue;
-      r.tokens.forEach((stationId, detection) {
-        final current = session.tokens[stationId];
-        final open = current == null || session.tokenDoubts.contains(stationId);
+      r.tokens.forEach((circle, detection) {
+        final current = session.tokens[circle];
+        final open = current == null || session.tokenDoubts.contains(circle);
         if (!open || detection.confidence < _tokenConfidence) return;
         final company = detection.company;
         if (detection.present && company != null) {
-          session.tokens[stationId] = company.id;
+          session.tokens[circle] = company.id;
           if (detection.companyConfidence >= _tokenConfidence) {
-            session.tokenDoubts.remove(stationId);
+            session.tokenDoubts.remove(circle);
           } else {
-            session.tokenDoubts.add(stationId);
+            session.tokenDoubts.add(circle);
           }
         } else if (!detection.present && current != null) {
-          session.tokens.remove(stationId);
-          session.tokenDoubts.remove(stationId);
+          session.tokens.remove(circle);
+          session.tokenDoubts.remove(circle);
         }
       });
     }

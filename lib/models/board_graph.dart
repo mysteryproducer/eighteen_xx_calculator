@@ -39,9 +39,10 @@ class StationNode {
 
   RevenueSource revenueSource = RevenueSource.tile;
 
-  /// Which company's token occupies this station, if known. Set by the
-  /// token-colour classifier or by the user tapping the station.
-  String? companyId;
+  /// Whose token is in each of the city's circles, in order: a company id,
+  /// or null for an open circle. Set from the session (see
+  /// `GameSession.tokens`).
+  List<String?> tokens;
 
   StationNode({
     required this.hex,
@@ -49,10 +50,24 @@ class StationNode {
     required this.kind,
     required this.revenue,
     this.slots = 1,
-    this.companyId,
-  });
+    List<String?>? tokens,
+  }) : tokens = tokens ?? List<String?>.filled(slots < 1 ? 1 : slots, null);
 
   String get id => '${hex.row}_${hex.col}_$stationIndex';
+
+  /// The first company with a token here, if any.
+  String? get companyId => tokens.whereType<String>().firstOrNull;
+
+  /// Whether [company] has a token here.
+  bool holds(String company) => tokens.contains(company);
+
+  /// Whether [company]'s trains are stopped here: a city whose every circle
+  /// holds another company's token can begin or end a route, but not be run
+  /// through.
+  bool blocks(String company) =>
+      kind == StationKind.city &&
+      tokens.isNotEmpty &&
+      tokens.every((t) => t != null && t != company);
 
   @override
   String toString() => 'Station($id ${kind.name} $revenue)';

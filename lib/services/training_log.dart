@@ -37,7 +37,8 @@ class LabelledHex {
     required this.picture,
   });
 
-  bool get wasRight => readAsTileId == tileId && readAsRotation == rotation;
+  bool get wasRight =>
+      readAsTileId == tileId && (tileId == null || readAsRotation == rotation);
 
   Map<String, Object?> toJson() => {
         'title': titleId,

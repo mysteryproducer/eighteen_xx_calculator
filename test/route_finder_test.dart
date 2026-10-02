@@ -1,5 +1,6 @@
 import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/board_graph.dart';
+import 'package:eighteen_xx_calculator/models/tile_definition.dart';
 import 'package:eighteen_xx_calculator/models/tile_seed_data.dart';
 import 'package:eighteen_xx_calculator/processing/route_finder.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,6 +25,57 @@ BoardGraph lineOfThreeCities() => BoardGraph.build(
     );
 
 void main() {
+  group('cities full of tokens', () {
+    // The line of three cities, each with one circle: A's token at the west
+    // end, and the middle city full with B's.
+    BoardGraph blockedLine() {
+      final graph = lineOfThreeCities();
+      graph.stationById('0_0_0')!.tokens = ['A'];
+      graph.stationById('0_2_0')!.tokens = ['B'];
+      return graph;
+    }
+
+    test("a company can't run through a city full of others' tokens", () {
+      final graph = blockedLine();
+      final route = RouteFinder.bestRouteThrough(
+          graph, graph.stationById('0_0_0')!, 3,
+          company: 'A');
+      // As far as the full city, and no further.
+      expect(route.stops.map((s) => s.id), ['0_0_0', '0_2_0']);
+      expect(route.revenue, 40);
+    });
+
+    test('but can through one with its own token or an open circle', () {
+      final graph = blockedLine();
+      graph.stationById('0_2_0')!.tokens = ['A'];
+      expect(
+          RouteFinder.bestRouteThrough(graph, graph.stationById('0_0_0')!, 3,
+                  company: 'A')
+              .revenue,
+          60);
+      graph.stationById('0_2_0')!.tokens = [null];
+      expect(
+          RouteFinder.bestRouteThrough(graph, graph.stationById('0_0_0')!, 3,
+                  company: 'A')
+              .revenue,
+          60);
+    });
+
+    test('a city keeps an open circle until every circle is taken', () {
+      final city = StationNode(
+          hex: const HexCoord(0, 0),
+          stationIndex: 0,
+          kind: StationKind.city,
+          revenue: 30,
+          slots: 2);
+      city.tokens = ['B', null];
+      expect(city.blocks('A'), isFalse);
+      city.tokens = ['B', 'C'];
+      expect(city.blocks('A'), isTrue);
+      expect(city.blocks('B'), isFalse);
+    });
+  });
+
   group('bestRouteThrough', () {
     test('a one-stop train earns only its own station', () {
       final graph = lineOfThreeCities();

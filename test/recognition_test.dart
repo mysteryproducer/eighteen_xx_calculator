@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:eighteen_xx_calculator/geometry/homography.dart';
 import 'package:eighteen_xx_calculator/models/map_layout.dart';
 import 'package:eighteen_xx_calculator/models/board_graph.dart';
@@ -321,50 +323,73 @@ void main() {
           greaterThan(0.5));
     });
 
+    group('lining the grid up with what the game knows', () {
+      const radius = 40.0;
+      final truth = boardToDrawn(title.map, radius);
+      // A few tiles, spread over the middle of the board, as a game would
+      // have them.
+      final laid = {
+        for (final (id, tile, turn) in const [
+          ('C12', '6', 2), ('F13', '58', 4), ('G12', '27', 2),
+          ('F15', '9', 1), ('E18', '57', 0), ('I8', '9', 1),
+        ])
+          title.map.byId(id)!.coord: PlacedTile(tile, rotation: turn),
+      };
+      GameSession knowing() {
+        final session = GameSession.start(
+            title: title, name: 'test', startedEmpty: false);
+        laid.forEach((c, tile) => session.setManually(title.map.at(c)!, tile));
+        return session;
+      }
+
+      double worstOff(Homography fit) => [
+            for (final c in laid.keys)
+              (fit.apply(c.boardCenter) - truth.apply(c.boardCenter)).distance /
+                  radius,
+          ].reduce(math.max);
+
+      test('a grid a fraction of a hex off is put right', () async {
+        final board =
+            await drawBoard(title.map, hexRadius: radius, laid: laid);
+        final off = Homography.similarity(translation: const Offset(0.3, -0.35))
+            .then(truth);
+        expect(worstOff(off), greaterThan(0.4));
+        final aligned = await BoardReader(title).alignToKnown(
+          photo: board,
+          boardToImage: off,
+          hexes: title.map.coords,
+          session: knowing(),
+        );
+        expect(worstOff(aligned), lessThan(0.1));
+      });
+
+      test('a grid already right is left there', () async {
+        final board =
+            await drawBoard(title.map, hexRadius: radius, laid: laid);
+        final aligned = await BoardReader(title).alignToKnown(
+          photo: board,
+          boardToImage: truth,
+          hexes: title.map.coords,
+          session: knowing(),
+        );
+        expect(worstOff(aligned), lessThan(0.05));
+      });
+    });
+
     group('mountain railways', () {
       const radius = 60.0;
       final toImage = boardToDrawn(title.map, radius);
       final pilatus = title.map.byId('G14')!;
 
       /// The board with a plate on Pilatus, as a camera under a lamp sees
-      /// it: exposed darker than the drawing, and with a veil of glare of
-      /// [glare] over Pilatus, fading out over a few hexes.
+      /// it, with a veil of glare of [glare] over Pilatus.
       Future<img.Image> photographed({double glare = 0}) async {
         final board = await drawBoard(title.map, hexRadius: radius);
-        // A plate as printed: pale card, with a box per phase in the phase's
-        // colour, left to right. 1844 prints brown's box salmon.
-        void fill(double left, double right, double half, img.Color colour) {
-          final a =
-              toImage.apply(pilatus.coord.boardCenter + Offset(left, -half));
-          final b =
-              toImage.apply(pilatus.coord.boardCenter + Offset(right, half));
-          img.fillRect(board,
-              x1: a.dx.round(), y1: a.dy.round(),
-              x2: b.dx.round(), y2: b.dy.round(),
-              color: colour);
-        }
-        fill(-0.62, 0.62, 0.22, img.ColorRgb8(240, 236, 226));
-        final boxes = [
-          img.ColorRgb8(240, 215, 60),
-          img.ColorRgb8(80, 165, 95),
-          img.ColorRgb8(235, 160, 150),
-          img.ColorRgb8(170, 170, 170),
-        ];
-        for (int i = 0; i < boxes.length; i++) {
-          final left = -0.56 + i * 0.29;
-          fill(left, left + 0.25, 0.14, boxes[i]);
-        }
-        final centre = toImage.apply(pilatus.coord.boardCenter);
-        for (final p in board) {
-          final d = (Offset(p.x.toDouble(), p.y.toDouble()) - centre).distance /
-              (radius * 2.5);
-          final veil = glare * (1 - d * d).clamp(0.0, 1.0);
-          num lit(num c) => c * 0.75 + (255 - c * 0.75) * veil;
-          p
-            ..r = lit(p.r)
-            ..g = lit(p.g)
-            ..b = lit(p.b);
-        }
+        drawPlate(board, toImage, pilatus);
+        underLamp(board,
+            glare: glare,
+            at: toImage.apply(pilatus.coord.boardCenter),
+            reach: radius * 2.5);
         return board;
       }
 
@@ -394,17 +419,10 @@ void main() {
         // The same glare over Pilatus with no plate on it: the colours of a
         // plate could have faded out of sight, so this says little.
         final board = await drawBoard(title.map, hexRadius: radius);
-        final centre = toImage.apply(pilatus.coord.boardCenter);
-        for (final p in board) {
-          final d = (Offset(p.x.toDouble(), p.y.toDouble()) - centre).distance /
-              (radius * 2.5);
-          final veil = 0.9 * (1 - d * d).clamp(0.0, 1.0);
-          num lit(num c) => c * 0.75 + (255 - c * 0.75) * veil;
-          p
-            ..r = lit(p.r)
-            ..g = lit(p.g)
-            ..b = lit(p.b);
-        }
+        underLamp(board,
+            glare: 0.9,
+            at: toImage.apply(pilatus.coord.boardCenter),
+            reach: radius * 2.5);
         final reading = read(board).firstWhere((r) => r.hex == pilatus);
         expect(reading.present, isFalse);
         expect(reading.confidence, lessThan(0.5));

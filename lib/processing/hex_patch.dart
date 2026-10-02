@@ -125,13 +125,15 @@ class HexPatch {
     return math.max(a, math.max(b, c));
   }
 
-  /// Cuts [hex] out of [photo] using [boardToImage].
+  /// Cuts [hex] out of [photo] using [boardToImage], [shift] (in board
+  /// units) from where it places the hex.
   factory HexPatch.fromPhoto(
     RgbImage photo,
     Homography boardToImage,
-    HexCoord hex,
-  ) {
-    final centre = hex.boardCenter;
+    HexCoord hex, {
+    Offset shift = Offset.zero,
+  }) {
+    final centre = hex.boardCenter + shift;
     final rgb = List<double>.filled(3, 0);
     return HexPatch._fromSampler((x, y, out) {
       final p = boardToImage.apply(centre + _boardOffset(x, y));
@@ -289,6 +291,124 @@ class HexPatch {
       total += d * d;
     }
     return total / mask.length;
+  }
+
+  // --- Lining up ----------------------------------------------------------
+  //
+  // Lining a drawing up with a photo compares a hex at many small shifts, so
+  // it uses a plainer, coarser picture of it: darkness against the hex's
+  // background, at half the samples each way, only where [mask] looks.
+
+  /// Width and height of the coarse picture, in samples.
+  static const int coarseSize = size ~/ 2;
+
+  /// Coarse sample indices inside the hex, as [mask].
+  static final List<int> coarseMask = () {
+    final result = <int>[];
+    for (int y = 0; y < coarseSize; y++) {
+      for (int x = 0; x < coarseSize; x++) {
+        if (_hexNorm(_coarseOffset(x, y)) < 0.8) result.add(y * coarseSize + x);
+      }
+    }
+    return result;
+  }();
+
+  static Offset _coarseOffset(int x, int y) => Offset(
+        (x + 0.5 - coarseSize / 2) / (radiusShare * coarseSize),
+        (y + 0.5 - coarseSize / 2) / (radiusShare * coarseSize),
+      );
+
+  /// [hex]'s printing in [photo] as a coarse picture, [shift] (in board
+  /// units) from where [boardToImage] places it. A value per [coarseMask]
+  /// sample.
+  static Float32List coarseFromPhoto(
+    RgbImage photo,
+    Homography boardToImage,
+    HexCoord hex, {
+    Offset shift = Offset.zero,
+  }) {
+    final centre = hex.boardCenter + shift;
+    final lum = Float32List(coarseSize * coarseSize);
+    final histogram = List<int>.filled(64, 0);
+    final rgb = List<double>.filled(3, 0);
+    for (final i in coarseMask) {
+      final p = boardToImage
+          .apply(centre + _coarseOffset(i % coarseSize, i ~/ coarseSize));
+      photo.sample(p.dx, p.dy, rgb);
+      final l = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+      lum[i] = l;
+      histogram[(l / 4).floor().clamp(0, 63)]++;
+    }
+    // The background as the classifier takes it: a high-ish percentile, so
+    // white city circles don't count as background either.
+    final wanted = (coarseMask.length * 0.7).floor();
+    var bin = 0, seen = 0;
+    while (bin < 63 && seen + histogram[bin] <= wanted) {
+      seen += histogram[bin];
+      bin++;
+    }
+    final background = math.max(1.0, bin * 4.0 + 2);
+    final dark = Float32List(coarseSize * coarseSize);
+    for (final i in coarseMask) {
+      dark[i] = math.max(0.0, (background - lum[i]) / background);
+    }
+    // Blurred a little, as [smoothed] is.
+    final out = Float32List(coarseMask.length);
+    for (int k = 0; k < coarseMask.length; k++) {
+      final i = coarseMask[k];
+      final x = i % coarseSize, y = i ~/ coarseSize;
+      double total = 0;
+      int count = 0;
+      for (int oy = -1; oy <= 1; oy++) {
+        for (int ox = -1; ox <= 1; ox++) {
+          final sx = x + ox, sy = y + oy;
+          if (sx < 0 || sy < 0 || sx >= coarseSize || sy >= coarseSize) continue;
+          total += dark[sy * coarseSize + sx];
+          count++;
+        }
+      }
+      out[k] = total / count;
+    }
+    return out;
+  }
+
+  /// This patch's [smoothed] darkness as a coarse picture (see
+  /// [coarseFromPhoto]).
+  late final Float32List coarse = () {
+    final out = Float32List(coarseMask.length);
+    for (int k = 0; k < coarseMask.length; k++) {
+      final i = coarseMask[k];
+      final x = (i % coarseSize) * 2, y = (i ~/ coarseSize) * 2;
+      out[k] = (smoothed[y * size + x] +
+              smoothed[y * size + x + 1] +
+              smoothed[(y + 1) * size + x] +
+              smoothed[(y + 1) * size + x + 1]) /
+          4;
+    }
+    return out;
+  }();
+
+  /// How alike two coarse pictures of a hex's printing are, -1..1: the
+  /// correlation of their darkness. Unlike [distanceTo], a blank hex is not
+  /// a near miss for track a little out of place -- both score nothing --
+  /// which is what lining a drawing up with a photo needs.
+  static double alike(Float32List a, Float32List b) {
+    final n = a.length;
+    double ma = 0, mb = 0;
+    for (int i = 0; i < n; i++) {
+      ma += a[i];
+      mb += b[i];
+    }
+    ma /= n;
+    mb /= n;
+    double ab = 0, aa = 0, bb = 0;
+    for (int i = 0; i < n; i++) {
+      final x = a[i] - ma, y = b[i] - mb;
+      ab += x * y;
+      aa += x * x;
+      bb += y * y;
+    }
+    return aa <= 0 || bb <= 0 ? 0 : ab / math.sqrt(aa * bb);
   }
 
   /// A compact form for saving: darkness quantized to bytes, base64.

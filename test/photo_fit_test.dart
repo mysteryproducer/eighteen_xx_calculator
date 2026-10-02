@@ -5,6 +5,7 @@
 //     BOARD_PHOTO_OUT=/tmp/fit.png flutter test test/photo_fit_test.dart
 //
 // Skipped when BOARD_PHOTO isn't set.
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -12,7 +13,11 @@ import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/game_session.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/processing/board_reader.dart';
+import 'package:eighteen_xx_calculator/processing/gray_image.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
+import 'package:eighteen_xx_calculator/processing/plate_reader.dart';
+import 'package:eighteen_xx_calculator/processing/tile_renderer.dart';
+import 'package:eighteen_xx_calculator/models/tile_definition.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 
@@ -32,23 +37,62 @@ void main() {
       photo = img.copyCrop(photo,
           x: dx, y: dy, width: photo.width - 2 * dx, height: photo.height - 2 * dy);
     }
+    // BOARD_SESSION=<session.json> reads against a saved game, as the app
+    // does, and lets the fit expect its tiles' colours; BOARD_FACING=<degrees>
+    // says which way the board faced in the game's last photo.
+    final saved = Platform.environment['BOARD_SESSION'];
+    final session = saved == null
+        // Read every visible hex as if this were the start of a new game.
+        ? GameSession.start(
+            title: title,
+            name: 'photo test',
+            startedEmpty: Platform.environment['BOARD_EMPTY'] != '0')
+        : GameSession.fromJson(
+            jsonDecode(File(saved).readAsStringSync()) as Map<String, Object?>);
+    final facing = double.tryParse(Platform.environment['BOARD_FACING'] ?? '');
     final watch = Stopwatch()..start();
     // ignore: avoid_print
-    final fit = GridDetector(title.map, log: print).fitBoard(photo);
+    final found = GridDetector(title.map, log: print).fitBoard(photo,
+        hints: BoardHints(
+          colours: saved == null
+              ? const {}
+              : {
+                  for (final e in session.content(title).entries)
+                    e.key: e.value.color,
+                },
+          tiled: {
+            for (final hex in title.map.hexes)
+              if (session.tileAt(hex) != null) hex.coord,
+          },
+          facing: facing == null ? null : facing * math.pi / 180,
+        ));
     // ignore: avoid_print
     print('fit in ${watch.elapsedMilliseconds} ms: '
-        '${fit == null ? 'nothing found' : 'coverage ${fit.coverage.toStringAsFixed(2)}, '
-            'margin ${fit.placementMargin?.toStringAsFixed(2)}, '
-            '${fit.visible.length} hexes visible'}');
-    expect(fit, isNotNull);
-    fit!;
+        '${found == null ? 'nothing found' : 'coverage ${found.coverage.toStringAsFixed(2)}, '
+            'margin ${found.placementMargin?.toStringAsFixed(2)}, '
+            '${found.visible.length} hexes visible, facing '
+            '${(GridFit.facingOf(found.boardToImage, title.map.boardBounds.center) * 180 / math.pi).round()} degrees'}');
+    expect(found, isNotNull);
+    var fit = found!;
 
-    // Read every visible hex as if this were the start of a new game.
-    final session = GameSession.start(
-        title: title,
-        name: 'photo test',
-        startedEmpty: Platform.environment['BOARD_EMPTY'] != '0');
     final reader = BoardReader(title);
+    // As the app does: lined up with what the game knows is there.
+    final alignWatch = Stopwatch()..start();
+    final aligned = await reader.alignToKnown(
+        photo: photo,
+        boardToImage: fit.boardToImage,
+        hexes: fit.visible,
+        session: session,
+        // ignore: avoid_print
+        log: print);
+    // ignore: avoid_print
+    print('aligned in ${alignWatch.elapsedMilliseconds} ms');
+    fit = GridFit(
+        boardToImage: aligned,
+        visible: fit.visible,
+        coverage: fit.coverage,
+        hexCoverage: fit.hexCoverage,
+        placementMargin: fit.placementMargin);
     final readWatch = Stopwatch()..start();
     final readings = await reader.read(
       photo: photo,
@@ -76,6 +120,78 @@ void main() {
     ];
     // ignore: avoid_print
     print('tokens seen: ${tokens.isEmpty ? 'none' : tokens.join(', ')}');
+    // BOARD_DUMP=<hex ids> writes each of those hexes as read, enlarged,
+    // with where its token slots were looked at marked.
+    final dump = Platform.environment['BOARD_DUMP'];
+    if (dump != null) {
+      final rgb = RgbImage.fromImage(photo);
+      for (final id in dump.split(',')) {
+        final hex = title.map.byId(id)!;
+        final reading = readings.where((r) => r.hex == hex).firstOrNull;
+        final content = reading == null
+            ? null
+            : BoardReader(title).rules.contentOf(hex, reading.reading.option);
+        const px = 240;
+        final out = img.Image(width: px, height: px);
+        final sample = List<double>.filled(3, 0);
+        Offset toBoard(double x, double y) =>
+            hex.coord.boardCenter + Offset(x / px * 2.4 - 1.2, y / px * 2.4 - 1.2);
+        for (int y = 0; y < px; y++) {
+          for (int x = 0; x < px; x++) {
+            final p = fit.boardToImage.apply(toBoard(x.toDouble(), y.toDouble()));
+            if (!rgb.contains(p.dx, p.dy)) continue;
+            rgb.sample(p.dx, p.dy, sample);
+            out.setPixelRgb(x, y, sample[0].round(), sample[1].round(), sample[2].round());
+          }
+        }
+        if (content != null) {
+          for (final station in content.stations) {
+            if (station.kind != StationKind.city) continue;
+            for (final slot in TileRenderer.slotPositions(
+                content, station.index, hex.coord.boardCenter, 1)) {
+              final at = (slot - hex.coord.boardCenter + const Offset(1.2, 1.2)) / 2.4 * px.toDouble();
+              img.drawCircle(out,
+                  x: at.dx.round(), y: at.dy.round(),
+                  radius: (TileRenderer.slotRadiusFor(station) / 2.4 * px).round(),
+                  color: img.ColorRgb8(255, 0, 255));
+            }
+          }
+        }
+        final path = (Platform.environment['BOARD_PHOTO_OUT'] ?? '/tmp/fit.png')
+            .replaceFirst('.png', '_hex_$id.png');
+        File(path).writeAsBytesSync(img.encodePng(out));
+        // ignore: avoid_print
+        print('hex $id read as ${reading?.reading.option}: $path');
+      }
+    }
+    if (saved != null) {
+      // Against the saved game's tokens, as the user left them: each city
+      // read, what was seen there and what is really there.
+      final read = <String>{};
+      for (final r in readings) {
+        r.tokens.forEach((station, t) {
+          read.add(station);
+          final truth = session.tokens[station];
+          final seen = t.present ? t.company?.id : null;
+          final verdict = seen == truth
+              ? 'ok   '
+              : truth == null
+                  ? 'EXTRA'
+                  : seen == null
+                      ? 'MISSED'
+                      : 'WRONG';
+          // ignore: avoid_print
+          print('token $verdict ${r.hex.id} $station: seen ${seen ?? '-'} '
+              '(${(t.confidence * 100).round()}%, whose '
+              '${(t.companyConfidence * 100).round()}%) colour ${t.color.toARGB32().toRadixString(16)}, '
+              'really ${truth ?? '-'}${r.reading.isReliable ? '' : ', tile doubtful'}');
+        });
+      }
+      for (final station in session.tokens.keys) {
+        // ignore: avoid_print
+        if (!read.contains(station)) print('token UNREAD $station: really ${session.tokens[station]}');
+      }
+    }
     final tunnels = reader.readTunnels(
         photo: photo, boardToImage: fit.boardToImage, hexes: fit.visible);
     // ignore: avoid_print
@@ -84,6 +200,21 @@ void main() {
         photo: photo, boardToImage: fit.boardToImage, hexes: fit.visible);
     // ignore: avoid_print
     print('mountains: ${mountains.isEmpty ? 'none' : mountains.join(', ')}');
+    final stripsOut =
+        Platform.environment['BOARD_PHOTO_OUT'] ?? '/tmp/fit.png';
+    final rgb = RgbImage.fromImage(photo);
+    for (final m in mountains) {
+      // The strips plates' figures are read from, to check by eye or run
+      // through a text recognizer.
+      final strip = PlateReader(title).strip(rgb, fit.boardToImage, m);
+      if (strip == null) continue;
+      final path = stripsOut.replaceFirst('.png', '_plate_${m.hex.id}.png');
+      File(path).writeAsBytesSync(img.encodePng(strip));
+      File(path.replaceFirst('.png', '_ink.png'))
+          .writeAsBytesSync(img.encodePng(PlateReader.inked(strip)));
+      // ignore: avoid_print
+      print('  plate strip: $path (and _ink)');
+    }
 
     final out = img.Image.from(photo);
     for (final hex in fit.visible) {

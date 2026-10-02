@@ -1,7 +1,9 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:eighteen_xx_calculator/models/game_title.dart';
+import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
 import 'package:eighteen_xx_calculator/screens/capture.dart';
 import 'package:eighteen_xx_calculator/services/app_settings.dart';
 import 'package:flutter/material.dart';
@@ -47,6 +49,20 @@ void main() {
   tearDown(() async {
     AppSettings.shared = original;
     await dir.delete(recursive: true);
+  });
+
+  test('a guide turned the way the board faces keeps its target in the '
+      'middle', () {
+    final target = title.map.byId('F13')!.coord;
+    final guide = CaptureGuide(
+        target: target, hexes: const [], instruction: '', turn: math.pi / 2);
+    const size = Size(800, 600);
+    final h = guide.homographyFor(size);
+    final middle = h.apply(target.boardCenter);
+    expect(middle.dx, closeTo(400, 1e-6));
+    expect(middle.dy, closeTo(300, 1e-6));
+    // The map's rows run down the frame, as from the board's east edge.
+    expect(GridFit.facingOf(h, target.boardCenter), closeTo(math.pi / 2, 1e-9));
   });
 
   test('the overlay starts at half strength and remembers a change', () async {

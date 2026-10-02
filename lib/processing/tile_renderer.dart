@@ -32,31 +32,214 @@ class TileRenderer {
 
   /// Where a stop sits inside the hex.
   ///
-  /// Proportions follow tobymao/18xx's own tile rendering (MIT licensed),
-  /// measured against a hex of circumradius 100: a stop with a `loc:` sits 50
-  /// out towards that side (or towards the corner, for a half number), and a
-  /// city slot is a circle of radius 25. Getting this right matters most on
-  /// the complex tiles -- the two- and three-city tiles where guessing puts
-  /// the cities in the wrong places entirely.
+  /// A stop with a `loc:` sits half a radius out towards that side (or
+  /// towards the corner, for a half number), as tobymao/18xx (MIT licensed)
+  /// draws it. A stop on its own sits in the middle -- unless it is a town
+  /// on a run of track from one side to another, which sits halfway along
+  /// the run with its bar across it. Where there are several stops, as on
+  /// the OO tiles, each leans towards one of its sides (see [_leanings]) and
+  /// sits on its own run of track, a little way out that way; the run is
+  /// drawn as any other run is. That is how the tiles are printed: 1844's
+  /// tile 67 has one city on its straight and the other on its gentle curve,
+  /// each about 0.4 of a radius from the middle.
   static Offset stationPosition(
     TileDefinition def,
     int stationIndex,
     Offset center,
     double radius,
-  ) {
-    final station = def.stations.firstWhere((s) => s.index == stationIndex,
-        orElse: () => def.stations.first);
-    final loc = station.loc;
-    if (loc != null) return center + _locDirection(loc) * (radius * _locDistance);
-    // No `loc:`: the middle, but two stops can't both be in the middle.
-    final centred = def.stations.where((s) => s.loc == null).toList();
-    if (centred.length < 2) return center;
-    final place = centred.indexWhere((s) => s.index == stationIndex);
-    final spread = radius * 0.42;
-    return center +
-        Offset(math.cos(_centredAngle), math.sin(_centredAngle)) *
-            (spread * (place * 2 / (centred.length - 1) - 1));
+  ) =>
+      center + (_layoutOf(def).at[stationIndex] ?? Offset.zero) * radius;
+
+  static final Expando<_StopLayout> _layouts = Expando();
+
+  static _StopLayout _layoutOf(TileDefinition def) =>
+      _layouts[def] ??= _computeLayout(def);
+
+  static _StopLayout _computeLayout(TileDefinition def) {
+    if (def.stations.isEmpty) return const _StopLayout({}, {});
+    final exits = <int, List<int>>{};
+    for (final seg in def.segments) {
+      for (final (x, y) in [(seg.a, seg.b), (seg.b, seg.a)]) {
+        if (x case StationEndpoint(:final stationIndex)) {
+          if (y case EdgeEndpoint(:final edge)) {
+            (exits[stationIndex] ??= []).add(edge);
+          }
+        }
+      }
+    }
+    final at = <int, Offset>{};
+    final riding = <int, (int, int, Offset)>{};
+    void ride(TileStation stop, int a, int b, double t) {
+      final (point, along) = _alongRun(a, b, t);
+      at[stop.index] = point;
+      riding[stop.index] = (a, b, along);
+    }
+
+    for (final stop in def.stations) {
+      if (stop.loc case final loc?) {
+        at[stop.index] = _locDirection(loc) * _locDistance;
+      }
+    }
+    final free = [
+      for (final stop in def.stations)
+        if (stop.loc == null) stop,
+    ];
+    if (def.stations.length == 1 && free.length == 1) {
+      final stop = free.single;
+      final sides = exits[stop.index] ?? const <int>[];
+      if (stop.kind == StationKind.town && sides.length == 2) {
+        ride(stop, sides[0], sides[1], 0.5);
+      } else {
+        at[stop.index] = Offset.zero;
+      }
+      return _StopLayout(at, riding);
+    }
+
+    final leans = _leanings(def, exits);
+    for (final stop in free) {
+      final lean = leans[stop.index];
+      if (lean == null) continue;
+      final sides = exits[stop.index]!;
+      if (sides.length != 2) {
+        at[stop.index] = HexGeometry.edgeNormal(lean) * _offCentre;
+        continue;
+      }
+      // Out along the run until clear of the other stops: cities on a tile
+      // don't overlap.
+      for (double out = _offCentre; ; out += 0.02) {
+        ride(stop, sides[0], sides[1], _towards(sides[0], sides[1], lean, out));
+        final clear = def.stations.every((other) =>
+            other.index == stop.index ||
+            at[other.index] == null ||
+            (at[other.index]! - at[stop.index]!).distance >=
+                _apart(stop) + _apart(other));
+        if (clear || out >= 0.6) break;
+      }
+    }
+    // Stops with no track at all, printed on the map: spread round the hex
+    // as tobymao spreads them, or opposite the other stop if there are two.
+    final unplaced = [
+      for (final stop in free)
+        if (!at.containsKey(stop.index)) stop,
+    ];
+    final turn = def.stations.first.turn;
+    for (int i = 0; i < unplaced.length; i++) {
+      final stop = unplaced[i];
+      final others = [
+        for (final other in def.stations)
+          if (other.index != stop.index && leans.containsKey(other.index))
+            leans[other.index]!,
+      ];
+      final side = unplaced.length == 1 && others.length == 1
+          ? (others.single + 3) % 6
+          : (i * 6 ~/ unplaced.length + turn) % 6;
+      at[stop.index] = HexGeometry.edgeNormal(side) * _locDistance;
+    }
+    return _StopLayout(at, riding);
   }
+
+  /// The side each stop without a `loc:` leans towards, chosen as tobymao
+  /// chooses it: of the stop's own sides, the least crowded by other track
+  /// and stops, keeping clear of the bottom side where a name goes, stops
+  /// with the lowest sides choosing first. tobymao works this out on the
+  /// tile as turned; it is worked out here on the tile as printed, before it
+  /// was turned, so that it turns with the tile as the printing does --
+  /// which is the difference between tile 67 drawn as printed and its second
+  /// city drawn on the wrong side.
+  static Map<int, int> _leanings(
+      TileDefinition def, Map<int, List<int>> exits) {
+    final turn = def.stations.isEmpty ? 0 : def.stations.first.turn;
+    // In tenths, so that ties come out as ties.
+    final crowd = List<int>.filled(6, 0);
+    void crowdAt(int side) {
+      crowd[side] += 10;
+      crowd[(side + 1) % 6] += 1;
+      crowd[(side + 5) % 6] += 1;
+    }
+
+    crowd[0] += 1;
+    final stops = <(TileStation, List<int>)>[];
+    for (final stop in def.stations) {
+      final sides = [
+        for (final side in exits[stop.index] ?? const <int>[]) (side - turn) % 6,
+      ]..sort();
+      if (sides.isEmpty) continue;
+      stops.add((stop, sides));
+      sides.forEach(crowdAt);
+    }
+    stops.sort((a, b) {
+      for (int i = 0; i < math.min(a.$2.length, b.$2.length); i++) {
+        if (a.$2[i] != b.$2[i]) return a.$2[i] - b.$2[i];
+      }
+      return a.$2.length - b.$2.length;
+    });
+    final result = <int, int>{};
+    for (final (stop, sides) in stops) {
+      if (stop.loc != null) continue;
+      var best = sides.first;
+      for (final side in sides) {
+        if (crowd[side] < crowd[best]) best = side;
+      }
+      crowdAt(best);
+      result[stop.index] = (best + turn) % 6;
+    }
+    return result;
+  }
+
+  /// How far along the run from side [a] to side [b] -- 0 at [a], 1 at [b]
+  /// -- a stop leaning towards side [lean] sits: [distance] from the middle
+  /// of the hex, on that half of the run. A tight turn never comes that
+  /// close to the middle; its stop sits at the middle of the turn.
+  static double _towards(int a, int b, int lean, double distance) {
+    if (_alongRun(a, b, 0.5).$1.distance >= distance) return 0.5;
+    var best = 0.5;
+    var bestMiss = double.infinity;
+    for (int i = 0; i <= 50; i++) {
+      final t = lean == b ? 0.5 + i / 100 : 0.5 - i / 100;
+      final miss = (_alongRun(a, b, t).$1.distance - distance).abs();
+      if (miss < bestMiss) {
+        bestMiss = miss;
+        best = t;
+      }
+    }
+    return best;
+  }
+
+  /// The point a fraction [t] of the way along the run from side [a] to
+  /// side [b], in a hex of circumradius 1 centred on the origin, and the way
+  /// the track runs there.
+  static (Offset, Offset) _alongRun(int a, int b, double t) {
+    final from = HexGeometry.edgeMidpoint(Offset.zero, 1, a);
+    final to = HexGeometry.edgeMidpoint(Offset.zero, 1, b);
+    final centre = _arcCentre(Offset.zero, 1, a, b);
+    if (centre == null) {
+      final d = to - from;
+      return (from + d * t, d / d.distance);
+    }
+    final r = (from - centre).distance;
+    final start = math.atan2(from.dy - centre.dy, from.dx - centre.dx);
+    final end = math.atan2(to.dy - centre.dy, to.dx - centre.dx);
+    var sweep = end - start;
+    while (sweep <= -math.pi) {
+      sweep += 2 * math.pi;
+    }
+    while (sweep > math.pi) {
+      sweep -= 2 * math.pi;
+    }
+    final angle = start + sweep * t;
+    final out = Offset(math.cos(angle), math.sin(angle));
+    final along = Offset(-out.dy, out.dx) * (sweep < 0 ? -1.0 : 1.0);
+    return (centre + out * r, along);
+  }
+
+  /// How far from the middle a stop that shares the hex sits on its run.
+  static const double _offCentre = 0.4;
+
+  /// How much room a stop takes, from its centre, as a share of the
+  /// circumradius.
+  static double _apart(TileStation stop) => stop.kind == StationKind.city
+      ? slotRadiusFor(stop) + 0.02
+      : _townBar;
 
   /// A stop's `loc:` as a direction from the middle of the hex: towards a
   /// side's middle for a whole number, towards the corner between two sides
@@ -72,9 +255,6 @@ class TileRenderer {
 
   /// How far out a stop with a `loc:` sits, as a share of the circumradius.
   static const double _locDistance = 0.5;
-
-  /// Stops sharing the middle are spread along this line.
-  static const double _centredAngle = 0.5235987755982988; // 30 degrees
 
   /// The hex's circumradius as a share of the square a tile is drawn in.
   static const double radiusShare = 0.48;
@@ -151,8 +331,18 @@ class TileRenderer {
     // printed: a black band broken by white dashes, over whatever else is
     // on the hex.
     final tunnels = <Path>[];
+    final layout = _layoutOf(def);
+    final runs = <int, Paint>{};
     for (final seg in def.segments) {
       final paint = seg.future ? futurePaint : trackPaint;
+      // A stop sitting on a run of track: the run is drawn whole, once.
+      final rider = [seg.a, seg.b].whereType<StationEndpoint>().firstOrNull;
+      if (rider != null &&
+          layout.riding.containsKey(rider.stationIndex) &&
+          [seg.a, seg.b].any((e) => e is EdgeEndpoint)) {
+        runs[rider.stationIndex] = paint;
+        continue;
+      }
       if (seg.narrow) {
         if (seg.a case EdgeEndpoint(edge: final a)) {
           if (seg.b case EdgeEndpoint(edge: final b)) {
@@ -172,6 +362,11 @@ class TileRenderer {
         ..lineTo(positionOf(seg.b).dx, positionOf(seg.b).dy);
       canvas.drawPath(path, paint);
     }
+
+    runs.forEach((stop, paint) {
+      final (a, b, _) = layout.riding[stop]!;
+      _paintRun(canvas, center, radius, a, b, paint);
+    });
 
     for (final tunnel in tunnels) {
       canvas.drawPath(
@@ -325,9 +520,10 @@ class TileRenderer {
     }
     // Across the track: perpendicular to the way the track runs through.
     final towards = HexGeometry.edgeMidpoint(center, radius, sides.first) - pos;
-    final along = towards.distance < 0.01
-        ? const Offset(1, 0)
-        : towards / towards.distance;
+    final along = _layoutOf(def).riding[station.index]?.$3 ??
+        (towards.distance < 0.01
+            ? const Offset(1, 0)
+            : towards / towards.distance);
     final across = Offset(-along.dy, along.dx);
     final half = radius * _townBar;
     canvas.drawLine(
@@ -445,14 +641,35 @@ class TileRenderer {
 class TilePainter extends CustomPainter {
   final TileDefinition definition;
 
-  const TilePainter(this.definition);
+  /// How far the tile is turned to look as printed (see
+  /// `GameTitle.displayTurn`): a twelfth of a turn back for a flat-topped
+  /// title.
+  final double turn;
+
+  const TilePainter(this.definition, {this.turn = 0});
 
   @override
   void paint(Canvas canvas, Size size) {
-    TileRenderer.paint(canvas, definition, math.min(size.width, size.height));
+    final side = math.min(size.width, size.height);
+    canvas.save();
+    canvas.translate(side / 2, side / 2);
+    canvas.rotate(turn);
+    canvas.translate(-side / 2, -side / 2);
+    TileRenderer.paint(canvas, definition, side);
+    canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant TilePainter oldDelegate) =>
-      oldDelegate.definition != definition;
+      oldDelegate.definition != definition || oldDelegate.turn != turn;
+}
+
+/// Where a tile's stops sit, in a hex of circumradius 1 centred on the
+/// origin, and which of them sit on a run of track from side to side: by
+/// stop, the run's two sides and the way it goes where the stop is.
+class _StopLayout {
+  final Map<int, Offset> at;
+  final Map<int, (int, int, Offset)> riding;
+
+  const _StopLayout(this.at, this.riding);
 }

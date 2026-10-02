@@ -1,5 +1,8 @@
 import 'package:eighteen_xx_calculator/geometry/homography.dart';
+import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
+import 'package:eighteen_xx_calculator/screens/capture.dart';
+import 'package:flutter/material.dart' show Size;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 
@@ -62,6 +65,31 @@ void main() {
           worstError(fit, boardToDrawn(title.map, 26).then(rotate90(flat)),
               fit.visible),
           lessThan(0.25));
+    });
+
+    test('which way the board faces in a photo is read off the fit', () {
+      final fit = Homography.similarity(
+          scale: 30, radians: 0.4, translation: const Offset(500, 300));
+      expect(GridFit.facingOf(fit, title.map.boardBounds.center),
+          closeTo(0.4, 1e-9));
+    });
+
+    test('a photo from across the table is placed right, even when the last '
+        'one was taken from this side', () async {
+      final turned = img.copyRotate(flat, angle: 180);
+      final halfTurn = Homography([
+        -1, 0, flat.width - 1.0, //
+        0, -1, flat.height - 1.0, //
+        0, 0, 1,
+      ]);
+      // The last photo faced the board square on; this one is upside down.
+      final fit = GridDetector(title.map)
+          .fitBoard(turned, hints: const BoardHints(facing: 0));
+      expect(fit, isNotNull);
+      expect(worstError(fit!, flatTruth.then(halfTurn), fit.visible),
+          lessThan(0.25));
+      expect(GridFit.facingOf(fit.boardToImage, title.map.boardBounds.center).abs(),
+          closeTo(3.14159, 0.1));
     });
 
     test('uneven lighting does not move the grid', () async {
@@ -132,6 +160,63 @@ void main() {
       final fit = GridDetector(title.map).fitCloseUp(photo, guess, target);
       expect(fit, isNotNull);
       expect(worstError(fit!, truth.then(crop), fit.visible), lessThan(0.25));
+    });
+  });
+
+  group('a flat-topped board (1889)', () {
+    test('is found in a photo of it as printed', () async {
+      // The app keeps 1889's map turned a twelfth of a turn so that its
+      // hexes are pointy-topped; the board itself is printed flat-topped.
+      final g1889 = GameTitle.byId('1889')!;
+      const radius = 30.0;
+      final drawn = await drawBoard(g1889.map, hexRadius: radius);
+      final toDrawn = boardToDrawn(g1889.map, radius);
+      const size = 1100;
+      final middle = Offset(drawn.width / 2, drawn.height / 2);
+      final asPrinted = Homography.similarity(translation: -middle)
+          .then(Homography.similarity(radians: g1889.displayTurn))
+          .then(Homography.similarity(
+              translation: const Offset(size / 2, size / 2)));
+      final photo = warp(drawn, asPrinted, width: size, height: size);
+      final fit = GridDetector(g1889.map).fitBoard(photo);
+      expect(fit, isNotNull);
+      expect(worstError(fit!, toDrawn.then(asPrinted), fit.visible),
+          lessThan(0.25));
+    });
+  });
+
+  group('a close-up taken from the side of the board', () {
+    test('is placed when the guide is turned the way the board faces',
+        () async {
+      // The player sits at the board's east edge: in their photos the map's
+      // rows run up the frame. The guide, turned the way the whole board
+      // faced, frames the close-up the same way.
+      final target = title.map.byId('F11')!.coord;
+      const closeRadius = 120.0;
+      final close = await drawBoard(title.map, hexRadius: closeRadius);
+      final truth = boardToDrawn(title.map, closeRadius);
+      final centre = truth.apply(target.boardCenter);
+      const size = 900;
+      final crop = Homography.similarity(
+          translation: Offset(size / 2 - centre.dx + 15, size / 2 - centre.dy - 10));
+      final framed = warp(close, crop, width: size, height: size);
+      final photo = img.copyRotate(framed, angle: 270);
+      final photoTruth = truth.then(crop).then(Homography([
+        0, 1, 0, //
+        -1, 0, size - 1.0, //
+        0, 0, 1,
+      ]));
+      final facing = GridFit.facingOf(photoTruth, target.boardCenter);
+      final guide = CaptureGuide(
+        target: target,
+        hexes: [for (final c in title.map.around([target], 1)) title.map.at(c)!],
+        instruction: '',
+        turn: facing,
+      );
+      final guess = guide.homographyFor(const Size(size + 0.0, size + 0.0));
+      final fit = GridDetector(title.map).fitCloseUp(photo, guess, target);
+      expect(fit, isNotNull);
+      expect(worstError(fit!, photoTruth, fit.visible), lessThan(0.25));
     });
   });
 

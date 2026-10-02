@@ -65,7 +65,9 @@ class _CameraCaptureState extends State<CameraCapture> {
     setState(() => _busy = true);
     try {
       final file = await controller.takePicture();
-      if (mounted) Navigator.of(context).pop(file.path);
+      if (mounted) {
+        Navigator.of(context).pop(CapturedPhoto(file.path, guide: widget.guide));
+      }
     } catch (e) {
       if (mounted) {
         setState(() {

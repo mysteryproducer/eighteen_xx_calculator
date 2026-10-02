@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' show Offset;
 
 import '../models/tile_definition.dart';
@@ -106,6 +107,13 @@ class TileClassifier {
   }
 
   HexPatch? template(String key) => _templates[key]?.first;
+
+  /// How alike [coarse] (see [HexPatch.coarseFromPhoto]) is to the drawing
+  /// of [key] (see [prepare]): the closest of its drawings, by
+  /// [HexPatch.alike]. Null if it isn't drawn.
+  double? shapeLikeness(String key, Float32List coarse) => _templates[key]
+      ?.map((drawing) => HexPatch.alike(coarse, drawing.coarse))
+      .reduce(math.max);
 
   /// Scores each of [options] against [patch]. [keyOf] names the template
   /// for an option (as passed to [prepare]), [colourOf] gives its

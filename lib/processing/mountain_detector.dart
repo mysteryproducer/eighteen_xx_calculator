@@ -19,8 +19,14 @@ class MountainReading {
   /// plate out of sight towards 1.
   final double washout;
 
+  /// Where a plate that is present lies, in board units from the hex's
+  /// centre: the middle of its row of four boxes, and the step from one box
+  /// to the next. What it says is read from there (see `PlateReader`).
+  final Offset? plateAt;
+  final Offset? plateStep;
+
   const MountainReading(this.hex, this.present, this.confidence,
-      {this.washout = 0});
+      {this.washout = 0, this.plateAt, this.plateStep});
 
   @override
   String toString() =>
@@ -110,9 +116,13 @@ class MountainDetector {
       }
     }
     if (inRow && evidence >= 1) {
+      // Four boxes in a row; the third box's colour is the last found.
+      final step = (boxes[2].$1 - boxes[0].$1) / 2;
       return MountainReading(
           hex, true, ((evidence - 0.5) / 1.5).clamp(0.0, 1.0),
-          washout: washout);
+          washout: washout,
+          plateAt: boxes[0].$1 + step * 1.5,
+          plateStep: step);
     }
     return MountainReading(
         hex, false, ((1 - evidence) * 1.2 * (1 - washout)).clamp(0.0, 1.0),

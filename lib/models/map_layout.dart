@@ -108,6 +108,35 @@ class MapLayout {
     return HexCoord(row, (doubled - (row & 1)) ~/ 2);
   }
 
+  /// Converts a printed coordinate on a flat-topped map (`B3`: column B,
+  /// row 3) to a [HexCoord].
+  ///
+  /// The app keeps every map pointy-topped: a flat-topped map turned a
+  /// twelfth of a turn clockwise is exactly a pointy-topped one, and each
+  /// side keeps its number -- side 0, the bottom of a flat hex, becomes the
+  /// lower left of a pointy one -- so the title's tiles carry over as they
+  /// are, and only drawing turns the map back (see `GameTitle.displayTurn`).
+  /// tobymao numbers flat maps in doubled coordinates too, the row number
+  /// going up by two between neighbours in a column; stepping across side k
+  /// is the same step on both maps, which makes the pointy doubled
+  /// coordinates (3x - y) / 2 and (x + y) / 2. [rowShift] lines the row
+  /// numbering up so those are whole.
+  static HexCoord coordFromFlatId(String id, {required int rowShift}) {
+    final match = RegExp(r'^([A-Z]+)(-?\d+)$').firstMatch(id);
+    if (match == null) throw FormatException('Not a hex coordinate: $id');
+    final x = _rowIndex(match.group(1)!);
+    final y = int.parse(match.group(2)!) + rowShift;
+    final row = (x + y) ~/ 2;
+    final doubled = (3 * x - y) ~/ 2;
+    return HexCoord(row, (doubled - (row & 1)) ~/ 2);
+  }
+
+  /// The shift [coordFromFlatId] needs for a map containing [sampleId].
+  static int flatRowShiftFor(String sampleId) {
+    final match = RegExp(r'^([A-Z]+)(-?\d+)$').firstMatch(sampleId)!;
+    return (_rowIndex(match.group(1)!) + int.parse(match.group(2)!)) & 1;
+  }
+
   /// The shift [coordFromId] needs for a map containing [sampleId].
   static int rowShiftFor(String sampleId) {
     final match = RegExp(r'^([A-Z]+)(-?\d+)$').firstMatch(sampleId)!;

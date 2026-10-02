@@ -307,7 +307,8 @@ void main() {
         'checking', (tester) async {
       final session = await openSession(tester, setUp: (session) {
         final stans = title.map.byId('G18')!;
-        session.tokens['${stans.coord.row}_${stans.coord.col}_0'] = 'white';
+        session.tokens[GameSession.slotId(
+            '${stans.coord.row}_${stans.coord.col}_0', 0)] = 'white';
       });
       expect(session.tokenDoubts, hasLength(1));
       expect(find.textContaining('1 token to check'), findsOneWidget);
@@ -500,7 +501,48 @@ void main() {
       await openSession(tester, setUp: (session) {
         session.setManually(title.map.byId('F13')!, const PlacedTile('57'));
       });
-      expect(find.textContaining("1 in red doesn't fit the map"), findsOneWidget);
+      expect(find.textContaining("1 tile in red isn't allowed there"),
+          findsOneWidget);
+    });
+
+    testWidgets("a token in a circle another company's home token needs is "
+        'flagged', (tester) async {
+      await openSession(tester, setUp: (session) {
+        final altdorf = title.map.byId('G18')!;
+        session.setManually(altdorf, const PlacedTile('5', rotation: 4));
+        session.tokens[GameSession.slotId(
+            '${altdorf.coord.row}_${altdorf.coord.col}_0', 0)] = 'FNM';
+      });
+      expect(find.textContaining("1 token in red isn't allowed there"),
+          findsOneWidget);
+      await tapStation(tester, 'G18');
+      expect(find.textContaining("is GB's home"), findsOneWidget);
+    });
+
+    testWidgets('each circle of a city takes its own token', (tester) async {
+      final session = await openSession(tester, setUp: (session) {
+        session.setManually(title.map.byId('D19')!, const PlacedTile('907'));
+      });
+      await tapStation(tester, 'D19');
+      expect(find.text('Station token, circle 1 of 2'), findsOneWidget);
+      expect(find.text('Station token, circle 2 of 2'), findsOneWidget);
+      // NOB in the first circle, SCB in the second.
+      await tester.tap(find.widgetWithText(ChoiceChip, 'NOB').first);
+      await tester.pumpAndSettle();
+      // The second circle's row is further down the sheet.
+      final second = find.widgetWithText(ChoiceChip, 'SCB').last;
+      await tester.ensureVisible(second);
+      await tester.pumpAndSettle();
+      await tester.tap(second);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      final zurich = title.map.byId('D19')!;
+      final id = '${zurich.coord.row}_${zurich.coord.col}_0';
+      expect(session.tokens, {
+        GameSession.slotId(id, 0): 'NOB',
+        GameSession.slotId(id, 1): 'SCB',
+      });
     });
 
     testWidgets('a hex that never takes a tile says so', (tester) async {
@@ -525,7 +567,8 @@ void main() {
         (tester) async {
       final session = await openSession(tester, setUp: (session) {
         final basel = title.map.byId('C12')!;
-        final id = '${basel.coord.row}_${basel.coord.col}_0';
+        final id =
+            GameSession.slotId('${basel.coord.row}_${basel.coord.col}_0', 0);
         session.tokens[id] = 'SCB';
         session.tokenDoubts.add(id);
       });
@@ -537,6 +580,35 @@ void main() {
       expect(session.tokenDoubts, isEmpty);
       expect(session.tokens.values, ['SCB']);
       expect(find.textContaining('to check'), findsNothing);
+    });
+  });
+
+  group('a flat-topped title (1889)', () {
+    testWidgets('its board is drawn as printed, and a tap finds the hex',
+        (tester) async {
+      final g1889 = GameTitle.byId('1889')!;
+      final session = GameSession.start(
+          title: g1889, name: 'Shikoku', startedEmpty: true);
+      await store.save(session);
+      await tester.pumpWidget(MaterialApp(
+        home: SessionBoard(title: g1889, session: session, store: store),
+      ));
+      await tester.pumpAndSettle();
+      // Takamatsu, tapped where the board shows it, clear of its city.
+      final geometry = BoardMapGeometry(g1889.map, turn: g1889.displayTurn);
+      final takamatsu = g1889.map.byId('K4')!;
+      Offset where() => tester
+          .renderObject<RenderBox>(find.byKey(sessionBoardKey))
+          .localToGlobal(geometry
+              .toScreen(takamatsu.coord.boardCenter + const Offset(0, 0.6)));
+      final middle = const Offset(400, 300);
+      if ((where() - middle).distance > 150) {
+        await tester.drag(find.byKey(sessionBoardKey), middle - where());
+        await tester.pumpAndSettle();
+      }
+      await tester.tapAt(where());
+      await tester.pumpAndSettle();
+      expect(find.text('K4 Takamatsu'), findsOneWidget);
     });
   });
 
@@ -563,7 +635,8 @@ void main() {
         session.setManually(
             title.map.byId('C14')!, const PlacedTile('4', rotation: eastWest));
         // Basel is the Centralbahn's home.
-        session.tokens['${basel.coord.row}_${basel.coord.col}_0'] = 'SCB';
+        session.tokens[GameSession.slotId(
+            '${basel.coord.row}_${basel.coord.col}_0', 0)] = 'SCB';
       });
       await tester.tap(find.text('Any company'));
       await tester.pumpAndSettle();

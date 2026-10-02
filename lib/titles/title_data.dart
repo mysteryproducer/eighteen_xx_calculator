@@ -11,6 +11,11 @@ class TitleData {
   final List<TileData> tiles;
   final List<CompanyData> companies;
 
+  /// Whether the map is printed with flat-topped hexes (1889's is) rather
+  /// than pointy-topped ones; its coordinates are then column letter and
+  /// row number.
+  final bool flat;
+
   /// Hexes a tunnel can be driven through, and the tiles whose narrow
   /// track shows which ways a tunnel can run (1844's).
   final List<String> tunnelHexes;
@@ -29,6 +34,7 @@ class TitleData {
     required this.hexes,
     required this.tiles,
     this.companies = const [],
+    this.flat = false,
     this.tunnelHexes = const [],
     this.tunnelTiles = const [],
     this.mountainHexes = const [],

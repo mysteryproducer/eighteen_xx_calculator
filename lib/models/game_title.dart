@@ -1,5 +1,8 @@
+import 'dart:math' as math;
+
 import '../titles/title_1844.dart';
 import '../titles/title_1854.dart';
+import '../titles/title_1889.dart';
 import '../titles/title_data.dart';
 import 'board.dart';
 import 'company.dart';
@@ -50,7 +53,33 @@ class GameTitle {
     this.tunnelTiles = const [],
     this.mountainHexes = const {},
     this.mountainPlates = const [],
+    this.flat = false,
+    this.specialUpgrades = const {},
   });
+
+  /// [specialUpgrades] for the titles that have them. These are rules in
+  /// tobymao/18xx's game code (`upgrades_to?`), not its data, so they are
+  /// kept here by hand.
+  static const Map<String, Map<String, Set<String>>> _specialUpgrades = {
+    '1844': {
+      'D15': {'14', '15', '619'},
+    },
+  };
+
+  /// Hexes whose printing is replaced by a rule of the title's own rather
+  /// than the usual one (same number of cities and towns), by hex id: the
+  /// tiles that can go on the printing. 1844's Aarau (D15) is printed with
+  /// two small cities, which its first tile joins into one of two circles.
+  final Map<String, Set<String>> specialUpgrades;
+
+  /// Whether the board is printed with flat-topped hexes. The app keeps
+  /// every map pointy-topped (see [MapLayout.coordFromFlatId]); drawing
+  /// turns a flat one back by [displayTurn].
+  final bool flat;
+
+  /// How far the app's map is turned, in radians clockwise, to look as the
+  /// board is printed: a twelfth of a turn back for a flat-topped board.
+  double get displayTurn => flat ? -math.pi / 6 : 0;
 
   /// The company with [id]. A game saved before its title had company data
   /// may name one of the plain colours instead, which still shows as that
@@ -60,7 +89,10 @@ class GameTitle {
 
   /// Builds a title from data imported from tobymao/18xx.
   factory GameTitle.fromData(TitleData data) {
-    final rowShift = MapLayout.rowShiftFor(data.hexes.first.id);
+    final sample = data.hexes.first.id;
+    final rowShift = data.flat
+        ? MapLayout.flatRowShiftFor(sample)
+        : MapLayout.rowShiftFor(sample);
     final hexes = <MapHex>[];
     for (final h in data.hexes) {
       final printed = TileDefinition.parseDsl(
@@ -68,7 +100,9 @@ class GameTitle {
       final future = RegExp(r'future_label=label:([^,;]+)').firstMatch(h.code);
       hexes.add(MapHex(
         id: h.id,
-        coord: MapLayout.coordFromId(h.id, rowShift: rowShift),
+        coord: data.flat
+            ? MapLayout.coordFromFlatId(h.id, rowShift: rowShift)
+            : MapLayout.coordFromId(h.id, rowShift: rowShift),
         printed: printed,
         name: h.name,
         futureLabel: future?.group(1),
@@ -82,6 +116,8 @@ class GameTitle {
         if (data.designer != null) 'by ${data.designer}',
       ].join(', '),
       map: MapLayout(hexes),
+      flat: data.flat,
+      specialUpgrades: _specialUpgrades[data.id] ?? const {},
       tiles: {
         for (final t in data.tiles)
           t.id: TileDefinition.parseDsl(t.id, tileColorFromName(t.color), t.code),
@@ -129,6 +165,7 @@ class GameTitle {
   static final List<GameTitle> all = [
     GameTitle.fromData(title1844),
     GameTitle.fromData(title1854),
+    GameTitle.fromData(title1889),
   ];
 
   static GameTitle? byId(String id) {

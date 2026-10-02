@@ -43,6 +43,35 @@ class GridFit {
   /// Good enough to scan from without the user checking it first.
   bool get isConvincing =>
       coverage >= 0.6 && (placementMargin == null || placementMargin! >= 0.15);
+
+  /// Which way the board faces in the photo: the direction, in radians
+  /// clockwise from the photo's x axis, that the map's rows run east at
+  /// [at] on the board. Zero for a photo taken from the map's south edge,
+  /// pi for one taken from across the table.
+  static double facingOf(Homography boardToImage, Offset at) {
+    final from = boardToImage.apply(at);
+    final to = boardToImage.apply(at + const Offset(1, 0));
+    return math.atan2(to.dy - from.dy, to.dx - from.dx);
+  }
+}
+
+/// What a game already knows about its board, to help find it in a photo.
+class BoardHints {
+  /// The colour each hex should show: a laid tile's, or as printed.
+  final Map<HexCoord, TileColor> colours;
+
+  /// Hexes holding a tile, which covers the hex's printed outline.
+  final Set<HexCoord> tiled;
+
+  /// Which way the board faced in the last photo of it (see
+  /// [GridFit.facing]); players photograph from where they sit.
+  final double? facing;
+
+  const BoardHints({
+    this.colours = const {},
+    this.tiled = const {},
+    this.facing,
+  });
 }
 
 /// Finds a title's hex grid in a photo and works out the perspective
@@ -79,7 +108,9 @@ class GridDetector {
 
   /// Finds the map in a photo of the whole board, or returns null if no hex
   /// grid could be found at all.
-  GridFit? fitBoard(img.Image photo) {
+  ///
+  /// What the game already knows ([hints]) helps tell which hex is which.
+  GridFit? fitBoard(img.Image photo, {BoardHints? hints}) {
     var work = _Working.of(photo, workingSize);
     log?.call('working ${work.lines.width}x${work.lines.height}, '
         'line threshold ${work.threshold.toStringAsFixed(3)}');
@@ -123,7 +154,8 @@ class GridDetector {
     h = _growLattice(work, h, log: log);
     log?.call('grown lattice $h');
 
-    final placement = _placeMap(work, h, log: log);
+    final placement = _placeMap(work, h,
+        expected: hints?.colours, facing: hints?.facing, log: log);
     if (placement == null) return null;
     log?.call('placement turn ${placement.rotation} shift '
         '(${placement.dx}, ${placement.dz}) score '
@@ -133,14 +165,16 @@ class GridDetector {
 
     final visible = _visibleHexes(work.lines, h, map.coords);
     h = _refine(work, h, visible, searchFractions: const [0.2, 0.12, 0.08]);
-    return _result(work, h, placementMargin: placement.margin);
+    return _result(work, h,
+        placementMargin: placement.margin, tiled: hints?.tiled);
   }
 
   /// Fits a close-up whose rough placement [guess] (board to photo pixels)
   /// came from the capture guide. [target] is the hex the user was asked to
   /// centre, and anchors which lattice cell is which: the fit is trusted as
   /// long as the photo was framed to within about half a hex.
-  GridFit? fitCloseUp(img.Image photo, Homography guess, HexCoord target) {
+  GridFit? fitCloseUp(img.Image photo, Homography guess, HexCoord target,
+      {BoardHints? hints}) {
     var work = _Working.of(photo, workingSize,
         hexSpacing: _expectedSpacing(photo, guess, target.boardCenter));
     final guessWork = guess.then(work.toWorking);
@@ -148,8 +182,13 @@ class GridDetector {
     final nearby = map.around([target], 3);
 
     Homography h;
+    // A hex grid repeats every sixth of a turn, so looking up to just short
+    // of half that either way finds it however the camera was turned from
+    // the guide.
     final lattice = _estimateLattice(work.lines,
-        log: log, expected: _latticeOf(guessWork, target.boardCenter));
+        log: log,
+        expected: _latticeOf(guessWork, target.boardCenter),
+        expectedDegrees: 28);
     log?.call('close-up lattice: ${lattice == null ? 'none' : 'east ${lattice.east} '
         'strength ${lattice.strength.toStringAsFixed(2)}'}');
     if (lattice != null) {
@@ -164,8 +203,8 @@ class GridDetector {
       h = _refine(work, guessWork, _visibleHexes(work.lines, guessWork, nearby),
           searchFractions: const [0.45, 0.3, 0.2, 0.12, 0.08]);
     }
-    h = _settleShift(work, h, target);
-    return _result(work, h, restrictTo: nearby);
+    h = _settleShift(work, h, target, hints?.colours);
+    return _result(work, h, restrictTo: nearby, tiled: hints?.tiled);
   }
 
   /// A close-up framed a whole hex off looks just like one framed right:
@@ -178,7 +217,8 @@ class GridDetector {
   /// them clearly better than where the guide put the grid. In the middle
   /// of a plain stretch of map there is nothing to tell them apart, and the
   /// guide stands.
-  Homography _settleShift(_Working work, Homography h, HexCoord target) {
+  Homography _settleShift(_Working work, Homography h, HexCoord target,
+      Map<HexCoord, TileColor>? shows) {
     final cells = <HexCoord>[];
     const reach = 4;
     for (int dz = -reach; dz <= reach; dz++) {
@@ -201,7 +241,8 @@ class GridDetector {
       for (final c in hexes) {
         final seen = colours[(c.cubeX + dx, c.cubeZ + dz)];
         if (seen == null) continue;
-        expected.add(_printedChroma(map.at(c)!.printed.color).dy);
+        expected.add(
+            _printedChroma(shows?[c] ?? map.at(c)!.printed.color).dy);
         measured.add(seen.dy);
       }
       return _correlation(expected, measured);
@@ -362,6 +403,7 @@ class GridDetector {
     GrayImage lines, {
     void Function(String)? log,
     _Lattice? expected,
+    double expectedDegrees = 20,
     double? maxSpacing,
     double? minSpacing,
   }) {
@@ -493,7 +535,7 @@ class GridDetector {
         ('east', expected.east * scale),
         ('south-east', expected.southEast * scale),
       ]) {
-        final found = peakNear(axis);
+        final found = peakNear(axis, degrees: expectedDegrees);
         if (found == null) continue;
         final partner = peakNear(turn60(found), spread: 0.2, degrees: 12);
         final consistent = partner != null && isPeak(partner - found);
@@ -768,6 +810,8 @@ class GridDetector {
   _Placement? _placeMap(
     _Working work,
     Homography latticeH, {
+    Map<HexCoord, TileColor>? expected,
+    double? facing,
     void Function(String)? log,
   }) {
     // Score every lattice cell in the photo by how much outline it shows.
@@ -833,18 +877,30 @@ class GridDetector {
 
     // The map's outline alone can fit nearly as well turned round or shifted
     // along a straight edge, so among the placements that fit the outlines
-    // about as well as the best, prefer the one whose printed colours --
-    // red off-board areas, yellow and grey pre-printed hexes -- match the
-    // photo.
+    // about as well as the best, prefer the one whose colours -- red
+    // off-board areas, yellow and grey pre-printed hexes, and the tiles the
+    // game knows are laid -- match the photo. A game well under way is
+    // mostly tiles, which look nothing like the printed map's colours.
     final colours = _cellColours(work, latticeH, cells.keys);
+    // Tiles cover the printed outlines they are laid on, so later in a game
+    // the right placement can trail on outlines alone: the shortlist is
+    // wide, and colour counts double.
     final shortlist = [
-      for (final p in scores.take(400))
-        if (p.score >= bestOutline * 0.8) p,
+      for (final p in scores.take(3000))
+        if (p.score >= bestOutline * 0.5) p,
     ];
     final ranked = <(_Placement, double)>[];
+    final middle = map.boardBounds.center;
     for (final p in shortlist) {
-      final agreement = _colourAgreement(p, colours);
-      ranked.add((p, p.score / bestOutline + agreement));
+      final agreement = _colourAgreement(p, colours, expected);
+      // And the way the board faced last time, unless the evidence is
+      // clearly against it.
+      final turned = facing == null
+          ? 0.0
+          : _angleBetween(
+              GridFit.facingOf(p.homography.then(latticeH), middle), facing);
+      final familiar = facing != null && turned < math.pi / 6 ? _facingBonus : 0.0;
+      ranked.add((p, p.score / bestOutline + 2 * agreement + familiar));
     }
     ranked.sort((a, b) => b.$2.compareTo(a.$2));
     log?.call('top placements: ${ranked.take(6).map((r) => 'k${r.$1.rotation}(${r.$1.dx},${r.$1.dz}) '
@@ -909,22 +965,29 @@ class GridDetector {
   }
 
   /// Correlation (-1..1) between the colours [placement] says the covered
-  /// cells should be printed in and the colours they are in the photo.
-  double _colourAgreement(_Placement placement, Map<(int, int), Offset> colours) {
+  /// cells should be -- [shows], or as printed -- and the colours they are in
+  /// the photo.
+  double _colourAgreement(_Placement placement, Map<(int, int), Offset> colours,
+      Map<HexCoord, TileColor>? shows) {
     final expected = <Offset>[];
     final measured = <Offset>[];
     for (final hex in map.hexes) {
       final c = hex.coord.rotatedAbout(const HexCoord(0, 0), placement.rotation);
       final seen = colours[(c.cubeX + placement.dx, c.cubeZ + placement.dz)];
       if (seen == null) continue;
-      expected.add(_printedChroma(hex.printed.color));
+      expected.add(_printedChroma(shows?[hex.coord] ?? hex.printed.color));
       measured.add(seen);
     }
+    // A placement that leaves most of the map out of the photo can agree
+    // by chance on the few hexes it covers; agreement counts for as much of
+    // the map as it is measured over.
     return (_correlation([for (final e in expected) e.dx],
-                [for (final m in measured) m.dx]) +
-            _correlation([for (final e in expected) e.dy],
-                [for (final m in measured) m.dy])) /
-        2;
+                    [for (final m in measured) m.dx]) +
+                _correlation([for (final e in expected) e.dy],
+                    [for (final m in measured) m.dy])) /
+            2 *
+            measured.length /
+            map.hexes.length;
   }
 
   /// Correlation (-1..1) between [expected] and [measured]. Zero when there
@@ -961,6 +1024,17 @@ class GridDetector {
         TileColor.blue => const Offset(-0.11, -0.16),
         TileColor.plain => const Offset(0.01, 0.03),
       };
+
+  /// How much a placement facing the way the board faced last time is
+  /// favoured, on a scale where the outline fit and the colour agreement
+  /// each count up to one.
+  static const double _facingBonus = 0.15;
+
+  /// The angle between two directions, in radians, 0..pi.
+  static double _angleBetween(double a, double b) {
+    final d = (a - b) % (2 * math.pi);
+    return d > math.pi ? 2 * math.pi - d : d;
+  }
 
   /// Otsu's threshold: the split of [values] into two groups that are each
   /// as tight as possible.
@@ -1183,6 +1257,7 @@ class GridDetector {
     Homography h, {
     double? placementMargin,
     Set<HexCoord>? restrictTo,
+    Set<HexCoord>? tiled,
   }) {
     final visible = _visibleHexes(work.lines, h, restrictTo ?? map.coords);
     final perHex = <HexCoord, double>{};
@@ -1194,10 +1269,19 @@ class GridDetector {
     // well the grid is placed. Judge the fit on the hexes that are drawn in
     // full -- the ones tiles go on -- and only fall back to all of them when
     // a photo holds none.
+    // A tile covers its hex's printed outline too, so where the game knows
+    // of tiles the fit is judged on the bare hexes, if there are enough.
     var judged = [
       for (final hex in visible)
-        if (map.at(hex)?.takesTiles ?? false) perHex[hex]!,
+        if ((map.at(hex)?.takesTiles ?? false) && !(tiled?.contains(hex) ?? false))
+          perHex[hex]!,
     ];
+    if (judged.length < 8) {
+      judged = [
+        for (final hex in visible)
+          if (map.at(hex)?.takesTiles ?? false) perHex[hex]!,
+      ];
+    }
     if (judged.isEmpty) judged = perHex.values.toList();
     double sum = 0;
     for (final s in judged) {

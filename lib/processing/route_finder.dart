@@ -27,11 +27,12 @@ class RouteResult {
 ///
 /// This is deliberately rules-light: a route is any simple path (no station
 /// visited twice, no stretch of track traversed twice) of at most [maxStops]
-/// stations, scored by summed station revenue. `maxStops` stands in for train
-/// length; the real per-train and per-company rules (token requirements, city
-/// slot availability, E/D trains, "+" trains that count towns separately,
-/// group restrictions) are a later pass, and this parameter is where they
-/// plug in.
+/// stations, scored by summed station revenue. A company's route can't run
+/// through a city whose every circle holds another company's token (see
+/// [StationNode.blocks]), though it can begin or end there. `maxStops` stands
+/// in for train length; the real per-train rules (E/D trains, "+" trains that
+/// count towns separately, group restrictions) are a later pass, and this
+/// parameter is where they plug in.
 class RouteFinder {
   /// Safety valves so a dense board can't hang the UI: the search returns the
   /// best route found so far once either limit is hit.
@@ -41,11 +42,13 @@ class RouteFinder {
   /// Best route that runs through [home], which every candidate must include.
   /// The route may extend in both directions from [home], as a real 18xx route
   /// does: it is built by finding the best pair of non-overlapping "arms"
-  /// leading away from the home station.
+  /// leading away from the home station. Given the [company] running it, the
+  /// route stops at cities full of other companies' tokens.
   static RouteResult bestRouteThrough(
     BoardGraph graph,
     StationNode home,
     int maxStops, {
+    String? company,
     int searchBudget = defaultSearchBudget,
   }) {
     if (maxStops < 1) {
@@ -81,6 +84,10 @@ class RouteFinder {
       if (stops.length >= maxStops) return;
       // An off-board area ends a route; trains don't run through it.
       if (current.kind == StationKind.offboard && stops.length > 1) return;
+      // Nor through a city full of other companies' tokens.
+      if (company != null && stops.length > 1 && current.blocks(company)) {
+        return;
+      }
 
       for (final edge in graph.edgesFrom(current)) {
         final next = edge.to;

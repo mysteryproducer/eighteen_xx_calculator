@@ -1,12 +1,15 @@
+import 'dart:math' as math;
+
 import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/models/map_layout.dart';
 import 'package:eighteen_xx_calculator/models/tile_definition.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The two titles whose maps are imported from tobymao/18xx.
+/// The titles whose maps are imported from tobymao/18xx.
 final g1844 = GameTitle.byId('1844')!;
 final g1854 = GameTitle.byId('1854')!;
+final g1889 = GameTitle.byId('1889')!;
 
 void main() {
   group('printed coordinates', () {
@@ -42,6 +45,58 @@ void main() {
       expect(wien.coord.row, pressburg.coord.row);
       expect(wien.coord.distanceTo(pressburg.coord), 2);
       expect(g1854.map.byId('B22')!.coord.distanceTo(wien.coord), 1);
+    });
+  });
+
+  group('a flat-topped map (1889)', () {
+    test("each side leads where the board's does", () {
+      // 1889 letters its columns and numbers its rows. Takamatsu (K4)
+      // prints track out of its bottom, lower-left and upper-left sides --
+      // 0, 1 and 2 -- towards K6, J5 (Ritsurin Kouen) and J3.
+      final takamatsu = g1889.map.byId('K4')!;
+      expect(takamatsu.name, 'Takamatsu');
+      expect(Board.neighborOf(takamatsu.coord, 0), g1889.map.byId('K6')!.coord);
+      expect(Board.neighborOf(takamatsu.coord, 1), g1889.map.byId('J5')!.coord);
+      expect(Board.neighborOf(takamatsu.coord, 2), g1889.map.byId('J3')!.coord);
+      // Two apart down a column, one apart diagonally.
+      expect(g1889.map.byId('K8')!.coord.distanceTo(takamatsu.coord), 2);
+      expect(g1889.map.byId('I4')!.coord.distanceTo(g1889.map.byId('J5')!.coord),
+          1);
+    });
+
+    test('every printed track leads onto the map', () {
+      for (final hex in g1889.map.hexes) {
+        for (final edge in hex.printed.edges) {
+          expect(g1889.map.contains(Board.neighborOf(hex.coord, edge)), isTrue,
+              reason: '${hex.id} side $edge');
+        }
+      }
+    });
+
+    test('drawn turned back, its columns run straight down the page', () {
+      expect(g1889.flat, isTrue);
+      expect(g1844.displayTurn, 0);
+      Offset drawn(String id) {
+        final p = g1889.map.byId(id)!.coord.boardCenter;
+        final c = math.cos(g1889.displayTurn), s = math.sin(g1889.displayTurn);
+        return Offset(c * p.dx - s * p.dy, s * p.dx + c * p.dy);
+      }
+
+      expect(drawn('K4').dx, closeTo(drawn('K8').dx, 1e-9));
+      expect(drawn('K8').dy, greaterThan(drawn('K4').dy));
+      expect(drawn('C4').dx, lessThan(drawn('K4').dx));
+    });
+
+    test('off-boards pay by phase, diesel last', () {
+      final imabari = g1889.map.byId('F1')!.printed.stations.single;
+      expect(imabari.revenueIn(TileColor.yellow), 30);
+      expect(imabari.revenueIn(TileColor.brown), 60);
+      expect(imabari.revenueIn(TileColor.grey), 100);
+    });
+
+    test('tiles listed twice for a variant are imported once', () {
+      expect(g1889.tiles.containsKey('6'), isTrue);
+      expect(g1889.tiles.keys.where((id) => id.startsWith('Beg')), isEmpty);
     });
   });
 

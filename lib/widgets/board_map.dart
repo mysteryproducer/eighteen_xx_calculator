@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/board.dart';
 import '../models/board_graph.dart';
+import '../models/company.dart';
 import '../models/game_session.dart';
 import '../models/game_title.dart';
 import '../models/map_layout.dart';
@@ -19,15 +20,39 @@ const double boardMapScale = 36;
 /// handling so they agree.
 class BoardMapGeometry {
   final MapLayout map;
+
+  /// How far the map is turned, in radians clockwise, to look as the board
+  /// is printed (see `GameTitle.displayTurn`).
+  final double turn;
+
+  /// The drawn map's extent, turned, in hex radii.
   final Rect bounds;
 
-  BoardMapGeometry(this.map) : bounds = map.boardBounds.inflate(0.3);
+  BoardMapGeometry(this.map, {this.turn = 0})
+      : bounds = _turnedBounds(map, turn).inflate(0.3);
+
+  static Rect _turnedBounds(MapLayout map, double turn) {
+    if (turn == 0) return map.boardBounds;
+    Rect? bounds;
+    for (final c in map.coords) {
+      final hex = Rect.fromCircle(center: _turned(c.boardCenter, turn), radius: 1);
+      bounds = bounds == null ? hex : bounds.expandToInclude(hex);
+    }
+    return bounds ?? Rect.zero;
+  }
+
+  static Offset _turned(Offset p, double turn) {
+    final c = math.cos(turn), s = math.sin(turn);
+    return Offset(c * p.dx - s * p.dy, s * p.dx + c * p.dy);
+  }
 
   Size get size => Size(bounds.width * boardMapScale, bounds.height * boardMapScale);
 
-  Offset toScreen(Offset board) => (board - bounds.topLeft) * boardMapScale;
+  Offset toScreen(Offset board) =>
+      (_turned(board, turn) - bounds.topLeft) * boardMapScale;
 
-  Offset toBoard(Offset screen) => screen / boardMapScale + bounds.topLeft;
+  Offset toBoard(Offset screen) =>
+      _turned(screen / boardMapScale + bounds.topLeft, -turn);
 
   Offset centreOf(HexCoord hex) => toScreen(hex.boardCenter);
 
@@ -57,6 +82,10 @@ class BoardMapPainter extends CustomPainter {
   /// Hexes the user has picked out to photograph.
   final Set<HexCoord> selected;
 
+  /// Tokens that can't legally be where they are, by circle (see
+  /// `GameSession.tokenProblems`): ringed in red.
+  final Map<String, String> tokenProblems;
+
   /// Marks anything the user should check.
   static const Color uncertain = Color(0xFFFFB300);
 
@@ -75,6 +104,7 @@ class BoardMapPainter extends CustomPainter {
     this.highlighted,
     this.misfits = const {},
     this.selected = const {},
+    this.tokenProblems = const {},
   });
 
   @override
@@ -86,7 +116,9 @@ class BoardMapPainter extends CustomPainter {
       final def = content[hex.coord] ?? hex.printed;
       final centre = geometry.centreOf(hex.coord);
       canvas.save();
-      canvas.translate(centre.dx - tileSize / 2, centre.dy - tileSize / 2);
+      canvas.translate(centre.dx, centre.dy);
+      canvas.rotate(geometry.turn);
+      canvas.translate(-tileSize / 2, -tileSize / 2);
       TileRenderer.paint(canvas, def, tileSize);
       canvas.restore();
 
@@ -174,40 +206,68 @@ class BoardMapPainter extends CustomPainter {
 
   void _paintStations(Canvas canvas, Map<HexCoord, TileDefinition> content) {
     final onRoute = {for (final s in route?.stops ?? const <StationNode>[]) s.id};
+    void ring(Offset at, double radius, Color colour) => canvas.drawCircle(
+        at,
+        radius + 2,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3
+          ..color = colour);
+
     for (final station in graph.stations) {
       final def = content[station.hex];
       if (def == null) continue;
       final centre = geometry.stationPosition(def, station);
+      final printed = def.stations.firstWhere(
+          (s) => s.index == station.stationIndex,
+          orElse: () => def.stations.first);
       final radius = boardMapScale *
           (station.kind == StationKind.city ? 0.2 : 0.16);
-      final company = title.companyById(station.companyId);
-      if (company != null) {
-        canvas.drawCircle(centre, radius * 0.85, Paint()..color = company.color);
+      final route = onRoute.contains(station.id);
+      Company? only;
+      if (station.kind == StationKind.city) {
+        // Each token in its own circle, where the tile prints the circle.
+        final circles = TileRenderer.slotPositions(
+            def, station.stationIndex, station.hex.boardCenter, 1);
+        final size = TileRenderer.slotRadiusFor(printed) * boardMapScale;
+        for (int slot = 0; slot < circles.length; slot++) {
+          final at = geometry.toScreen(circles[slot]);
+          final id = GameSession.slotId(station.id, slot);
+          final company = title.companyById(
+              slot < station.tokens.length ? station.tokens[slot] : null);
+          if (circles.length == 1) only = company;
+          if (company != null) {
+            canvas.drawCircle(at, size * 0.85, Paint()..color = company.color);
+          }
+          if (tokenProblems.containsKey(id)) {
+            ring(at, size, wrong);
+          } else if (company != null && session.tokenDoubts.contains(id)) {
+            ring(at, size, uncertain);
+          } else if (route) {
+            ring(at, size, Colors.deepOrange);
+          }
+        }
+        if (station.revenueSource == RevenueSource.unverified) {
+          ring(centre, radius * 2.2, uncertain);
+        }
+      } else if (route || station.revenueSource == RevenueSource.unverified) {
+        ring(centre, radius, route ? Colors.deepOrange : uncertain);
       }
-      // Whose token this is was guessed from a photo, or the revenue is.
-      final flagged = station.revenueSource == RevenueSource.unverified ||
-          (company != null && session.tokenDoubts.contains(station.id));
-      if (onRoute.contains(station.id) || flagged) {
-        canvas.drawCircle(
-          centre,
-          radius + 2,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 3
-            ..color = onRoute.contains(station.id) ? Colors.deepOrange : uncertain,
-        );
-      }
+
       // A city printed with no value yet (1844 prints `revenue:0`) has
       // nothing worth showing until a tile gives it one.
       if (station.revenue == 0) continue;
+      final boxed = station.kind == StationKind.offboard ||
+          (station.kind == StationKind.city && station.tokens.length > 1);
       final text = TextPainter(
         text: TextSpan(
           text: '${station.revenue}',
           style: TextStyle(
             fontSize: math.max(7, radius * 0.8),
             fontWeight: FontWeight.bold,
-            color: company != null &&
-                    ThemeData.estimateBrightnessForColor(company.color) ==
+            color: !boxed &&
+                    only != null &&
+                    ThemeData.estimateBrightnessForColor(only.color) ==
                         Brightness.dark
                 ? Colors.white
                 : Colors.black,
@@ -215,10 +275,11 @@ class BoardMapPainter extends CustomPainter {
         ),
         textDirection: TextDirection.ltr,
       )..layout();
+      // Above an off-board area; between a city's circles, on a label.
       final offset = station.kind == StationKind.offboard
           ? Offset(0, -radius * 1.4)
           : Offset.zero;
-      if (station.kind == StationKind.offboard) {
+      if (boxed) {
         final box = Rect.fromCenter(
           center: centre + offset,
           width: text.width + 6,
@@ -231,10 +292,12 @@ class BoardMapPainter extends CustomPainter {
     }
   }
 
-  static Path _outline(Offset centre, double radius) {
+  Path _outline(Offset centre, double radius) {
     final path = Path();
     for (int i = 0; i < 6; i++) {
-      final v = HexGeometry.vertex(centre, radius, i);
+      final v = centre +
+          BoardMapGeometry._turned(
+              HexGeometry.vertex(Offset.zero, radius, i), geometry.turn);
       i == 0 ? path.moveTo(v.dx, v.dy) : path.lineTo(v.dx, v.dy);
     }
     return path..close();

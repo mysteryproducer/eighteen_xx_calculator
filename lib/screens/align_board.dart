@@ -20,13 +20,18 @@ const Key alignCanvasKey = ValueKey('align-canvas');
 /// the photo" puts it back. From here every handle is on screen, which a
 /// wrong detection -- a few huge hexes spilling far past the photo -- can't
 /// promise.
-Homography placeOverPhoto(Size size, Iterable<HexCoord> hexes) {
+Homography placeOverPhoto(Size size, Iterable<HexCoord> hexes,
+    {double turn = 0}) {
+  final c = math.cos(turn), s = math.sin(turn);
+  Offset turned(Offset p) => Offset(c * p.dx - s * p.dy, s * p.dx + c * p.dy);
   var bounds = Rect.zero;
   var first = true;
-  for (final c in hexes) {
-    final hex = Rect.fromCenter(
-        center: c.boardCenter, width: math.sqrt(3), height: 2);
-    bounds = first ? hex : bounds.expandToInclude(hex);
+  for (final hex in hexes) {
+    final at = turned(hex.boardCenter);
+    final drawn = turn == 0
+        ? Rect.fromCenter(center: at, width: math.sqrt(3), height: 2)
+        : Rect.fromCircle(center: at, radius: 1);
+    bounds = first ? drawn : bounds.expandToInclude(drawn);
     first = false;
   }
   if (first) return Homography.identity;
@@ -34,6 +39,7 @@ Homography placeOverPhoto(Size size, Iterable<HexCoord> hexes) {
       math.min(size.width / bounds.width, size.height / bounds.height);
   return Homography.similarity(
     scale: scale,
+    radians: turn,
     translation: size.center(Offset.zero) - bounds.center * scale,
   );
 }
@@ -60,6 +66,9 @@ class AlignBoard extends StatefulWidget {
   /// from these. Null means the whole map.
   final Set<HexCoord>? focus;
 
+  /// What the game already knows about the board, to help find it.
+  final BoardHints? hints;
+
   final PhotoPipeline pipeline;
 
   const AlignBoard({
@@ -69,6 +78,7 @@ class AlignBoard extends StatefulWidget {
     required this.previewBytes,
     this.initial,
     this.focus,
+    this.hints,
     this.pipeline = const PhotoPipeline(),
   });
 
@@ -119,7 +129,8 @@ class _AlignBoardState extends State<AlignBoard> {
     final initial = widget.initial;
     try {
       final fit = initial == null
-          ? await widget.pipeline.fitBoard(widget.title.map, widget.photo)
+          ? await widget.pipeline
+              .fitBoard(widget.title.map, widget.photo, hints: widget.hints)
           : await widget.pipeline
               .snap(widget.title.map, widget.photo, initial);
       if (!mounted) return;
@@ -156,7 +167,8 @@ class _AlignBoardState extends State<AlignBoard> {
   /// The map laid over the photo; see [placeOverPhoto].
   Homography get _overPhoto => placeOverPhoto(
       Size(widget.photo.width.toDouble(), widget.photo.height.toDouble()),
-      _hexes);
+      _hexes,
+      turn: widget.hints?.facing ?? widget.title.displayTurn);
 
   /// Whether [h] puts the map somewhere the user can work with it: over the
   /// photo, and not so large that the handles are out of reach.

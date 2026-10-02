@@ -1,14 +1,15 @@
-import Flutter
-import UIKit
+import Cocoa
+import FlutterMacOS
 import Vision
 
-/// Reads text out of an image with Apple's Vision framework, for the revenue
-/// numbers printed beside cities and towns.
+/// Reads text out of an image with Apple's Vision framework: the revenue
+/// numbers printed beside cities and towns, and the figures on 1844's
+/// mountain railway plates.
 ///
-/// Dart sends PNG bytes under "image" on the channel below and gets back the
-/// recognized lines joined by newlines (see lib/processing/revenue_ocr.dart).
-/// Vision ships with iOS, so this needs no third-party package, and the Android
-/// side answers the same channel using ML Kit.
+/// The same channel as on iOS (`ios/Runner/TextRecognitionPlugin.swift`):
+/// Dart sends PNG bytes under "image" and gets back the recognized lines
+/// joined by newlines (see lib/processing/revenue_ocr.dart). Vision ships with
+/// macOS, so this needs no third-party package.
 final class TextRecognitionPlugin: NSObject, FlutterPlugin {
   static let channelName = "eighteen_xx_calculator/text_recognition"
 
@@ -17,7 +18,7 @@ final class TextRecognitionPlugin: NSObject, FlutterPlugin {
   static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterMethodChannel(
       name: channelName,
-      binaryMessenger: registrar.messenger()
+      binaryMessenger: registrar.messenger
     )
     registrar.addMethodCallDelegate(TextRecognitionPlugin(), channel: channel)
   }
@@ -34,7 +35,8 @@ final class TextRecognitionPlugin: NSObject, FlutterPlugin {
     guard
       let arguments = call.arguments as? [String: Any],
       let bytes = arguments["image"] as? FlutterStandardTypedData,
-      let image = UIImage(data: bytes.data)?.cgImage
+      let source = CGImageSourceCreateWithData(bytes.data as CFData, nil),
+      let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
     else {
       result(FlutterError(
         code: "bad_image",

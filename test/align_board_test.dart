@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:eighteen_xx_calculator/geometry/homography.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
+import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
 import 'package:eighteen_xx_calculator/screens/align_board.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -27,6 +28,7 @@ Future<List<Homography?>> showAlign(
   WidgetTester tester,
   FakePhotoPipeline pipeline, {
   Homography? initial,
+  BoardHints? hints,
 }) async {
   final image = photo();
   final returned = <Homography?>[];
@@ -45,6 +47,7 @@ Future<List<Homography?>> showAlign(
                 focus: initial == null
                     ? null
                     : title.map.around([title.map.byId('F11')!.coord], 2),
+                hints: hints,
                 pipeline: pipeline,
               ),
             ),
@@ -67,6 +70,14 @@ void main() {
     expect(find.textContaining('Found the board'), findsOneWidget);
     expect(find.textContaining('131 hexes in frame'), findsOneWidget);
     expect(find.text('Read board'), findsOneWidget);
+  });
+
+  testWidgets('what the game knows is handed to the search for the board',
+      (tester) async {
+    final pipeline = FakePhotoPipeline(fit: FakePhotoPipeline.fitFor(title.map));
+    const hints = BoardHints(facing: 1.5);
+    await showAlign(tester, pipeline, hints: hints);
+    expect(pipeline.lastHints, same(hints));
   });
 
   testWidgets('when no grid is found the user is asked to place it',

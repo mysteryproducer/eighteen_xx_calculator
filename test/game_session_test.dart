@@ -26,9 +26,11 @@ GameSession newGame({bool startedEmpty = true}) => GameSession.start(
       startedEmpty: startedEmpty,
     );
 
-/// Bern, BLS's home city, and the id of its station.
+/// Bern, BLS's home city, and the id its token is kept under: its city's
+/// first circle.
 final bern = title.map.byId('F11')!;
-final bernStation = '${bern.coord.row}_${bern.coord.col}_0';
+final bernStation =
+    GameSession.slotId('${bern.coord.row}_${bern.coord.col}_0', 0);
 
 /// A reading of [hex] as unchanged, [sure] of that, whose one city showed
 /// [token].
@@ -43,7 +45,9 @@ HexReading readingWith(MapHex hex, TokenDetection token, {double sure = 0.9}) =>
       patch: HexPatch(Float32List(HexPatch.size * HexPatch.size), Offset.zero,
           Float32List(6)),
       picture: Uint8List(0),
-      tokens: {'${hex.coord.row}_${hex.coord.col}_0': token},
+      tokens: {
+        GameSession.slotId('${hex.coord.row}_${hex.coord.col}_0', 0): token,
+      },
     );
 
 TokenDetection tokenOf(String companyId, {double whose = 0.9}) => TokenDetection(
@@ -232,13 +236,58 @@ void main() {
           contains(andermatt.printed.edges.first));
     });
 
-    test('tokens are remembered per station', () {
+    test('tokens are remembered per circle', () {
       final session = newGame();
       final basel = title.map.byId('C12')!;
       final id = '${basel.coord.row}_${basel.coord.col}_0';
-      session.tokens[id] = 'red';
+      session.tokens[GameSession.slotId(id, 0)] = 'red';
       expect(session.graph(title).stations
-          .firstWhere((s) => s.id == id).companyId, 'red');
+          .firstWhere((s) => s.id == id).tokens, ['red']);
+    });
+
+    test('a city of two circles holds two tokens', () {
+      final session = newGame();
+      final zurich = title.map.byId('D19')!;
+      session.setManually(zurich, const PlacedTile('907'));
+      final id = '${zurich.coord.row}_${zurich.coord.col}_0';
+      session.tokens[GameSession.slotId(id, 0)] = 'NOB';
+      session.tokens[GameSession.slotId(id, 1)] = 'SCB';
+      final station =
+          session.graph(title).stations.firstWhere((s) => s.id == id);
+      expect(station.tokens, ['NOB', 'SCB']);
+      expect(station.holds('SCB'), isTrue);
+    });
+
+    test("a token can't fill the circle a company's home token needs", () {
+      // Altdorf (G18) is the Gotthardbahn's home. With one circle, nobody
+      // else may take it before the Gotthardbahn has its token there.
+      final session = newGame();
+      final altdorf = title.map.byId('G18')!;
+      session.setManually(altdorf, const PlacedTile('5', rotation: 4));
+      final id = '${altdorf.coord.row}_${altdorf.coord.col}_0';
+      session.tokens[GameSession.slotId(id, 0)] = 'FNM';
+      expect(session.tokenProblems(title).keys, [GameSession.slotId(id, 0)]);
+      expect(session.tokenProblems(title).values.single, contains('GB'));
+      // The Gotthardbahn's own token there is fine...
+      session.tokens[GameSession.slotId(id, 0)] = 'GB';
+      expect(session.tokenProblems(title), isEmpty);
+      // ...and once a green tile gives the city a second circle, the other
+      // can be taken while one stays free.
+      session.setManually(altdorf, const PlacedTile('15'));
+      session.tokens
+        ..clear()
+        ..[GameSession.slotId(id, 1)] = 'FNM';
+      expect(session.tokenProblems(title), isEmpty);
+    });
+
+    test('tokens saved one per city go in the first circle', () {
+      final old = newGame().toJson()
+        ..['version'] = 2
+        ..['tokens'] = {'2_6_0': 'SCB'}
+        ..['tokenDoubts'] = ['2_6_0'];
+      final loaded = GameSession.fromJson(old);
+      expect(loaded.tokens, {'2_6_0_0': 'SCB'});
+      expect(loaded.tokenDoubts, {'2_6_0_0'});
     });
   });
 
@@ -410,6 +459,7 @@ void main() {
       session.mountains['G14'] = 'XM3';
       session.mountains['L23'] = GameSession.unknownPlate;
       session.mountainDoubts.add('L23');
+      session.facing = 1.2345;
       session.colourProfile = ColourProfile(
           colours: {TileColor.yellow: const Offset(0.02, 0.15)},
           measured: DateTime(2026, 10, 1, 11, 40));
@@ -437,6 +487,7 @@ void main() {
       expect(loaded.mountains,
           {'G14': 'XM3', 'L23': GameSession.unknownPlate});
       expect(loaded.mountainDoubts, {'L23'});
+      expect(loaded.facing, closeTo(1.2345, 1e-4));
       final suggestion = loaded.stateOf(title.map.byId('F13')!).suggestion;
       expect(suggestion?.tile?.tileId, '3');
       expect(suggestion?.tile?.rotation, 2);

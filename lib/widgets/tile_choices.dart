@@ -193,7 +193,9 @@ class TileChoices extends StatelessWidget {
               ),
               child: definition == null
                   ? const SizedBox.shrink()
-                  : CustomPaint(painter: TilePainter(definition)),
+                  : CustomPaint(
+                      painter: TilePainter(definition,
+                          turn: rules.title.displayTurn)),
             ),
             const SizedBox(height: 2),
             Text(

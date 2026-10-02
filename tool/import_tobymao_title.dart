@@ -16,6 +16,32 @@ import 'dart:io';
 
 const _base = 'https://raw.githubusercontent.com/tobymao/18xx/master/lib/engine';
 
+/// Where the physical boards and tiles print the cities of hexes and tiles
+/// whose data gives no places for them, by hex or tile id. tobymao spreads
+/// such cities by a rule of its own, but the printed pieces each have their
+/// own design, and recognition compares photos against the print. Each list
+/// gives a `loc` per city, in order: half numbers are corners.
+const _printedCityLocs = <String, Map<String, List<String>>>{
+  '1844': {
+    'G8': ['2.5', '5.5'], // Romont & Fribourg: one above the other
+    'C20': ['3.5', '0.5'], // Winterthur & Frauenfeld: rising to the right
+    // Tile 59: the city reached from side 0 sits out by side 4, its track
+    // curving round to it; the other in the corner by side 2.
+    '59': ['4', '1.5'],
+  },
+};
+
+/// [dsl] with each `city=` that has no `loc:` given the next of [locs].
+String _withCityLocs(String dsl, List<String> locs) {
+  var next = 0;
+  return [
+    for (final part in dsl.split(';'))
+      part.startsWith('city=') && !part.contains('loc:') && next < locs.length
+          ? '$part,loc:${locs[next++]}'
+          : part,
+  ].join(';');
+}
+
 Future<void> main(List<String> args) async {
   if (args.isEmpty) {
     stderr.writeln('usage: dart run tool/import_tobymao_title.dart <title> '
@@ -59,9 +85,10 @@ Future<void> main(List<String> args) async {
       ? RubyConstants({})
       : RubyConstants.parse(entitiesSource);
 
-  if (map['LAYOUT'] != 'pointy') {
-    stderr.writeln('$title uses a ${map['LAYOUT']} layout; only pointy-top '
-        'maps are supported so far.');
+  final layout = map['LAYOUT'];
+  if (layout != 'pointy' && layout != 'flat') {
+    stderr.writeln('$title uses a $layout layout; only pointy-top and '
+        'flat-top maps are supported.');
     exit(1);
   }
 
@@ -76,6 +103,10 @@ Future<void> main(List<String> args) async {
   }
 
   final tileEntries = <String>[];
+  // A tile printed exactly like one already listed is the same tile under
+  // another name for a variant (1889's beginner game lists 6 again as Beg6,
+  // and so on). Two identical drawings would always tie in recognition.
+  final seen = <(String, String), String>{};
   final manifest = tiles['TILES'];
   if (manifest is! Map) {
     stderr.writeln('No TILES manifest found for $title');
@@ -101,6 +132,14 @@ Future<void> main(List<String> args) async {
       }
       (color, code) = standardTile;
     }
+    final locs = _printedCityLocs[title]?['$id'];
+    if (locs != null) code = _withCityLocs(code, locs);
+    final same = seen[(color, code)];
+    if (same != null) {
+      stderr.writeln('note: tile $id is printed exactly like $same; skipped');
+      return;
+    }
+    seen[(color, code)] = '$id';
     // Tiles marked hidden are laid by the game itself rather than by a
     // player -- 1844's Gotthard tunnel opening, say -- but they do appear on
     // the board, so they are imported and marked.
@@ -121,7 +160,9 @@ Future<void> main(List<String> args) async {
       for (final id in (ids as List)) {
         final name = names[id];
         final nameArg = name == null ? '' : ', name: ${_dartString('$name')}';
-        final dsl = code == 'blank' ? '' : '$code';
+        var dsl = code == 'blank' ? '' : '$code';
+        final locs = _printedCityLocs[title]?[id];
+        if (locs != null) dsl = _withCityLocs(dsl, locs);
         hexEntries.add("    MapHexData('$id', '$color', ${_dartString(dsl)}$nameArg),");
       }
     });
@@ -208,6 +249,7 @@ Future<void> main(List<String> args) async {
     ..writeln('  companies: [')
     ..writeAll(companyEntries.map((e) => '$e\n'))
     ..writeln('  ],')
+    ..write(layout == 'flat' ? '  flat: true,\n' : '')
     ..writeln(tunnelHexes is List
         ? '  tunnelHexes: [${words(tunnelHexes)}],'
         : '  tunnelHexes: [],')
