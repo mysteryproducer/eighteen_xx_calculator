@@ -107,7 +107,21 @@ class HexPatch {
   /// The band is searched every half a pixel or so across the side: track
   /// printed thin, like the line on 1844's tunnel pieces, is only a couple of
   /// samples wide, and a coarser search can step straight over it.
-  static const List<double> _exitDepths = [0.74, 0.82, 0.90];
+  ///
+  /// The band slides a little along the track, too: from as deep as the
+  /// first window of [_exitDepths] to as far out as the last. Where a tile
+  /// has a pale rim, or the grid sits a few hundredths of a hex out, track
+  /// ends just short of where the band would otherwise be; and beside a
+  /// city printed close to the side -- the capsule of two slots on a
+  /// green tile -- the white of the city takes up the inner end.
+  static const List<double> _exitDepths = [0.62, 0.68, 0.74, 0.80, 0.86, 0.92];
+
+  /// How many neighbouring depths have to be dark together: a run of a
+  /// sixth of the way to the side.
+  static const int _exitRun = 3;
+
+  /// The deepest a run may end and still count as reaching the side.
+  static const double _exitReach = 0.80;
   static const List<double> _exitSpread = [
     -0.18, -0.135, -0.09, -0.045, 0, 0.045, 0.09, 0.135, 0.18, //
   ];
@@ -216,11 +230,34 @@ class HexPatch {
       darkness[i] = math.min(1.0, darkness[i] * scale);
     }
 
+    // The tile's own colour, from the pixels about as bright as its
+    // background. White city circles are the brightest, least coloured
+    // thing on a tile, and where they cover much of it -- three big circles
+    // on a brown tile -- they would set the background, the brown would
+    // count as too dark to be background, and the tile's colour would come
+    // out grey. So they are left out, unless that leaves too little to go on
+    // (bare map and grey tiles are pale and colourless all over).
+    final brightest = values[(values.length * 0.95).floor()];
+    bool whiteish(int i) {
+      final hi = math.max(r[i], math.max(g[i], b[i]));
+      final lo = math.min(r[i], math.min(g[i], b[i]));
+      return lum[i] > brightest * 0.85 && hi > 0 && (hi - lo) / hi < 0.12;
+    }
+
+    final coloured = [
+      for (final i in mask)
+        if (!whiteish(i)) lum[i],
+    ]..sort();
+    final skipWhite = coloured.length >= mask.length * 0.3;
+    final paper = skipWhite
+        ? math.max(1.0, coloured[(coloured.length * 0.7).floor()])
+        : background;
     double sr = 0, sg = 0, sb = 0;
     int count = 0;
     for (final i in mask) {
-      final d = (background - lum[i]) / background;
-      if (d > 0.1 || lum[i] > background * 1.15) continue;
+      if (skipWhite && whiteish(i)) continue;
+      final d = (paper - lum[i]) / paper;
+      if (d > 0.1 || lum[i] > paper * 1.15) continue;
       sr += r[i];
       sg += g[i];
       sb += b[i];
@@ -233,6 +270,99 @@ class HexPatch {
 
     // How much dark printing crosses each side.
     return HexPatch(darkness, chroma, _exitsOf(darkness));
+  }
+
+  /// How strongly track runs across each side of [hex] and on into the
+  /// hex next door, read straight from [photo]: along lines square to the
+  /// side, the weakest darkness from a little inside the side to a little
+  /// beyond it, and the strongest such line.
+  ///
+  /// Track that leaves a tile carries on into its neighbour's wherever the
+  /// two connect, so this sees an exit even where the tile's own end of it
+  /// is a short stub beside a city -- blurred over by the white of the city
+  /// in a photo of the whole board -- and isn't fooled by the printed
+  /// outline, which runs along the side rather than across it. A side with
+  /// no crossing says nothing: track may end at a bare hex.
+  static Float32List crossingsOf(
+      RgbImage photo, Homography boardToImage, HexCoord hex) {
+    final centre = hex.boardCenter;
+    final rgb = List<double>.filled(3, 0);
+    // Darkness against the paper around the hex, scaled so that solid
+    // printing is about 1, as for a patch.
+    double luminanceAt(Offset board) {
+      final p = boardToImage.apply(board);
+      photo.sample(p.dx, p.dy, rgb);
+      final sum = rgb[0] + rgb[1] + rgb[2];
+      final blueness = sum <= 0 ? 0.0 : (rgb[2] - (rgb[0] + rgb[1]) / 2) / sum;
+      final l = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+      // Blue water is dark but isn't track: count it as paper.
+      return blueness > 0.06 ? double.infinity : l;
+    }
+
+    final around = <double>[];
+    for (int y = -12; y <= 12; y++) {
+      for (int x = -12; x <= 12; x++) {
+        final l = luminanceAt(centre + Offset(x / 12, y / 12) * 1.3);
+        if (l.isFinite) around.add(l);
+      }
+    }
+    final crossings = Float32List(6);
+    if (around.length < 50) return crossings;
+    around.sort();
+    final paper = math.max(1.0, around[(around.length * 0.7).floor()]);
+    final ink = around[(around.length * 0.02).floor()];
+    final full = math.max(0.3, (paper - ink) / paper);
+    double darkness(Offset board) {
+      final l = luminanceAt(board);
+      if (!l.isFinite) return 0;
+      return (math.max(0.0, (paper - l) / paper) / full).clamp(0.0, 1.0);
+    }
+
+    for (int k = 0; k < 6; k++) {
+      final normal = HexGeometry.edgeNormal(k);
+      final along = Offset(-normal.dy, normal.dx);
+      double line(double t) {
+        double weakest = 1;
+        for (final depth in _crossingDepths) {
+          final d = darkness(centre + normal * (depth * _apothem) + along * t);
+          if (d < weakest) weakest = d;
+        }
+        return weakest;
+      }
+
+      double strongest = 0;
+      for (final t in _exitSpread) {
+        // Track crosses at one place; a border printed along the side, or a
+        // shadow, is as dark a little way along it either side.
+        final beside = (line(t - _besideCrossing) + line(t + _besideCrossing)) / 2;
+        final crossing = line(t) - beside;
+        if (crossing > strongest) strongest = crossing;
+      }
+      crossings[k] = strongest;
+    }
+    return crossings;
+  }
+
+  /// From inside a side to beyond it, as shares of the hex's apothem: clear
+  /// of the side itself, where the printed outline runs, and where laid
+  /// tiles meet in a thin pale rim that breaks the track.
+  static const List<double> _crossingDepths = [0.82, 0.89, 1.11, 1.18];
+
+  /// How far along the side, either way, the paper beside a crossing is.
+  static const double _besideCrossing = 0.3;
+
+  /// Where the side exits of the hex centred at [centre] (in board units)
+  /// are sampled, for tools to show.
+  static Iterable<Offset> exitSamples(Offset centre) sync* {
+    for (int k = 0; k < 6; k++) {
+      final normal = HexGeometry.edgeNormal(k);
+      final along = Offset(-normal.dy, normal.dx);
+      for (final t in _exitSpread) {
+        for (final depth in _exitDepths) {
+          yield centre + normal * (depth * _apothem) + along * t;
+        }
+      }
+    }
   }
 
   /// How much dark printing crosses each side: along each line running
@@ -262,19 +392,26 @@ class HexPatch {
     }
 
     final exits = Float32List(6);
+    final along = Float64List(_exitDepths.length);
     for (int k = 0; k < 6; k++) {
       final normal = HexGeometry.edgeNormal(k);
-      final along = Offset(-normal.dy, normal.dx);
+      final across = Offset(-normal.dy, normal.dx);
       double strongest = 0;
       for (final t in _exitSpread) {
-        double weakest = 1;
-        for (final depth in _exitDepths) {
-          final p = normal * (depth * _apothem) + along * t;
-          final d = at(p.dx * radiusShare * size + size / 2 - 0.5,
+        for (int i = 0; i < _exitDepths.length; i++) {
+          final p = normal * (_exitDepths[i] * _apothem) + across * t;
+          along[i] = at(p.dx * radiusShare * size + size / 2 - 0.5,
               p.dy * radiusShare * size + size / 2 - 0.5);
-          if (d < weakest) weakest = d;
         }
-        if (weakest > strongest) strongest = weakest;
+        // The best run of neighbouring depths that reaches far enough out.
+        for (int end = _exitRun - 1; end < _exitDepths.length; end++) {
+          if (_exitDepths[end] < _exitReach) continue;
+          double weakest = 1;
+          for (int i = end - _exitRun + 1; i <= end; i++) {
+            if (along[i] < weakest) weakest = along[i];
+          }
+          if (weakest > strongest) strongest = weakest;
+        }
       }
       exits[k] = strongest;
     }

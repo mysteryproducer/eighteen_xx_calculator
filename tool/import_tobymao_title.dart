@@ -28,6 +28,10 @@ const _printedCityLocs = <String, Map<String, List<String>>>{
     // Tile 59: the city reached from side 0 sits out by side 4, its track
     // curving round to it; the other in the corner by side 2.
     '59': ['4', '1.5'],
+    // Tile 66: the city on the run from side 0 to side 3 sits out towards
+    // the corner between sides 4 and 5, the run bending through it (C20,
+    // 2 October); the other is in the corner by side 2, as tobymao has it.
+    '66': ['4.5'],
   },
 };
 
@@ -71,6 +75,11 @@ Future<void> main(List<String> args) async {
   final tilesSource = await load('tiles.rb', '$gameDir/tiles.rb');
   final metaSource = await load('meta.rb', '$gameDir/meta.rb');
   final entitiesSource = await load('entities.rb', '$gameDir/entities.rb');
+  // Trains and phases are constants in the game's code, or for some titles
+  // (1854) files of their own.
+  final gameSource = await load('game.rb', '$gameDir/game.rb');
+  final trainsSource = await load('trains.rb', '$gameDir/trains.rb');
+  final phasesSource = await load('phases.rb', '$gameDir/phases.rb');
   final standardSource = await load('tile.rb', '$_base/config/tile.rb');
   if (standardSource == null) {
     stderr.writeln('Could not load the standard tile list (config/tile.rb)');
@@ -78,6 +87,73 @@ Future<void> main(List<String> args) async {
   }
 
   final map = RubyConstants.parse(mapSource);
+  final game = RubyConstants({
+    for (final source in [gameSource, trainsSource, phasesSource])
+      if (source != null) ...RubyConstants.parse(source).values,
+  });
+  // The trains, each variant (1844's 2H) a train of its own that keeps
+  // whatever of its parent's it doesn't change.
+  final trainEntries = <String>[];
+  void addTrain(Map train, {Map? parent}) {
+    final merged = {...?parent, ...train};
+    final name = '${merged['name']}';
+    final distance = merged['distance'];
+    int reach;
+    int? pays;
+    var freeTowns = false;
+    if (distance is List && distance.isNotEmpty && distance.first is Map) {
+      // Parts by the kinds of stop they count: the one with cities says how
+      // far the train runs; one for towns alone that visits any number of
+      // them (1854's "+" trains) leaves towns out of the count.
+      final parts = distance.whereType<Map>().toList();
+      final main = parts.firstWhere(
+          (p) => (p['nodes'] as List? ?? const []).contains('city'),
+          orElse: () => parts.first);
+      reach = (main['visit'] as num?)?.toInt() ?? 99;
+      final paid = (main['pay'] as num?)?.toInt() ?? reach;
+      if (paid < reach) pays = paid;
+      freeTowns = parts.any((p) =>
+          !identical(p, main) &&
+          (p['nodes'] as List? ?? const []).every((n) => n == 'town') &&
+          ((p['visit'] as num?)?.toInt() ?? 0) >= 99);
+    } else {
+      reach = (distance as num?)?.toInt() ?? 0;
+    }
+    final rusts = merged['rusts_on'];
+    trainEntries.add("    TrainData(${_dartString(name)}, distance: $reach"
+        "${pays == null ? '' : ', pays: $pays'}"
+        "${freeTowns ? ', freeTowns: true' : ''}"
+        "${merged['price'] == null ? '' : ', price: ${merged['price']}'}"
+        "${rusts == null ? '' : ', rustsOn: ${_dartString('$rusts')}'}"
+        "${parent == null ? '' : ", base: ${_dartString('${parent['name']}')}"}"
+        "${merged['num'] is num ? ', count: ${merged['num']}' : ''}),");
+  }
+
+  final trains = game['TRAINS'];
+  if (trains is List) {
+    for (final train in trains.whereType<Map>()) {
+      addTrain(train);
+      for (final variant in (train['variants'] as List? ?? const []).whereType<Map>()) {
+        addTrain(variant, parent: train);
+      }
+    }
+  }
+  final phaseEntries = <String>[];
+  final phases = game['PHASES'];
+  if (phases is List) {
+    for (final phase in phases.whereType<Map>()) {
+      final limit = phase['train_limit'];
+      final limits = limit is Map
+          ? {for (final e in limit.entries) '${e.key}': (e.value as num).toInt()}
+          : {'': (limit as num?)?.toInt() ?? 0};
+      final on = phase['on'];
+      final tiles = phase['tiles'];
+      phaseEntries.add("    PhaseData(${_dartString('${phase['name']}')}"
+          "${on == null ? '' : ', on: ${_dartString('${on is List ? on.first : on}')}'}"
+          ", trainLimit: {${limits.entries.map((e) => "${_dartString(e.key)}: ${e.value}").join(', ')}}"
+          "${tiles is List ? ', tiles: [${tiles.map((t) => _dartString('$t')).join(', ')}]' : ''}),");
+    }
+  }
   final tiles = tilesSource == null ? map : RubyConstants.parse(tilesSource);
   final standard = RubyConstants.parse(standardSource);
   final meta = metaSource == null ? RubyConstants({}) : RubyConstants.parse(metaSource);
@@ -179,13 +255,17 @@ Future<void> main(List<String> args) async {
     final city = (company['city'] as num?)?.toInt();
     final text = company['text_color'] as String?;
     final kind = company['type'] as String?;
+    final tokens = company['tokens'];
+    final shares = company['shares'];
     companyEntries.add("    CompanyData('$sym', "
         "${_dartString('${company['name'] ?? sym}')}, "
         "${_dartString('${company['color'] ?? 'white'}')}"
         "${text == null ? '' : ', textColor: ${_dartString(text)}'}"
         "${home == null ? '' : ", home: '$home'"}"
         "${city == null ? '' : ', homeCity: $city'}"
-        "${kind == null ? '' : ', kind: ${_dartString(kind)}'}),");
+        "${kind == null ? '' : ', kind: ${_dartString(kind)}'}"
+        "${tokens is List && tokens.isNotEmpty ? ', tokens: [${tokens.join(', ')}]' : ''}"
+        "${shares is List && shares.isNotEmpty ? ', shares: [${shares.join(', ')}]' : ''}),");
   }
 
   for (final list in [entities['CORPORATIONS'], entities['MINORS']]) {
@@ -248,6 +328,12 @@ Future<void> main(List<String> args) async {
     ..writeln('  ],')
     ..writeln('  companies: [')
     ..writeAll(companyEntries.map((e) => '$e\n'))
+    ..writeln('  ],')
+    ..writeln('  trains: [')
+    ..writeAll(trainEntries.map((e) => '$e\n'))
+    ..writeln('  ],')
+    ..writeln('  phases: [')
+    ..writeAll(phaseEntries.map((e) => '$e\n'))
     ..writeln('  ],')
     ..write(layout == 'flat' ? '  flat: true,\n' : '')
     ..writeln(tunnelHexes is List
@@ -354,7 +440,13 @@ class _Tokenizer {
         i++;
       } else if (c == "'" || c == '"') {
         final text = _quoted(c);
-        if (out.isNotEmpty && out.last.kind == _T.string) {
+        if (i < s.length && s[i] == ':' && (i + 1 >= s.length || s[i + 1] != ':')) {
+          // A quoted key (`'pre-sbb': 2`), as Ruby writes a symbol key that
+          // isn't a plain word.
+          out.add(_Token(_T.symbol, text));
+          out.add(const _Token(_T.punct, '=>'));
+          i++;
+        } else if (out.isNotEmpty && out.last.kind == _T.string) {
           out[out.length - 1] = _Token(_T.string, out.last.text + text);
         } else {
           out.add(_Token(_T.string, text));

@@ -132,6 +132,43 @@ class GridDetector {
           minSpacing: minSpacing);
     }
     if (lattice == null) {
+      // A board photographed from where a player sits, the camera tilted to
+      // keep the lamp's reflection out of the picture, is squashed top to
+      // bottom: the rows come out much closer together than the hexes along
+      // them, and the photo's repeat no longer looks like a hex grid at
+      // all. Stretched back to about the right proportions, its middle
+      // does; what the stretch doesn't put right -- the far rows still
+      // smaller than the near ones -- the perspective fit below does.
+      final w = work.lines.width;
+      for (final stretch in _tiltStretches) {
+        final tall = work.lines.stretchedTall(stretch);
+        final th = tall.height;
+        final found = _estimateLattice(
+            tall.cropped(w ~/ 5, th ~/ 5, w * 3 ~/ 5, th * 3 ~/ 5),
+            log: log,
+            maxSpacing: maxSpacing,
+            minSpacing: minSpacing);
+        if (found == null) continue;
+        final squashed = _Lattice(
+          east: Offset(found.east.dx, found.east.dy / stretch),
+          southEast: Offset(found.southEast.dx, found.southEast.dy / stretch),
+          strength: found.strength,
+        );
+        log?.call('repeat found stretched ${stretch}x: east ${squashed.east} '
+            'south-east ${squashed.southEast} strength '
+            '${found.strength.toStringAsFixed(3)}');
+        if (lattice == null || found.strength > lattice.strength) {
+          lattice = squashed;
+        }
+      }
+      if (lattice != null) {
+        // Which way the lattice's axes run decides east and south-east;
+        // stretched back, the nearest to the photo's +x is still east.
+        lattice = _Lattice.ordered(lattice.east, lattice.southEast,
+            strength: lattice.strength);
+      }
+    }
+    if (lattice == null) {
       // Perhaps the board fills the frame and its outlines are thick; look
       // again with a filter for wider lines.
       log?.call('no repeat found; trying again for thicker lines');
@@ -204,7 +241,38 @@ class GridDetector {
           searchFractions: const [0.45, 0.3, 0.2, 0.12, 0.08]);
     }
     h = _settleShift(work, h, target, hints?.colours);
-    return _result(work, h, restrictTo: nearby, tiled: hints?.tiled);
+    final measured = _result(work, h, restrictTo: nearby, tiled: hints?.tiled);
+    // A guide that followed the board in perspective -- the camera tilted
+    // to keep glare off -- is already close everywhere, near side and far:
+    // pulled straight onto the printed lines, it may sit better than a grid
+    // measured afresh, which is one size of hex throughout.
+    if (!_hasPerspective(guessWork, target.boardCenter)) return measured;
+    var pulledWork = _Working.of(photo, workingSize,
+        hexSpacing: _expectedSpacing(photo, guess, target.boardCenter));
+    pulledWork =
+        pulledWork.normalized(_latticeOf(guessWork, target.boardCenter).east.distance);
+    var pulled = _refine(pulledWork, guessWork,
+        _visibleHexes(pulledWork.lines, guessWork, nearby),
+        searchFractions: const [0.3, 0.2, 0.12, 0.08]);
+    pulled = _settleShift(pulledWork, pulled, target, hints?.colours);
+    final result =
+        _result(pulledWork, pulled, restrictTo: nearby, tiled: hints?.tiled);
+    log?.call('close-up pulled onto the lines: coverage '
+        '${result.coverage.toStringAsFixed(2)} against '
+        '${measured.coverage.toStringAsFixed(2)} measured');
+    return result.coverage > measured.coverage ? result : measured;
+  }
+
+  /// Whether [h] is noticeably more than a turn, scale and shift near
+  /// [at]: hexes a hex apart either side differ in size by more than a few
+  /// per cent.
+  static bool _hasPerspective(Homography h, Offset at) {
+    final sizes = [
+      for (final d in const [Offset(1.5, 0), Offset(-1.5, 0), Offset(0, 1.5), Offset(0, -1.5)])
+        h.localScale(at + d),
+    ];
+    final most = sizes.reduce(math.max), least = sizes.reduce(math.min);
+    return least > 0 && most / least > 1.04;
   }
 
   /// A close-up framed a whole hex off looks just like one framed right:
@@ -271,6 +339,18 @@ class GridDetector {
   /// Pulls a hand-made alignment [guess] (board to photo pixels) onto the
   /// printed hex outlines nearby.
   GridFit snap(img.Image photo, Homography guess) {
+    // Two ways to tighten it: measure the printed grid afresh around the
+    // middle and grow it outwards, which puts right a placement a hex out
+    // here and there; or pull the placement itself onto the outlines, which
+    // keeps the perspective the user gave it -- all a photo taken at a
+    // steep angle can go on, where the grid repeats at one size on the near
+    // side and two thirds of it on the far side. Whichever sits better.
+    final measured = _snapToLattice(photo, guess);
+    final pulled = refine(photo, guess);
+    return pulled.coverage > measured.coverage ? pulled : measured;
+  }
+
+  GridFit _snapToLattice(img.Image photo, Homography guess) {
     var work = _Working.of(photo, workingSize,
         hexSpacing: _expectedSpacing(photo, guess, map.boardBounds.center));
     final guessWork = guess.then(work.toWorking);
@@ -304,6 +384,30 @@ class GridDetector {
     }
     h = _grow(work, h, map.coords, target ?? const HexCoord(0, 0));
     return _result(work, h);
+  }
+
+  /// Pulls a placement [guess] (board to photo pixels) that is already
+  /// close -- within a fifth of a hex or so everywhere, perspective and all
+  /// -- onto the printed outlines, without measuring the hex size afresh:
+  /// for a photo taken at a steep angle, where hexes on the near side are
+  /// half as big again as on the far side and no single size is right.
+  ///
+  /// The hex size is taken where [at] is (board units), the middle of the
+  /// map unless given; [restrictTo] limits which hexes are fitted and judged.
+  GridFit refine(
+    img.Image photo,
+    Homography guess, {
+    Offset? at,
+    Set<HexCoord>? restrictTo,
+    List<double> searchFractions = const [0.3, 0.2, 0.12, 0.08],
+  }) {
+    var work = _Working.of(photo, workingSize);
+    var h = guess.then(work.toWorking);
+    work = work.normalized(
+        _latticeOf(h, at ?? map.boardBounds.center).east.distance);
+    h = _refine(work, h, _visibleHexes(work.lines, h, restrictTo ?? map.coords),
+        searchFractions: searchFractions);
+    return _result(work, h, restrictTo: restrictTo);
   }
 
   /// The longest hex repeat, in pixels, a photo of the whole board can have:
@@ -665,23 +769,13 @@ class GridDetector {
     log?.call('lattice from ${best.p.dx},${best.p.dy} / ${best.q.dx},${best.q.dy} '
         'score ${best.score.toStringAsFixed(2)} -> a $a b $b');
 
-    // Of the six neighbour directions, call the one nearest the photo's +x
-    // "east"; the next one clockwise is south-east. Which way round the map
-    // really is gets settled when it is placed on the grid.
-    final dirs = [a, b, b - a, -a, -b, a - b];
-    dirs.sort((u, v) => _angleFromX(u).abs().compareTo(_angleFromX(v).abs()));
-    final east = dirs.first;
-    final wanted = _angleFromX(east) + math.pi / 3;
-    dirs.sort((u, v) => _angleDiff(_angleFromX(u), wanted)
-        .compareTo(_angleDiff(_angleFromX(v), wanted)));
-    final southEast = dirs.first;
-
-    return _Lattice(
-      east: east / scale,
-      southEast: southEast / scale,
-      strength: strength,
-    );
+    return _Lattice.ordered(a / scale, b / scale, strength: strength);
   }
+
+  /// How much taller to stretch a photo to undo the camera's tilt, from a
+  /// little to steep (a stretch of two is a camera tilted about 60 degrees
+  /// from looking straight down).
+  static const List<double> _tiltStretches = [1.3, 1.6, 2.0, 2.5];
 
   static double _angleFromX(Offset v) => math.atan2(v.dy, v.dx);
 
@@ -1374,7 +1468,9 @@ class _Working {
     final rebuilt = _lineMap(gray, hexSpacing);
     final radius = math.max(4, (hexSpacing * 0.6).round());
     final local = rebuilt.boxBlur(radius);
-    final floor = rebuilt.mean * 0.5;
+    // (Never nothing: a frame with no lines in it at all would divide
+    // nothing by nothing.)
+    final floor = math.max(rebuilt.mean * 0.5, 1e-6);
     final out = GrayImage(rebuilt.width, rebuilt.height);
     for (int i = 0; i < out.data.length; i++) {
       out.data[i] = rebuilt.data[i] / (local.data[i] + floor);
@@ -1394,6 +1490,27 @@ class _Lattice {
     required this.southEast,
     required this.strength,
   });
+
+  /// The lattice spanned by neighbour offsets [a] and [b]: of the six
+  /// neighbour directions, the one nearest the photo's +x is called east,
+  /// and the next one clockwise south-east. Which way round the map really
+  /// is gets settled when it is placed on the grid.
+  factory _Lattice.ordered(Offset a, Offset b, {required double strength}) {
+    double angle(Offset v) => math.atan2(v.dy, v.dx);
+    final dirs = [a, b, b - a, -a, -b, a - b];
+    dirs.sort((u, v) => angle(u).abs().compareTo(angle(v).abs()));
+    final east = dirs.first;
+    // Clockwise from east, the nearest of the others.
+    double clockwise(Offset v) {
+      var d = (angle(v) - angle(east)) % (2 * math.pi);
+      if (d < 0) d += 2 * math.pi;
+      return d;
+    }
+
+    final rest = [for (final d in dirs) if (clockwise(d) > 1e-6) d]
+      ..sort((u, v) => clockwise(u).compareTo(clockwise(v)));
+    return _Lattice(east: east, southEast: rest.first, strength: strength);
+  }
 
   /// The affine board-to-photo map putting hex (0, 0) at [origin].
   Homography homography(Offset origin) => Homography.affine(

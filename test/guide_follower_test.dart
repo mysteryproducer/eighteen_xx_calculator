@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:eighteen_xx_calculator/geometry/homography.dart';
+import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/processing/guide_follower.dart';
 import 'package:eighteen_xx_calculator/screens/capture.dart';
 import 'package:flutter/material.dart' show Offset, Size;
@@ -92,6 +93,64 @@ void main() {
       final blank = img.Image(width: size, height: size);
       img.fill(blank, color: img.ColorRgb8(120, 110, 100));
       expect(followGuide(title.map, frameOf(blank), drawnAt, target), isNull);
+    });
+
+    group('locked on', () {
+      /// The frame as a camera tilted forward sees it: the far rows (the
+      /// top of the frame) narrower than the near ones by [squeeze].
+      Homography tilted(double squeeze) => Homography.fromFourPoints(const [
+            Offset(0, 0),
+            Offset(size + 0.0, 0),
+            Offset(size + 0.0, size + 0.0),
+            Offset(0, size + 0.0),
+          ], [
+            Offset(size * squeeze / 2, size * squeeze / 4),
+            Offset(size * (1 - squeeze / 2), size * squeeze / 4),
+            const Offset(size + 0.0, size + 0.0),
+            const Offset(0, size + 0.0),
+          ])!;
+
+      Future<(img.Image, Homography)> tiltedPreview(double squeeze) async {
+        final close = await drawBoard(title.map, hexRadius: closeRadius);
+        final truth = boardToDrawn(title.map, closeRadius);
+        final wanted = drawnAt.then(tilted(squeeze));
+        return (
+          warp(close, truth.inverse.then(wanted), width: size, height: size),
+          wanted
+        );
+      }
+
+      test('the outline follows a camera tilted to dodge glare', () async {
+        final (photo, wanted) = await tiltedPreview(0.3);
+        // Locked on a look or two ago, part of the way into the tilt.
+        final current = drawnAt.then(tilted(0.15));
+        final found = trackGuide(title.map, frameOf(photo), current, target);
+        expect(found, isNotNull);
+        final hex = drawnAt.localScale(target.boardCenter);
+        for (final c in title.map.around([target], 1)) {
+          for (int i = 0; i < 6; i++) {
+            final corner = HexGeometry.vertex(c.boardCenter, 1, i);
+            expect((found!.apply(corner) - wanted.apply(corner)).distance / hex,
+                lessThan(0.15),
+                reason: 'corner $i of ${title.map.at(c)?.id}');
+          }
+        }
+        // Stepping part of the way there moves it smoothly.
+        final step = stepToward(current, found!, target.boardCenter, 0.5);
+        final half = (step.apply(target.boardCenter) -
+                current.apply(target.boardCenter)) +
+            (step.apply(target.boardCenter) - found.apply(target.boardCenter));
+        expect(half.distance / hex, lessThan(0.05));
+      });
+
+      test('a frame without the board leaves it where it is', () {
+        final blank = img.Image(width: size, height: size);
+        img.fill(blank, color: img.ColorRgb8(120, 110, 100));
+        expect(
+            trackGuide(title.map, frameOf(blank), drawnAt.then(tilted(0.2)),
+                target),
+            isNull);
+      });
     });
 
     test('a board turned too far for a small correction is left alone',

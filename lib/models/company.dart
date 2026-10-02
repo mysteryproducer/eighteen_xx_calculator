@@ -19,6 +19,21 @@ class Company {
   final String? homeHex;
   final int? homeCity;
 
+  /// The title's kind of company (`pre-sbb`, `major`...), which some rules
+  /// depend on: train limits, for one.
+  final String? kind;
+
+  /// What each of its station tokens costs to lay, as printed beside the
+  /// token's place on its charter: the home token's first.
+  final List<int> tokenCosts;
+
+  /// How many station tokens the company has in all.
+  int get tokenCount => tokenCosts.length;
+
+  /// The share certificates it is divided into, as percentages: the
+  /// director's first.
+  final List<int> shares;
+
   const Company({
     required this.id,
     required this.name,
@@ -26,6 +41,9 @@ class Company {
     this.textColor,
     this.homeHex,
     this.homeCity,
+    this.kind,
+    this.tokenCosts = const [],
+    this.shares = const [],
   });
 
   Company copyWith({String? name}) => Company(
@@ -35,6 +53,9 @@ class Company {
         textColor: textColor,
         homeHex: homeHex,
         homeCity: homeCity,
+        kind: kind,
+        tokenCosts: tokenCosts,
+        shares: shares,
       );
 
   /// What to call the company where space is short: its symbol (`BLS`) for

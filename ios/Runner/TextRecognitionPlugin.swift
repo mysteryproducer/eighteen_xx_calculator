@@ -24,10 +24,12 @@ final class TextRecognitionPlugin: NSObject, FlutterPlugin {
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     // "recognizeText" answers with the lines read, joined by newlines;
-    // "recognizeTextWords" with each word and where it lies across the
-    // image, as {text, left, right}, left and right from 0 to 1.
+    // "recognizeTextWords" with each word and where it lies in the image,
+    // and "recognizeTextLines" with each line and where it lies, both as
+    // {text, left, top, right, bottom}, from 0 to 1 across and down.
     let words = call.method == "recognizeTextWords"
-    guard call.method == "recognizeText" || words else {
+    let lines = call.method == "recognizeTextLines"
+    guard call.method == "recognizeText" || words || lines else {
       result(FlutterMethodNotImplemented)
       return
     }
@@ -55,12 +57,18 @@ final class TextRecognitionPlugin: NSObject, FlutterPlugin {
 
       do {
         try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        let candidates = (request.results ?? []).compactMap {
+        let observations = request.results ?? []
+        let candidates = observations.compactMap {
           $0.topCandidates(1).first
         }
-        let answer: Any = words
-          ? candidates.flatMap(TextRecognitionPlugin.placedWords)
-          : candidates.map { $0.string }.joined(separator: "\n")
+        let answer: Any
+        if words {
+          answer = candidates.flatMap(TextRecognitionPlugin.placedWords)
+        } else if lines {
+          answer = observations.compactMap(TextRecognitionPlugin.placedLine)
+        } else {
+          answer = candidates.map { $0.string }.joined(separator: "\n")
+        }
         DispatchQueue.main.async {
           result(answer)
         }
@@ -92,14 +100,28 @@ final class TextRecognitionPlugin: NSObject, FlutterPlugin {
         end = text.index(after: end)
       }
       if let box = try? candidate.boundingBox(for: start..<end)?.boundingBox {
-        placed.append([
-          "text": String(text[start..<end]),
-          "left": Double(box.minX),
-          "right": Double(box.maxX),
-        ])
+        placed.append(placing(String(text[start..<end]), box))
       }
       start = end
     }
     return placed
+  }
+
+  /// The line [observation] read, and where it lies in the image.
+  private static func placedLine(_ observation: VNRecognizedTextObservation) -> [String: Any]? {
+    guard let candidate = observation.topCandidates(1).first else { return nil }
+    return placing(candidate.string, observation.boundingBox)
+  }
+
+  /// [text] and its [box], turned from Vision's coordinates (0 to 1 from the
+  /// bottom left) to the image's (from the top left).
+  private static func placing(_ text: String, _ box: CGRect) -> [String: Any] {
+    return [
+      "text": text,
+      "left": Double(box.minX),
+      "top": Double(1 - box.maxY),
+      "right": Double(box.maxX),
+      "bottom": Double(1 - box.minY),
+    ]
   }
 }

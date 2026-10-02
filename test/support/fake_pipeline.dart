@@ -2,9 +2,11 @@ import 'dart:typed_data';
 
 import 'package:eighteen_xx_calculator/geometry/homography.dart';
 import 'package:eighteen_xx_calculator/models/board.dart';
+import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/models/map_layout.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
 import 'package:eighteen_xx_calculator/processing/guide_follower.dart';
+import 'package:eighteen_xx_calculator/processing/play_area_reader.dart';
 import 'package:eighteen_xx_calculator/services/photo_pipeline.dart';
 import 'package:image/image.dart' as img;
 
@@ -73,10 +75,31 @@ class FakePhotoPipeline implements PhotoPipeline {
       null;
 
   @override
+  Future<Homography?> trackGuide(
+    MapLayout map, {
+    required Uint8List bytes,
+    required int width,
+    required int height,
+    required int bytesPerRow,
+    required Homography current,
+    required HexCoord target,
+  }) async =>
+      null;
+
+  @override
   Future<GridFit> snap(MapLayout map, img.Image photo, Homography guess) async {
     snapCalls++;
     if (failure != null) throw failure!;
     return fit ?? fitFor(map);
+  }
+
+  /// What reading a player's area should find.
+  PlayAreaReading playArea = const PlayAreaReading();
+
+  @override
+  Future<PlayAreaReading> readPlayArea(GameTitle title, img.Image photo) async {
+    if (failure != null) throw failure!;
+    return playArea;
   }
 
   @override

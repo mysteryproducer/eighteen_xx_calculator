@@ -7,6 +7,11 @@ import '../models/tile_rules.dart';
 import 'hex_patch.dart';
 import 'tile_renderer.dart';
 
+/// Called with each option's score in parts, for tools that look into why
+/// a hex was read as it was.
+typedef ScoreExplainer = void Function(
+    TileOption option, Map<String, double> parts);
+
 /// What recognition made of one hex.
 class TileReading {
   /// The most likely option.
@@ -134,15 +139,23 @@ class TileClassifier {
     HexPatch? reference,
     double stepPenalty = _stepPenalty,
     double colourWeight = 1,
+    List<double>? crossings,
+    ScoreExplainer? explain,
   }) {
     assert(options.isNotEmpty);
     final scored = <(TileOption, double)>[];
     for (int i = 0; i < options.length; i++) {
       final option = options[i];
       final drawings = _templates[keyOf(option)];
-      var shape = drawings == null
-          ? 1.0
-          : drawings.map(patch.distanceTo).reduce(math.min);
+      HexPatch? drawing;
+      var shape = 1.0;
+      for (final d in drawings ?? const <HexPatch>[]) {
+        final distance = patch.distanceTo(d);
+        if (drawing == null || distance < shape) {
+          shape = distance;
+          drawing = d;
+        }
+      }
       if (i == 0 && reference != null) {
         shape = math.min(shape, patch.distanceTo(reference));
       }
@@ -152,18 +165,41 @@ class TileClassifier {
       // Which sides the printing runs off, against which sides this option's
       // track reaches. A hex whose track leaves by three sides looks quite
       // unlike a bare one however similar the two are pixel for pixel.
+      // Expected as the drawing shows them, where there is one: a short stub
+      // of track beside a city reads weaker than a long run, in the drawing
+      // as in a photo.
       final exits = exitsOf(option);
       double exitMiss = 0;
       for (int e = 0; e < 6; e++) {
         final measured = patch.exits[e].clamp(0.0, 1.0);
-        final expected = exits[e] ?? 0.0;
+        final expected = drawing == null
+            ? exits[e] ?? 0.0
+            : math.min(exits[e] ?? 0.0, drawing.exits[e]);
         final miss = measured - expected;
         exitMiss += miss * miss;
+      }
+      // Track seen running on across a side into the next hex is an exit
+      // this option had better have. A side with none says nothing: track
+      // may end at a bare hex.
+      double linkMiss = 0;
+      if (crossings != null) {
+        for (int e = 0; e < 6; e++) {
+          final miss = crossings[e] - (exits[e] ?? 0.0);
+          if (miss > 0) linkMiss += miss * miss;
+        }
       }
       final score = -shape / _shapeScale -
           0.5 * colourWeight * math.min(colourMiss, 4.0) -
           _exitWeight * exitMiss -
+          _linkWeight * linkMiss -
           stepPenalty * option.steps;
+      explain?.call(option, {
+        'shape': -shape / _shapeScale,
+        'colour': -0.5 * colourWeight * math.min(colourMiss, 4.0),
+        'exits': -_exitWeight * exitMiss,
+        'links': -_linkWeight * linkMiss,
+        'steps': -stepPenalty * option.steps,
+      });
       scored.add((option, score));
     }
     scored.sort((a, b) => b.$2.compareTo(a.$2));
@@ -191,6 +227,9 @@ class TileClassifier {
 
   /// Weight on each side's track agreeing with the photo.
   static const double _exitWeight = 2.0;
+
+  /// Weight on track seen crossing a side into the next hex.
+  static const double _linkWeight = 2.0;
 
   /// How big a lead one option needs over the next before the reading counts
   /// as settled. Printed map art the renderer doesn't draw -- lakes, hill

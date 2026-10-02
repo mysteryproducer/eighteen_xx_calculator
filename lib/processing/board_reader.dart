@@ -68,6 +68,10 @@ class BoardReader {
   final TileClassifier classifier;
   final TokenDetector tokenDetector;
 
+  /// For tools: told each hex's options' scores in parts as they are read.
+  void Function(HexCoord hex, TileOption option, Map<String, double> parts)?
+      explain;
+
   BoardReader(
     this.title, {
     TileClassifier? classifier,
@@ -319,7 +323,11 @@ class BoardReader {
       chroma[c] = patch.chroma;
     }
     final relative = _relativeToPlain(chroma, session);
-    final colours = _colourModel(relative, session, glare);
+    var colours = _colourModel(relative, session, glare);
+    final measuredColours = {
+      for (final e in _knownColours(relative, session, glare).entries)
+        if (e.value.length >= 3) e.key,
+    };
 
     // Everything each hex could be, and the templates to compare with.
     final options = <HexCoord, List<TileOption>>{};
@@ -351,53 +359,113 @@ class BoardReader {
     }
     await classifier.prepare(templates);
 
-    final results = <HexReading>[];
-    options.forEach((c, list) {
-      final hex = title.map.at(c)!;
-      final state = session.stateOf(hex);
-      final washedOut = glare[c] ?? 0;
-      final classified = classifier.classify(
-        patch: patches[c]!,
-        relativeChroma: relative[c]!,
-        options: list,
-        keyOf: (o) => _key(hex, o),
-        colourOf: (o) => rules.contentOf(hex, o)?.color ?? hex.printed.color,
-        exitsOf: (o) => rules.contentOf(hex, o)?.exitStrengths ?? const {},
-        colours: colours,
-        // "It probably hasn't changed" only counts for a hex the app has
-        // actually seen; on one it has never read, a tile is no less likely
-        // than bare map.
-        stepPenalty: state.basisKnown ? 1.0 : 0.25,
-        reference: state.reference == null
-            ? null
-            : HexPatch.decode(state.reference!, state.referenceChroma ?? Offset.zero),
-        // Glare washes colour out before it hides track.
-        colourWeight: 1 - 0.75 * washedOut,
-      );
-      // Glare can hide a tile, but it can't put track where there is none.
-      // So under it, "nothing here" is never taken as read where it would
-      // be news -- where the app didn't already know the hex was bare.
-      final knownBare = state.basisKnown && state.basis == null;
-      final reading = classified.option.isPrinted && !knownBare && washedOut > 0
-          ? TileReading(
-              option: classified.option,
-              confidence: classified.confidence * (1 - 0.6 * washedOut),
-              ranked: classified.ranked,
-            )
-          : classified;
-      results.add(HexReading(
-        hex: hex,
-        reading: reading,
-        patch: patches[c]!,
-        picture: img.encodePng(HexPatch.picture(rgb, boardToImage, c)),
-        tokens: (glare[c] ?? 0) > 0.5
-            ? const {}
-            : _tokens(rgb, boardToImage, hex, reading.option),
-        isUpgrade: _isUpgrade(state.basis, reading.option),
-        glare: washedOut,
-      ));
-    });
+    final crossings = {
+      for (final c in options.keys)
+        c: _crossings(rgb, boardToImage, title.map.at(c)!),
+    };
+    TileColor colourOf(MapHex hex, TileOption o) =>
+        rules.contentOf(hex, o)?.color ?? hex.printed.color;
+    final pictures = <HexCoord, Uint8List>{};
+
+    List<HexReading> readAll(ColourModel colours) {
+      final results = <HexReading>[];
+      options.forEach((c, list) {
+        final hex = title.map.at(c)!;
+        final state = session.stateOf(hex);
+        final washedOut = glare[c] ?? 0;
+        final classified = classifier.classify(
+          patch: patches[c]!,
+          relativeChroma: relative[c]!,
+          options: list,
+          keyOf: (o) => _key(hex, o),
+          colourOf: (o) => colourOf(hex, o),
+          exitsOf: (o) => rules.contentOf(hex, o)?.exitStrengths ?? const {},
+          colours: colours,
+          // "It probably hasn't changed" only counts for a hex the app has
+          // actually seen; on one it has never read, a tile is no less likely
+          // than bare map.
+          stepPenalty: state.basisKnown ? 1.0 : 0.25,
+          reference: state.reference == null
+              ? null
+              : HexPatch.decode(state.reference!, state.referenceChroma ?? Offset.zero),
+          // Glare washes colour out before it hides track.
+          colourWeight: 1 - 0.75 * washedOut,
+          crossings: crossings[c],
+          explain: explain == null ? null : (o, parts) => explain!(c, o, parts),
+        );
+        // Glare can hide a tile, but it can't put track where there is none.
+        // So under it, "nothing here" is never taken as read where it would
+        // be news -- where the app didn't already know the hex was bare.
+        final knownBare = state.basisKnown && state.basis == null;
+        final reading = classified.option.isPrinted && !knownBare && washedOut > 0
+            ? TileReading(
+                option: classified.option,
+                confidence: classified.confidence * (1 - 0.6 * washedOut),
+                ranked: classified.ranked,
+              )
+            : classified;
+        results.add(HexReading(
+          hex: hex,
+          reading: reading,
+          patch: patches[c]!,
+          picture: pictures[c] ??=
+              img.encodePng(HexPatch.picture(rgb, boardToImage, c)),
+          tokens: (glare[c] ?? 0) > 0.5
+              ? const {}
+              : _tokens(rgb, boardToImage, hex, reading.option),
+          isUpgrade: _isUpgrade(state.basis, reading.option),
+          glare: washedOut,
+        ));
+      });
+      return results;
+    }
+
+    var results = readAll(colours);
+    // A game the app knows little of yet -- joined part-way, say -- has
+    // nothing to measure its tiles' colours on, and the colours it starts
+    // from were measured under some other light. So the tiles this photo
+    // reads clearly measure them instead, and if that moves them much,
+    // everything is read again.
+    final sampled = <TileColor, List<Offset>>{};
+    for (final r in results) {
+      if (r.reading.confidence < _calibratingConfidence ||
+          r.glare > _glaredOut) {
+        continue;
+      }
+      final colour = colourOf(r.hex, r.reading.option);
+      if (measuredColours.contains(colour)) continue;
+      sampled.putIfAbsent(colour, () => []).add(relative[r.hex.coord]!);
+    }
+    final moved = {
+      for (final e in sampled.entries)
+        if (e.value.length >= 3 &&
+            (_median(e.value) - colours.expected(e.key)).distance >
+                colours.spread)
+          e.key: _median(e.value),
+    };
+    if (moved.isNotEmpty) {
+      colours = colours.withCentroids(moved);
+      results = readAll(colours);
+    }
     return _openLinesTogether(results);
+  }
+
+  /// How sure a reading of this photo has to be for its tile's colour to
+  /// count as a sample of that colour.
+  static const double _calibratingConfidence = 0.5;
+
+  /// How strongly track runs on across each side of [hex] into the next
+  /// hex (see [HexPatch.crossingsOf]), leaving out sides that face off the
+  /// map or along a printed border nothing crosses.
+  List<double> _crossings(RgbImage rgb, Homography boardToImage, MapHex hex) {
+    final measured = HexPatch.crossingsOf(rgb, boardToImage, hex.coord);
+    return [
+      for (int k = 0; k < 6; k++)
+        hex.printed.impassable.contains(k) ||
+                !title.map.contains(Board.neighborOf(hex.coord, k))
+            ? 0.0
+            : measured[k],
+    ];
   }
 
   /// A line printed for later opening opens all at once -- 1844's Gotthard
@@ -854,23 +922,88 @@ class BoardReader {
         upgrade: r.isUpgrade,
       );
       if (!r.reading.isReliable) continue;
+      // City by city: a city's circles are all alike in play, and which end
+      // of a row of them comes first is something a photo can't tell -- the
+      // row looks the same turned end to end -- so a token the user put in
+      // one circle and a photo shows in the other is the same token, not a
+      // second one.
+      final byCity = <String, Map<int, TokenDetection>>{};
       r.tokens.forEach((circle, detection) {
-        final current = session.tokens[circle];
-        final open = current == null || session.tokenDoubts.contains(circle);
-        if (!open || detection.confidence < _tokenConfidence) return;
-        final company = detection.company;
-        if (detection.present && company != null) {
-          session.tokens[circle] = company.id;
-          if (detection.companyConfidence >= _tokenConfidence) {
-            session.tokenDoubts.remove(circle);
-          } else {
-            session.tokenDoubts.add(circle);
-          }
-        } else if (!detection.present && current != null) {
-          session.tokens.remove(circle);
-          session.tokenDoubts.remove(circle);
-        }
+        final (city, slot) = GameSession.circleOf(circle);
+        (byCity[city] ??= {})[slot] = detection;
       });
+      byCity.forEach((city, detections) =>
+          _applyCity(session, city, detections));
+    }
+  }
+
+  /// Folds what a photo shows in the circles of [city] into [session].
+  static void _applyCity(
+    GameSession session,
+    String city,
+    Map<int, TokenDetection> detections,
+  ) {
+    String key(int slot) => GameSession.slotId(city, slot);
+    final slots = detections.keys.toList()..sort();
+    final held = <int, String>{
+      for (final s in slots) s: ?session.tokens[key(s)],
+    };
+    // Each company seen clearly is matched to its token already in the
+    // city, in whichever circle -- the same one, if it is there.
+    final matched = <int>{};
+    final newcomers = <(int, TokenDetection)>[];
+    for (final s in slots) {
+      final d = detections[s]!;
+      final company = d.company?.id;
+      if (!d.present || company == null || d.confidence < _tokenConfidence) {
+        continue;
+      }
+      final holding = [
+        for (final e in held.entries)
+          if (e.value == company && !matched.contains(e.key)) e.key,
+      ];
+      if (holding.isEmpty) {
+        newcomers.add((s, d));
+        continue;
+      }
+      final circle = holding.contains(s) ? s : holding.first;
+      matched.add(circle);
+      if (d.companyConfidence >= _tokenConfidence) {
+        session.tokenDoubts.remove(key(circle));
+      }
+    }
+    // What the user set or confirmed stays; a token the app put down
+    // without being sure whose it is, and that nothing seen here matches,
+    // can be replaced.
+    bool changeable(int s) =>
+        !held.containsKey(s) ||
+        (session.tokenDoubts.contains(key(s)) && !matched.contains(s));
+    for (final (slot, d) in newcomers) {
+      final company = d.company!.id;
+      // A company has one token in a city at most.
+      if ([for (final s in matched) held[s]].contains(company)) continue;
+      final circle =
+          changeable(slot) ? slot : slots.where(changeable).firstOrNull;
+      if (circle == null) continue;
+      session.tokens[key(circle)] = company;
+      held[circle] = company;
+      matched.add(circle);
+      if (d.companyConfidence >= _tokenConfidence) {
+        session.tokenDoubts.remove(key(circle));
+      } else {
+        session.tokenDoubts.add(key(circle));
+      }
+    }
+    // An unsure token in a circle the photo clearly shows empty, and seen
+    // nowhere else in the city, was never there.
+    for (final s in slots) {
+      if (!held.containsKey(s) || matched.contains(s)) continue;
+      if (!session.tokenDoubts.contains(key(s))) continue;
+      final d = detections[s]!;
+      if (!d.present && d.confidence >= _tokenConfidence) {
+        session.tokens.remove(key(s));
+        session.tokenDoubts.remove(key(s));
+      }
     }
   }
 

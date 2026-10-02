@@ -279,13 +279,10 @@ class TileRenderer {
     }
     hexPath.close();
     canvas.drawPath(hexPath, Paint()..color = backgroundFor(def.color));
-    canvas.drawPath(
-      hexPath,
-      Paint()
-        ..color = trackColor
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = size * 0.015,
-    );
+    // Everything printed on the tile stays on it: track drawn with round
+    // ends would otherwise poke out past the sides.
+    canvas.save();
+    canvas.clipPath(hexPath);
 
     // Impassable borders: a heavy line along the side, as printed on maps.
     final borderPaint = Paint()
@@ -402,14 +399,28 @@ class TileRenderer {
           break; // the hex's own colour says what it is
       }
     }
+    canvas.restore();
+    canvas.drawPath(
+      hexPath,
+      Paint()
+        ..color = trackColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = size * 0.015,
+    );
   }
 
   /// A token slot's radius, as a share of the circumradius, for [station].
-  /// Measured on 1844's tiles: a third of the hex for a city of one slot, a
-  /// little less where two share a city. (tobymao draws them at a quarter,
-  /// which made every city tile a poor match for its photo.)
-  static double slotRadiusFor(TileStation station) =>
-      station.slots > 1 ? 0.30 : 0.33;
+  /// Measured on 1844's tiles: a third of the hex for a city of one slot,
+  /// and a little more for each of two sharing a city, whose capsule reaches
+  /// four fifths of the way to the sides it points at (close-ups of I6's 15,
+  /// Geneva and a 611); three round the middle are smaller. (tobymao draws
+  /// them at a quarter, which made every city tile a poor match for its
+  /// photo.)
+  static double slotRadiusFor(TileStation station) => switch (station.slots) {
+        <= 1 => 0.33,
+        2 => 0.34,
+        _ => 0.36,
+      };
 
   /// Which way the row of slots of a city in the middle of a tile runs when
   /// the tile isn't turned, in degrees clockwise from east, as the tiles are
@@ -454,8 +465,10 @@ class TileRenderer {
     }
     final r = radius * slotRadiusFor(station);
     if (slots == 2) return [pos - row * r, pos + row * r];
-    // Three or more: round the middle, starting across the row.
-    final ring = r * (slots == 3 ? 1.16 : 1.42);
+    // Three or more: round the middle, starting across the row. 1844's
+    // three-slot city (909) has them just apart, centred over two fifths of
+    // the way to the corners.
+    final ring = r * (slots == 3 ? 1.2 : 1.42);
     final start = math.atan2(row.dy, row.dx) - math.pi / 2;
     return [
       for (int i = 0; i < slots; i++)
@@ -465,7 +478,8 @@ class TileRenderer {
     ];
   }
 
-  /// A city: one ring per token slot, in a row facing out of the hex.
+  /// A city: one ring per token slot, in a row facing out of the hex. Two
+  /// slots are printed as a capsule, the band between them white too.
   static void _paintCity(
     Canvas canvas,
     TileDefinition def,
@@ -477,8 +491,37 @@ class TileRenderer {
     int slotTurn,
   ) {
     final ringRadius = radius * slotRadiusFor(station);
-    for (final at in slotPositions(def, station.index, center, radius,
-        extraTurn: slotTurn)) {
+    final slots =
+        slotPositions(def, station.index, center, radius, extraTurn: slotTurn);
+    if (slots.length == 3) {
+      // The space between three is white too.
+      canvas.drawPath(
+          Path()
+            ..moveTo(slots[0].dx, slots[0].dy)
+            ..lineTo(slots[1].dx, slots[1].dy)
+            ..lineTo(slots[2].dx, slots[2].dy)
+            ..close(),
+          Paint()..color = Colors.white);
+    }
+    if (slots.length == 2) {
+      final row = slots[1] - slots[0];
+      final across = Offset(-row.dy, row.dx) / row.distance * ringRadius;
+      final band = Path()
+        ..moveTo(slots[0].dx + across.dx, slots[0].dy + across.dy)
+        ..lineTo(slots[1].dx + across.dx, slots[1].dy + across.dy)
+        ..lineTo(slots[1].dx - across.dx, slots[1].dy - across.dy)
+        ..lineTo(slots[0].dx - across.dx, slots[0].dy - across.dy)
+        ..close();
+      canvas.drawPath(band, Paint()..color = Colors.white);
+      final edge = Paint()
+        ..color = trackColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = size * 0.03;
+      canvas
+        ..drawLine(slots[0] + across, slots[1] + across, edge)
+        ..drawLine(slots[0] - across, slots[1] - across, edge);
+    }
+    for (final at in slots) {
       canvas
         ..drawCircle(at, ringRadius, Paint()..color = Colors.white)
         ..drawCircle(

@@ -2,8 +2,10 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:eighteen_xx_calculator/geometry/homography.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
+import 'package:eighteen_xx_calculator/processing/guide_follower.dart';
 import 'package:eighteen_xx_calculator/screens/capture.dart';
 import 'package:eighteen_xx_calculator/services/app_settings.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +65,37 @@ void main() {
     expect(middle.dy, closeTo(300, 1e-6));
     // The map's rows run down the frame, as from the board's east edge.
     expect(GridFit.facingOf(h, target.boardCenter), closeTo(math.pi / 2, 1e-9));
+  });
+
+  test('a guide locked onto the board in a preview holds on the photo', () {
+    final target = title.map.byId('F13')!.coord;
+    final guide = CaptureGuide(target: target, hexes: const [], instruction: '');
+    const preview = Size(640, 360), photo = Size(1920, 1080);
+    // Locked on with the camera tilted: perspective the guide's own turn
+    // and scale can't give.
+    final tilted = Homography.fromFourPoints(const [
+      Offset(0, 0),
+      Offset(640, 0),
+      Offset(640, 360),
+      Offset(0, 360),
+    ], const [
+      Offset(60, 40),
+      Offset(580, 40),
+      Offset(640, 360),
+      Offset(0, 360),
+    ])!;
+    final placed = guide.homographyFor(preview).then(tilted);
+    final locked = guide.lockedTo(placed, preview);
+    expect(locked.locked, isNotNull);
+    for (final c in [target, ...title.map.around([target], 1)]) {
+      final inPreview = placed.apply(c.boardCenter);
+      final inPhoto = locked.homographyFor(photo).apply(c.boardCenter);
+      expect(inPhoto.dx, closeTo(inPreview.dx * 3, 1e-6));
+      expect(inPhoto.dy, closeTo(inPreview.dy * 3, 1e-6));
+    }
+    // Following it flat afterwards doesn't undo the lock.
+    expect(locked.adjusted(GuideAdjustment.none).locked, isNotNull);
+    expect(guide.lockedTo(null, preview).locked, isNull);
   });
 
   test('the overlay starts at half strength and remembers a change', () async {

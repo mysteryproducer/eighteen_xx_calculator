@@ -17,14 +17,21 @@ class RevenueReading {
   String toString() => recognized ? '$value' : 'unread("$rawText")';
 }
 
-/// A word the platform's text recognizer read, and where it lies across the
-/// image: from 0 at the left edge to 1 at the right.
+/// A word (or a line) the platform's text recognizer read, and where it
+/// lies in the image: from 0 at the left edge to 1 at the right, and from 0
+/// at the top to 1 at the bottom.
 class RecognizedWord {
   final String text;
   final double left;
   final double right;
+  final double top;
+  final double bottom;
 
-  const RecognizedWord(this.text, this.left, this.right);
+  const RecognizedWord(this.text, this.left, this.right,
+      {this.top = 0, this.bottom = 1});
+
+  double get width => right - left;
+  double get height => bottom - top;
 
   @override
   String toString() =>
@@ -123,11 +130,42 @@ class RevenueOcr {
             word['text'] as String,
             (word['left'] as num).toDouble(),
             (word['right'] as num).toDouble(),
+            top: (word['top'] as num?)?.toDouble() ?? 0,
+            bottom: (word['bottom'] as num?)?.toDouble() ?? 1,
           ),
       ];
     } on MissingPluginException {
       throw const TextRecognitionUnavailable(
         'Word positions are not available on this device.',
+      );
+    } on PlatformException catch (e) {
+      debugPrint('Text recognition failed: ${e.code} ${e.message}');
+      return const [];
+    }
+  }
+
+  /// The lines of text the platform recognizer finds in [image] -- PNG or
+  /// JPEG bytes -- with where each lies; empty if it fails on this image.
+  /// Throws [TextRecognitionUnavailable] if there is no recognizer.
+  static Future<List<RecognizedWord>> recognizeLines(Uint8List image) async {
+    try {
+      final lines = await channel.invokeListMethod<Map<Object?, Object?>>(
+        'recognizeTextLines',
+        {'image': image},
+      );
+      return [
+        for (final line in lines ?? const <Map<Object?, Object?>>[])
+          RecognizedWord(
+            line['text'] as String,
+            (line['left'] as num).toDouble(),
+            (line['right'] as num).toDouble(),
+            top: (line['top'] as num).toDouble(),
+            bottom: (line['bottom'] as num).toDouble(),
+          ),
+      ];
+    } on MissingPluginException {
+      throw const TextRecognitionUnavailable(
+        'Text recognition is not available on this device.',
       );
     } on PlatformException catch (e) {
       debugPrint('Text recognition failed: ${e.code} ${e.message}');

@@ -11,6 +11,10 @@ class TitleData {
   final List<TileData> tiles;
   final List<CompanyData> companies;
 
+  /// The trains, and the phases they bring.
+  final List<TrainData> trains;
+  final List<PhaseData> phases;
+
   /// Whether the map is printed with flat-topped hexes (1889's is) rather
   /// than pointy-topped ones; its coordinates are then column letter and
   /// row number.
@@ -34,6 +38,8 @@ class TitleData {
     required this.hexes,
     required this.tiles,
     this.companies = const [],
+    this.trains = const [],
+    this.phases = const [],
     this.flat = false,
     this.tunnelHexes = const [],
     this.tunnelTiles = const [],
@@ -83,6 +89,73 @@ class CompanyData {
   /// tobymao's kind of company (`major`, `minor`, `pre-sbb`...).
   final String? kind;
 
+  /// What each of the company's station tokens costs to lay, the home
+  /// token's first; and the share certificates it is divided into, as
+  /// percentages, the director's first.
+  final List<int> tokens;
+  final List<int> shares;
+
   const CompanyData(this.id, this.name, this.color,
-      {this.textColor, this.home, this.homeCity, this.kind});
+      {this.textColor,
+      this.home,
+      this.homeCity,
+      this.kind,
+      this.tokens = const [],
+      this.shares = const []});
+}
+
+/// One kind of train, as the title lists it.
+class TrainData {
+  final String name;
+
+  /// How far it runs: stops (hexes for some titles' trains, see
+  /// `GameTitle`), or for an express how many stops it may visit.
+  final int distance;
+
+  /// For an express -- which visits any number of stops and is paid for
+  /// the best few -- how many are paid for. Null for other trains.
+  final int? pays;
+
+  final int price;
+
+  /// The train whose arrival scraps this one.
+  final String? rustsOn;
+
+  /// The train this is a variant of (`2` for `2H`), or its own name.
+  final String base;
+
+  /// How many there are.
+  final int count;
+
+  /// Whether towns are left out of [distance] and all paid for: 1854's
+  /// "+" trains, which run to so many cities and any number of towns.
+  final bool freeTowns;
+
+  const TrainData(this.name,
+      {required this.distance,
+      this.pays,
+      this.freeTowns = false,
+      this.price = 0,
+      this.rustsOn,
+      String? base,
+      this.count = 0})
+      : base = base ?? name;
+}
+
+/// One phase of the game.
+class PhaseData {
+  final String name;
+
+  /// The train whose first sale starts it; null for the first.
+  final String? on;
+
+  /// The most trains a company may own, by kind of company; under '' for
+  /// every kind.
+  final Map<String, int> trainLimit;
+
+  /// The colours of tile that can be laid.
+  final List<String> tiles;
+
+  const PhaseData(this.name,
+      {this.on, required this.trainLimit, this.tiles = const []});
 }

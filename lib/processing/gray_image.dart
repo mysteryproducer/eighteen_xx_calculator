@@ -119,6 +119,19 @@ class GrayImage {
     return out;
   }
 
+  /// This image stretched [factor] times taller, sampled between pixels.
+  GrayImage stretchedTall(double factor) {
+    final th = math.max(1, (height * factor).round());
+    final out = GrayImage(width, th);
+    for (int y = 0; y < th; y++) {
+      final sy = (y + 0.5) / factor - 0.5;
+      for (int x = 0; x < width; x++) {
+        out.data[y * width + x] = sample(x.toDouble(), sy);
+      }
+    }
+    return out;
+  }
+
   GrayImage scaled(double scale) {
     final tw = math.max(1, (width * scale).round());
     final th = math.max(1, (height * scale).round());

@@ -430,6 +430,47 @@ void main() {
       expect(session.tokens[bernStation], 'GB');
     });
 
+    test("a token seen in a city's other circle is the one already there",
+        () {
+      // A city of two circles: which end of the row comes first, a photo
+      // can't tell.
+      final session = newGame();
+      String circle(int slot) =>
+          GameSession.slotId('${bern.coord.row}_${bern.coord.col}_0', slot);
+      session.tokens[circle(0)] = 'BLS';
+      BoardReader.apply(session, [
+        HexReading(
+          hex: bern,
+          reading: const TileReading(
+            option: TileOption.printed,
+            confidence: 0.9,
+            ranked: [(TileOption.printed, 0.0)],
+          ),
+          patch: HexPatch(Float32List(HexPatch.size * HexPatch.size),
+              Offset.zero, Float32List(6)),
+          picture: Uint8List(0),
+          tokens: {circle(0): emptySlot, circle(1): tokenOf('BLS')},
+        ),
+      ], source: HexSource.overview);
+      expect(session.tokens, {circle(0): 'BLS'});
+      // Another company in the other circle is new, though.
+      BoardReader.apply(session, [
+        HexReading(
+          hex: bern,
+          reading: const TileReading(
+            option: TileOption.printed,
+            confidence: 0.9,
+            ranked: [(TileOption.printed, 0.0)],
+          ),
+          patch: HexPatch(Float32List(HexPatch.size * HexPatch.size),
+              Offset.zero, Float32List(6)),
+          picture: Uint8List(0),
+          tokens: {circle(0): tokenOf('BLS'), circle(1): tokenOf('GB')},
+        ),
+      ], source: HexSource.overview);
+      expect(session.tokens, {circle(0): 'BLS', circle(1): 'GB'});
+    });
+
     test('no tokens are read off a hex whose tile was in doubt', () {
       // Where the tile is unsure, so is where its cities are.
       final session = newGame();
@@ -470,6 +511,11 @@ void main() {
           confidence: 0.8,
           source: HexSource.closeUp);
       session.revenueOverrides['x'] = 90;
+      session.addPlayer('Ann');
+      session.addPlayer('Bob');
+      session.setHolding('Ann', 'GB', [50, 25]);
+      session.companyTrains['GB'] = ['3H', '2H'];
+      session.charterTokens['GB'] = 1;
       await store.save(session);
 
       final loaded = (await store.list(titleId: '1844')).single;
@@ -493,6 +539,40 @@ void main() {
       expect(suggestion?.tile?.rotation, 2);
       expect(suggestion?.confidence, 0.8);
       expect(loaded.revenueOverrides['x'], 90);
+      expect(loaded.players, ['Ann', 'Bob']);
+      expect(loaded.holdings, {
+        'Ann': {
+          'GB': [50, 25]
+        }
+      });
+      expect(loaded.percentHeld('Ann', 'GB'), 75);
+      expect(loaded.companyTrains, {
+        'GB': ['3H', '2H']
+      });
+      expect(loaded.charterTokens, {'GB': 1});
+    });
+
+    test('players keep their certificates through a rename, and lose them '
+        'when they leave', () {
+      final session = newGame()
+        ..addPlayer('Ann')
+        ..addPlayer('Ann')
+        ..addPlayer('Bob')
+        ..setHolding('Ann', 'GB', [50]);
+      expect(session.players, ['Ann', 'Bob']);
+      session.renamePlayer('Ann', 'Anne');
+      expect(session.players, ['Anne', 'Bob']);
+      expect(session.percentHeld('Anne', 'GB'), 50);
+      // No two players with one name.
+      session.renamePlayer('Bob', 'Anne');
+      expect(session.players, ['Anne', 'Bob']);
+      session.setHolding('Anne', 'GB', []);
+      expect(session.holdings, isEmpty);
+      session
+        ..setHolding('Bob', 'NOB', [25])
+        ..removePlayer('Bob');
+      expect(session.players, ['Anne']);
+      expect(session.holdings, isEmpty);
     });
 
     test('sessions are listed per title, newest first', () async {

@@ -651,5 +651,87 @@ void main() {
       expect(route, contains('C14'));
       expect(_routeRevenue(tester), 30); // a 20 city and a 10 town
     });
+
+    /// Basel and Liestal joined, SCB's token in Basel, and two players
+    /// with SCB certificates.
+    void basel(GameSession session) {
+      final basel = title.map.byId('C12')!;
+      session.setManually(basel, const PlacedTile('57', rotation: eastWest));
+      session.setManually(
+          title.map.byId('C14')!, const PlacedTile('4', rotation: eastWest));
+      session.tokens[GameSession.slotId(
+          '${basel.coord.row}_${basel.coord.col}_0', 0)] = 'SCB';
+      session
+        ..addPlayer('Ann')
+        ..addPlayer('Bob')
+        ..setHolding('Ann', 'SCB', [50])
+        ..setHolding('Bob', 'SCB', [25]);
+    }
+
+    Future<void> chooseScb(WidgetTester tester) async {
+      await tester.tap(find.text('Any company'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('SCB').hitTestable().last);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets("a company's trains run and pay its shareholders",
+        (tester) async {
+      await openSession(tester, setUp: (session) {
+        basel(session);
+        session.companyTrains['SCB'] = ['2', '2H'];
+      });
+      await chooseScb(tester);
+      expect(find.text('SCB runs 2, 2H.'), findsOneWidget);
+      // Trains noted: no stop count to set.
+      expect(find.text('Stops'), findsNothing);
+      await tester.tap(find.text('Find routes'));
+      await tester.pumpAndSettle();
+      // One train runs Basel to Liestal; there's no other track out of
+      // Basel for the second.
+      expect(find.textContaining('C12 - C14 pays 30'), findsOneWidget);
+      expect(find.textContaining('nowhere left to run'), findsOneWidget);
+      expect(find.text('SCB earns 30.'), findsOneWidget);
+      expect(find.text('Ann 15 (50%)   Bob 7 (25%)'), findsOneWidget);
+    });
+
+    testWidgets("a company's trains and tokens are set from the route panel",
+        (tester) async {
+      final session = await openSession(tester, setUp: basel);
+      await chooseScb(tester);
+      expect(find.text('No trains noted for SCB.'), findsOneWidget);
+      await tester.tap(find.text('Trains and tokens'));
+      await tester.pumpAndSettle();
+      for (final train in ['3H', '2H', '2']) {
+        await tester.tap(find.widgetWithText(ActionChip, train));
+        await tester.pumpAndSettle();
+      }
+      // A pre-SBB company runs two trains at most.
+      expect(find.textContaining('at most 2 trains in phase 3, not 3'),
+          findsOneWidget);
+      await tester.tap(find.descendant(
+          of: find.widgetWithText(InputChip, '2'),
+          matching: find.byTooltip('Delete')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('at most 2 trains'), findsNothing);
+      await tester.tap(find.byTooltip('One more'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('One more'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(session.companyTrains['SCB'], ['3H', '2H']);
+      expect(session.charterTokens['SCB'], 1);
+      expect(find.text('SCB runs 3H, 2H.'), findsOneWidget);
+    });
+
+    testWidgets('the camera takes a photo of the board or of a player area',
+        (tester) async {
+      await openSession(tester);
+      await tester.tap(find.byTooltip('Take a photo'));
+      await tester.pumpAndSettle();
+      expect(find.text('The whole board'), findsOneWidget);
+      expect(find.text("A player's area"), findsOneWidget);
+    });
   });
 }

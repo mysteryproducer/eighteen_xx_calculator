@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
@@ -7,6 +8,7 @@ import '../geometry/homography.dart';
 import '../models/board.dart';
 import '../models/board_graph.dart';
 import '../models/company.dart';
+import '../models/company_rules.dart';
 import '../models/game_session.dart';
 import '../models/game_title.dart';
 import '../models/map_layout.dart';
@@ -15,17 +17,22 @@ import '../models/tile_rules.dart';
 import '../processing/board_reader.dart';
 import '../processing/grid_detector.dart';
 import '../processing/plate_reader.dart';
+import '../processing/play_area_reader.dart';
 import '../processing/revenue_ocr.dart';
 import '../processing/revenue_resolver.dart';
 import '../processing/route_finder.dart';
 import '../processing/tile_renderer.dart';
+import '../processing/train_routes.dart';
 import '../services/photo_pipeline.dart';
 import '../services/session_store.dart';
 import '../services/training_log.dart';
 import '../widgets/board_map.dart';
+import '../widgets/company_assets.dart';
 import '../widgets/tile_choices.dart';
 import 'align_board.dart';
 import 'capture.dart';
+import 'play_area_review.dart';
+import 'players_screen.dart';
 
 /// The drawn board, so tests can find it without depending on the tree.
 const Key sessionBoardKey = ValueKey('session-board');
@@ -71,6 +78,13 @@ class _SessionBoardState extends State<SessionBoard> {
   Company? _company;
   int _maxStops = 4;
   RouteResult? _route;
+
+  /// The selected company's trains' runs, when it has trains noted.
+  CompanyRuns? _runs;
+
+  /// Whether the company pays out half its revenue (where the title lets
+  /// it), for what each player is paid.
+  bool _halfPay = false;
   HexCoord? _highlighted;
   bool _busy = false;
   String _status = '';
@@ -124,6 +138,7 @@ class _SessionBoardState extends State<SessionBoard> {
       readings: _revenueReadings,
     );
     _route = null;
+    _runs = null;
   }
 
   Future<void> _save() async {
@@ -186,6 +201,61 @@ class _SessionBoardState extends State<SessionBoard> {
       if (mounted) _snack('$e');
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Photographs a player's area: reads the charters, trains, tokens and
+  /// certificates in it, has the user confirm them, then works out the
+  /// first charter's routes.
+  Future<void> _photographPlayArea() async {
+    final path = (await capturePhoto(context))?.path;
+    if (path == null || !mounted) return;
+    setState(() {
+      _busy = true;
+      _status = 'Reading the photo...';
+    });
+    PlayAreaReading reading;
+    Uint8List preview;
+    try {
+      final (photo, jpeg) = await widget.pipeline.load(path);
+      preview = jpeg;
+      try {
+        reading = await widget.pipeline.readPlayArea(widget.title, photo);
+      } on TextRecognitionUnavailable catch (e) {
+        if (mounted) _snack('${e.message} Enter what the photo shows by hand.');
+        reading = const PlayAreaReading();
+      }
+    } catch (e) {
+      if (mounted) _snack('$e');
+      return;
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    if (!mounted) return;
+    final confirmed = await Navigator.of(context).push<PlayAreaConfirmed>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => PlayAreaReview(
+          title: widget.title,
+          session: _session,
+          reading: reading,
+          preview: preview,
+        ),
+      ),
+    );
+    if (confirmed == null || !mounted) return;
+    confirmed.applyTo(_session);
+    await _save();
+    if (!mounted) return;
+    final first = confirmed.companies.firstOrNull;
+    setState(() {
+      if (first != null) _company = widget.title.companyById(first);
+      _route = null;
+      _runs = null;
+    });
+    if (first != null &&
+        (_session.companyTrains[first]?.isNotEmpty ?? false)) {
+      _findRoute();
     }
   }
 
@@ -1270,6 +1340,32 @@ class _SessionBoardState extends State<SessionBoard> {
       return;
     }
     final company = _company;
+    final trains = company == null
+        ? const <String>[]
+        : _session.companyTrains[company.id] ?? const <String>[];
+    if (company != null && trains.isNotEmpty) {
+      if (!_graph.stations.any((s) => s.holds(company.id))) {
+        setState(() {
+          _runs = null;
+          _route = null;
+        });
+        _snack('${company.label} has no token on the board, so its trains '
+            'have nowhere to start from.');
+        return;
+      }
+      final runs = TrainRouter(widget.title, _graph, company.id).best(trains);
+      setState(() {
+        _runs = runs;
+        _route = null;
+      });
+      if (runs.revenue == 0) {
+        _snack("No route found for ${company.label}'s trains. Check the "
+            'track joins up.');
+      } else if (!runs.complete) {
+        _snack('Too many routes to try them all: these are the best found.');
+      }
+      return;
+    }
     final homes = company == null
         ? <StationNode>[]
         : _graph.stations.where((s) => s.holds(company.id)).toList();
@@ -1285,7 +1381,10 @@ class _SessionBoardState extends State<SessionBoard> {
         if (candidate.revenue > result.revenue) result = candidate;
       }
     }
-    setState(() => _route = result);
+    setState(() {
+      _route = result;
+      _runs = null;
+    });
     if (result.isEmpty) {
       _snack('No route found. Check the track joins up.');
     } else if (homes.isEmpty && company != null) {
@@ -1340,16 +1439,38 @@ class _SessionBoardState extends State<SessionBoard> {
             onPressed: _busy ? null : () => setState(() => _choosing = {}),
             icon: const Icon(Icons.center_focus_strong),
           ),
-          IconButton(
-            tooltip: 'Photograph the whole board',
-            onPressed: _busy ? null : () => _photographBoard(),
+          PopupMenuButton<String>(
+            tooltip: 'Take a photo',
+            enabled: !_busy,
             icon: const Icon(Icons.photo_camera),
+            onSelected: (choice) => choice == 'area'
+                ? _photographPlayArea()
+                : _photographBoard(),
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'board',
+                child: ListTile(
+                  leading: Icon(Icons.grid_on),
+                  title: Text('The whole board'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'area',
+                child: ListTile(
+                  leading: Icon(Icons.style),
+                  title: Text("A player's area"),
+                  subtitle: Text('Charters, trains, tokens, certificates'),
+                ),
+              ),
+            ],
           ),
           PopupMenuButton<String>(
             tooltip: 'More',
             enabled: !_busy,
             onSelected: (choice) {
               switch (choice) {
+                case 'players':
+                  _editPlayers();
                 case 'calibrate':
                   _calibrateColours();
                 case 'forget':
@@ -1358,6 +1479,10 @@ class _SessionBoardState extends State<SessionBoard> {
               }
             },
             itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'players',
+                child: Text('Players and shares'),
+              ),
               PopupMenuItem(
                 value: 'calibrate',
                 child: Text(_session.colourProfile == null
@@ -1434,7 +1559,12 @@ class _SessionBoardState extends State<SessionBoard> {
                             session: _session,
                             graph: _graph,
                             geometry: _geometry,
-                            route: _route,
+                            routes: [
+                              if (_runs case final runs?)
+                                for (final run in runs.runs) run.route
+                              else
+                                ?_route,
+                            ],
                             highlighted: _highlighted,
                             misfits: _misfits,
                             tokenProblems: _tokenProblems,
@@ -1544,6 +1674,10 @@ class _SessionBoardState extends State<SessionBoard> {
 
   Widget _routePanel() {
     final route = _route;
+    final company = _company;
+    final trains = company == null
+        ? const <String>[]
+        : _session.companyTrains[company.id] ?? const <String>[];
     final tiles = _session.hexes.values.where((s) => s.tile != null).length;
     String? count(Iterable<String> doubts, Map<String, Object> layer,
         String one, String many) {
@@ -1613,36 +1747,60 @@ class _SessionBoardState extends State<SessionBoard> {
                     onChanged: (v) => setState(() {
                       _company = widget.title.companyById(v);
                       _route = null;
+                      _runs = null;
                     }),
                   ),
                 ),
                 const SizedBox(width: 12),
-                const Text('Stops'),
-                IconButton(
-                  icon: const Icon(Icons.remove),
-                  onPressed: _maxStops <= 1
-                      ? null
-                      : () => setState(() {
-                            _maxStops--;
-                            _route = null;
-                          }),
-                ),
-                Text('$_maxStops'),
-                IconButton(
-                  icon: const Icon(Icons.add),
-                  onPressed: _maxStops >= 12
-                      ? null
-                      : () => setState(() {
-                            _maxStops++;
-                            _route = null;
-                          }),
-                ),
+                // Without trains noted, a single run of so many stops.
+                if (trains.isEmpty) ...[
+                  const Text('Stops'),
+                  IconButton(
+                    icon: const Icon(Icons.remove),
+                    onPressed: _maxStops <= 1
+                        ? null
+                        : () => setState(() {
+                              _maxStops--;
+                              _route = null;
+                            }),
+                  ),
+                  Text('$_maxStops'),
+                  IconButton(
+                    icon: const Icon(Icons.add),
+                    onPressed: _maxStops >= 12
+                        ? null
+                        : () => setState(() {
+                              _maxStops++;
+                              _route = null;
+                            }),
+                  ),
+                ],
                 FilledButton(
                   onPressed: _busy ? null : _findRoute,
-                  child: const Text('Find route'),
+                  child: Text(trains.isEmpty ? 'Find route' : 'Find routes'),
                 ),
               ],
             ),
+            if (company != null)
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      trains.isEmpty
+                          ? 'No trains noted for ${company.label}.'
+                          : '${company.label} runs ${trains.join(', ')}.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _busy ? null : () => _editAssets(company),
+                    icon: const Icon(Icons.train, size: 18),
+                    label: const Text('Trains and tokens'),
+                  ),
+                ],
+              ),
+            if (_runs case final runs? when company != null)
+              ..._runLines(runs, company),
             if (route != null && !route.isEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -1657,9 +1815,118 @@ class _SessionBoardState extends State<SessionBoard> {
       ),
     );
   }
+
+  // --- Players and companies ---------------------------------------------
+
+  /// Each train's run, what the company earns, and what each player
+  /// holding its certificates is paid.
+  List<Widget> _runLines(CompanyRuns runs, Company company) {
+    final theme = Theme.of(context).textTheme;
+    String stop(StationNode s) => _map.at(s.hex)?.id ?? '${s.hex}';
+    final rules = CompanyRules(widget.title);
+    final holders = [
+      for (final p in _session.players)
+        if (_session.percentHeld(p, company.id) > 0) p,
+    ];
+    return [
+      for (int i = 0; i < runs.runs.length; i++)
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                color: BoardMapPainter.routeColours[
+                    i % BoardMapPainter.routeColours.length],
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  runs.runs[i].runs
+                      ? '${runs.runs[i].train}: '
+                          '${runs.runs[i].stops.map(stop).join(' - ')} '
+                          'pays ${runs.runs[i].revenue}'
+                          '${runs.runs[i].bonus == 0 ? '' : ' (${runs.runs[i].bonus} of it bonus)'}'
+                      : '${runs.runs[i].train}: nowhere left to run',
+                  style: theme.bodyMedium,
+                ),
+              ),
+            ],
+          ),
+        ),
+      Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${company.label} earns ${runs.revenue}'
+                '${_halfPay ? ', and pays out half: ${runs.revenue ~/ 2}' : ''}.',
+                style: theme.bodyMedium?.copyWith(fontWeight: FontWeight.bold),
+              ),
+            ),
+            if (widget.title.halfPay)
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('Full')),
+                  ButtonSegment(value: true, label: Text('Half')),
+                ],
+                selected: {_halfPay},
+                onSelectionChanged: (s) => setState(() => _halfPay = s.first),
+              ),
+          ],
+        ),
+      ),
+      Text(
+        holders.isEmpty
+            ? _session.players.isEmpty
+                ? 'Add the players (More, then Players and shares) to see '
+                    'what each is paid.'
+                : 'No player holds ${company.label} certificates yet.'
+            : holders
+                .map((p) => '$p ${rules.dividend(_session, p, company.id, runs.revenue, half: _halfPay)} '
+                    '(${_session.percentHeld(p, company.id)}%)')
+                .join('   '),
+        style: theme.bodySmall,
+      ),
+    ];
+  }
+
+  /// Opens the game's players and their certificates.
+  Future<void> _editPlayers() async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => PlayersScreen(
+        title: widget.title,
+        session: _session,
+        onChanged: _save,
+      ),
+    ));
+    if (mounted) setState(() {});
+  }
+
+  /// Sets [company]'s trains and the tokens left on its charter.
+  Future<void> _editAssets(Company company) async {
+    final edited = await editCompanyAssets(context,
+        title: widget.title, session: _session, company: company);
+    if (edited == null || !mounted) return;
+    setState(() {
+      if (edited.trains.isEmpty) {
+        _session.companyTrains.remove(company.id);
+      } else {
+        _session.companyTrains[company.id] = edited.trains;
+      }
+      if (edited.tokens case final tokens?) {
+        _session.charterTokens[company.id] = tokens;
+      }
+      _runs = null;
+    });
+    await _save();
+  }
 }
 
 enum _CloseUpFallback { retry, byHand, skip, stop }
+
 
 /// A mountain railway's revenue plate as printed: a box per phase, in the
 /// phase's colour, with what it pays.

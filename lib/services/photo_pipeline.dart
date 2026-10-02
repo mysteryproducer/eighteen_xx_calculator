@@ -1,14 +1,18 @@
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
 import '../geometry/homography.dart';
 import '../models/board.dart';
+import '../models/game_title.dart';
 import '../models/map_layout.dart';
 import '../processing/grid_detector.dart';
 import '../processing/guide_follower.dart' as follower;
+import '../processing/play_area_reader.dart';
+import '../processing/revenue_ocr.dart';
 
 /// The heavy per-photo work, kept off the UI thread.
 ///
@@ -74,6 +78,22 @@ class PhotoPipeline {
           follower.GrayFrame.fromFourBytes(bytes, width, height, bytesPerRow),
           guide, target));
 
+  /// Where a close-up guide locked onto the board at [current] (board to
+  /// the frame's pixels) has moved to in a preview frame, perspective and
+  /// all; see [follower.trackGuide].
+  Future<Homography?> trackGuide(
+    MapLayout map, {
+    required Uint8List bytes,
+    required int width,
+    required int height,
+    required int bytesPerRow,
+    required Homography current,
+    required HexCoord target,
+  }) =>
+      Isolate.run(() => follower.trackGuide(map,
+          follower.GrayFrame.fromFourBytes(bytes, width, height, bytesPerRow),
+          current, target));
+
   /// Finds the grid in a close-up framed with a guide, helped by what the
   /// game already knows.
   Future<GridFit?> fitCloseUp(
@@ -85,4 +105,25 @@ class PhotoPipeline {
   }) =>
       Isolate.run(() =>
           GridDetector(map).fitCloseUp(photo, guess, target, hints: hints));
+
+  /// Reads a photo of a player's area: the charters, trains, tokens and
+  /// certificates in it. Text recognition runs natively, behind a platform
+  /// channel the main isolate holds, so only the encoding goes to the
+  /// background. Throws [TextRecognitionUnavailable] where the platform
+  /// can't place lines of text.
+  Future<PlayAreaReading> readPlayArea(GameTitle title, img.Image photo) async {
+    final bytes = await Isolate.run(() {
+      // Big enough for a card's small print; a phone's full size would only
+      // slow the encoding down.
+      final longest = math.max(photo.width, photo.height);
+      final sized = longest <= 2400
+          ? photo
+          : img.copyResize(photo,
+              width: photo.width * 2400 ~/ longest,
+              interpolation: img.Interpolation.average);
+      return img.encodeJpg(sized, quality: 92);
+    });
+    final lines = await RevenueOcr.recognizeLines(bytes);
+    return PlayAreaReader(title).read(lines, photo: photo);
+  }
 }

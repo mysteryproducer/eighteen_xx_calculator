@@ -1,13 +1,22 @@
 # Recognition & Route Plotting
 
-Status: sixth pass. The app knows the title it is looking at, finds the hex
+Status: eighth pass. The app knows the title it is looking at, finds the hex
 grid in a photo by itself and corrects the camera's angle, keeps a game session
 between photos, and asks for close-ups of the hexes it isn't sure about. It has
 been through most of a real game of 1844: tiles up to brown, the five-hex
 Furka-Oberalp piece, station tokens, tunnels, mountain railways with their
 plates read, and photos taken under glare and in evening light. 1889, whose
-board is flat-topped, is imported for the next game. Train rules are still the
-one big thing missing (see Deferred).
+board is flat-topped, is imported for the next game. This pass adds the
+companies' side of the table: each company's trains run together under the
+title's train rules, a photo of a player's area reads charters (trains, tokens
+left) and share certificates, and the players' holdings turn a company's
+routes into what each of them is paid. Money isn't tracked, by choice: it
+would take a lot of keeping up, and can't be read from photos. The eighth pass
+came from a fresh game started over the same board, photographed once from an
+angle to dodge the lamp's glare: tiles are now read from how their track runs
+on into the next hex as well as within their own, the cities on the green and
+brown tiles are drawn as they are printed, close-ups can be taken at an
+angle, and charters are read better (see each section).
 
 ## Context
 
@@ -35,7 +44,14 @@ board each time.
    with.
 4. Through the game, photograph just what changed -- one close-up per tile lay --
    and the session keeps up. Everything can still be corrected by tapping.
-5. Ask for the best route for a company, at any point.
+5. Ask for the best routes for a company, at any point: each of its trains
+   runs its own route, under the title's rules.
+6. Photograph a player's area (the camera button's second choice): company
+   charters with their trains and the tokens left on them, and share
+   certificates. Confirm or correct what was read, and say whose
+   certificates they are; the first charter's routes are then worked out.
+7. Players, and the certificates each holds, are kept under More > Players
+   and shares; the route panel shows what each is paid.
 
 ```
 photo
@@ -50,6 +66,13 @@ photo
   -> low-confidence hexes grouped              processing/board_reader.dart
        -> close-ups, framed with a guide       screens/capture.dart
   -> route search over the session's graph     processing/route_finder.dart
+       a route per train, no shared track      processing/train_routes.dart
+
+photo of a player's area
+  -> lines of text, with where each lies       processing/revenue_ocr.dart
+  -> charters, trains, tokens, certificates    processing/play_area_reader.dart
+  -> checked by the rules, confirmed           models/company_rules.dart
+                                               screens/play_area_review.dart
 ```
 
 ## Where the data comes from
@@ -71,6 +94,18 @@ companies that put tokens on the board, with their token colours and home
 cities. 1844 has 131 hexes, 62 tile designs and 15 companies; 1854 has 100, 42
 and 17; 1889 has 52, 40 and 7. (1854 builds its six local railways in code
 from three plain lists; the importer reads the lists.)
+
+From `game.rb`, `trains.rb` and `phases.rb` (1854 keeps them in files of
+their own) it also reads the trains -- how far each runs, what it costs,
+which train scraps it, each variant (1844's 2H) a train of its own -- and the
+phases with their train limits by kind of company; and from `entities.rb`
+each company's kind, token costs (`[0, 40]`: the home token's first) and share
+certificates (`[50, 25, 25]`: the director's first). A train's distance can
+be split by kind of stop: 1844's 8E visits any number and is paid for 8
+(`pays: 8`), 1854's "+" trains run to so many cities and any number of towns
+(`freeTowns`). Rules that live in tobymao's game code rather than its data
+are kept by hand in `GameTitle`: which trains count hexes (1844's H trains),
+the route rules below, and the special upgrades.
 
 **Flat-topped boards.** 1889's map is printed with flat-topped hexes, lettered
 by column and numbered by row. The app keeps every map pointy-topped: a
@@ -254,11 +289,41 @@ The close-up fit itself now looks for the grid up to 28 degrees either way of
 the guide, rather than 20, and lining up with known hexes no longer trusts a
 best match at the edge of its search.
 
+**Locking on, and tilting.** Angling the camera is the best cure for glare,
+and a close-up guide that only turns and scales made the user hold the camera
+square over the board. Once the guide has found the board on two looks in a
+row it now locks on (`trackGuide`): from then on each look pulls the outline,
+perspective and all, onto the printed lines from where it last was, so the
+camera can be tilted and the outline follows. Each step is small -- no corner
+of the target hex may move more than a third of a hex -- so it can't slide
+onto the next hex; three looks without the board and it goes back to
+following flat. The outline and the faint tiles in it are drawn through the
+same perspective, the placement is kept in units of the frame's shorter side
+so it holds on the full-size photo, and the close-up fit tries that placement
+pulled straight onto the lines as well as a grid measured afresh, keeping
+whichever sits better. Tested on synthetic previews (a camera tilted so the
+far rows are 30% narrower is followed to within 0.15 of a hex); not yet on
+the real webcam.
+
 **When detection fails anyway**, the align screen starts from the map laid over
 the middle of the photo rather than from nothing, or from a wrong fit whose
 handles are off screen. The grid moves by dragging, sizes by pinching (touch
 or trackpad), scrolling or buttons, turns a quarter at a time, and "Fit to the
 photo" puts it back over the photo whenever it gets lost.
+
+**A photo taken at a steep angle** -- the 2 October game's, the far edge of
+the board three quarters the width of the near one -- defeats the lattice
+search: the rows come out much closer together than the hexes along them,
+and the size of hex changes across the frame, so the repeat smears out even
+in the middle. Stretching the photo back to proportion before searching was
+tried and kept as a last resort, but didn't find this one. What does work is
+the user's placement: "Fit to the photo" now also pulls the placement as it
+is onto the printed lines, perspective and all (`GridDetector.refine`),
+rather than only measuring the hex size afresh in the middle and growing
+from there, and keeps whichever sits better. From the user's four handles,
+roughly placed, that took the 2 October photo from no fit to 0.46 coverage
+and 85 of its 94 hexes read right; placed carelessly (a third of a hex out)
+it can't recover, so the handles need to sit on their hexes.
 
 ## Reading the hexes
 
@@ -404,6 +469,50 @@ every route through that hex wrong.
 A line printed for later opening is one piece -- 1844's Furka-Oberalp line
 covers five hexes -- so laying or lifting it on any of its hexes does the same
 on all of them, each with its own part of it.
+
+**Track at the sides, and across them.** Each side's exit is measured as dark
+printing running right through a band inside the side. A short stub of track
+beside a city printed close to the side -- the capsule of a green tile's two
+slots -- has the white of the city at the inner end of the band, blurred in
+over the few pixels a hex gets in a photo of the whole board, so those real
+exits read weak, and a yellow tile with fewer exits won. Three changes put
+that right. The band now slides a little along the track (any run of a sixth
+of the way out that reaches within a fifth of the side counts); the exits an
+option is expected to have are as its own drawing shows them, so a stub
+expected weak isn't penalised for reading weak; and, as the user suggested,
+track is looked for across each side as well: a line of samples from just
+inside the side to just beyond it, dark all the way and standing out from
+the side either way along it (so a border printed along the side doesn't
+count), shows track running on into the next hex. That is only ever evidence
+for an exit -- track may end at a bare hex -- and it counts as much as the
+exits do. On the 2 October photo crossings read 0.62 where the two sides
+really join (median) and 0.00 where neither has an exit.
+
+**The cities as printed.** Measured on close-ups (I6's 15, Geneva, H13's 611)
+the two slots of a city share a capsule -- the circles a third of the hex
+across, their centres a third out from the middle, a white band between --
+reaching four fifths of the way to the sides they point at; they had been
+drawn smaller and touching. The three of 1844's 909 are bigger still, two
+fifths out. Tokens are looked for in the same places, so that moved too. And
+OO tile 66 puts the city on its run from side 0 to side 3 out towards the
+corner between sides 4 and 5 (C20, 2 October), which the importer's table
+now says.
+
+**Colour.** A tile's colour is taken from the pixels about as bright as its
+background, which on a brown tile under three big white circles was the
+white: the brown counted as "too dark to be background" and the tile came
+out grey. White -- the brightest, least coloured thing in the hex -- is now
+left out of that, unless it is most of the hex (bare map, grey tiles). And a
+game the app knows nothing of yet has nothing to measure its tiles' colours
+on, so the colours it starts from were measured under some other light: the
+tiles a photo reads clearly now measure them, and if that moves them much,
+the photo is read again.
+
+On the 2 October photo, read as a fresh game from the same placement, these
+took the reading from 75 to 85 of 94 hexes right (all but one of the rest
+flagged for a look: the Gotthard line, see Deferred) and the tokens from 16
+to 24 of 28 cities. On the evening photo of 1 October, whose fit is most of
+a hex out in places, they read 80 where the code before read 81.
 
 ## Sessions and close-ups
 
@@ -615,7 +724,12 @@ changed by a photo.
 
 Every circle of a city holds its own token (`GameSession.tokens` is kept by
 circle, `GameSession.slotId`; games saved before put their one token per city
-in its first circle). Each is drawn in its circle where the tile prints it,
+in its first circle). A photo is folded in city by city, though: a city's
+circles are alike in play, and which end of a row of them comes first is
+something a photo can't tell (the row looks the same turned end to end), so
+a token the user put in one circle that a photo shows in the other is the
+same token. Matched circle by circle, it had been added again in the other
+circle, and the city held the company twice. Each is drawn in its circle where the tile prints it,
 read from photos circle by circle, and set in the station editor a row per
 circle. A company keeps a circle free in its home city until its home token
 is down -- no company's starting token can be blocked -- so a token filling
@@ -623,6 +737,119 @@ the last free circle of another company's home is shown in red with why
 (`GameSession.tokenProblems`): FNM on Altdorf's one circle before the
 Gotthardbahn had started, say. As with a tile that can't belong, the app shows
 what is on the board and says it is wrong rather than refusing it.
+
+## Trains and routes
+
+[processing/train_routes.dart](../../lib/processing/train_routes.dart) finds
+the best runs for all of a company's trains together. Each route must take in
+a city holding one of the company's tokens; no two of its trains may share
+any track (each tile segment is identified, so two trains can both stop at a
+city if they reach it by different track); and, as before, a route can end at
+a full city or an off-board area but not run through either. Trains run as
+the title says:
+
+- **so many stops** (towns left out of the count for a `freeTowns` train);
+- **so many hexes**, 1844's H trains -- tobymao counts a route's hexes as the
+  hexes it crosses into plus one -- which can't visit red off-board areas;
+- **an express**, any number of stops paid for its best few, one of them a
+  city the company has a token in, and any red off-board areas besides, as
+  tobymao picks them.
+
+1844's game code adds three route rules (`RouteRules`): a stop that pays
+nothing can't be visited (a mountain railway before its plate is down, Torino
+in yellow); a route on tunnel track earns 10 more for every stop it is paid
+for; and a route joining an east and a west off-board area, or north and
+south, earns their bonuses too (`GameTitle.stopGroups` and `groupBonus`, read
+from the printed areas' groups and bonus icons).
+
+The search enumerates half-routes out of each tokened city, joins pairs of
+them into routes, keeps each train's best few hundred, and picks one route
+per train by branch and bound. A company's trains can all prefer the same busy
+stretch of track, so it also lets the trains choose in turn, each from what
+the others have left, and keeps whichever is better. On the 1 October board
+(45 tiles, 11 companies) it takes 0 to 12 ms a company, even for two 8E
+expresses. `test/session_routes_test.dart` runs every company on a saved game.
+
+[models/company_rules.dart](../../lib/models/company_rules.dart) holds the
+checks, each in a sentence for the screens to show:
+
+- the **phase**, the latest whose train anyone is known to hold or whose
+  tiles are being laid;
+- the **train limit** for the company's kind in that phase;
+- **rusting**: a train can't be running alongside one whose purchase scrapped
+  it -- its own, others in the same photo, or another company's;
+- **tokens**: those on the board and on the charter must add up to what the
+  company has, so a token missing from the board shows up;
+- **certificates**: no more of a size than the company prints, and no more
+  than 100% between the players;
+- **dividends**: a player's share of the revenue, rounded down, or of half of
+  it where the title allows paying half (none of the three does: 1854's
+  minors pay half by their own rule, which isn't modelled).
+
+A company without trains noted still gets the old single route of so many
+stops.
+
+## A player's area
+
+[processing/play_area_reader.dart](../../lib/processing/play_area_reader.dart)
+works from the lines of text Vision reads (`recognizeTextLines`, with where
+each lies; ML Kit answers the same on Android) and the photo. Companies are
+found by symbol (the logo's letters) or name, allowing a letter or two
+misread, and each thing found goes with the nearest of them:
+
+- a **train** is a train's name from the title in large print -- larger than
+  most text around it, which leaves out the charter's own table of trains --
+  with lookalike letters folded (Vision read 1844's `3H` as Cyrillic `3н`);
+- a **token place** is a cost printed with a currency (`40 Fr.`) that is one
+  of the company's token costs, which leaves out a train card's price;
+- a **certificate** is a percentage. Certificates are stacked to show each
+  one's top edge, where its percentage is printed, so every edge read is a
+  certificate and the large figure on the top card is that card again. A
+  percentage is fitted to the company's certificate sizes: `5%` with its
+  first digit under the card on top is GB's 25%, and `503` with its `%` read
+  as a digit is 50%.
+
+Whether a token place is filled is judged by comparing a charter's places
+with each other: how far each one's inside is from the card around its
+printed cost, in colour, leaving out its darkest quarter (the printed ring,
+and the figure some empty places have printed in them). Tokens differ --
+GB's is dark, FNM's silver with a dark rim -- so no one colour says "token";
+but where a charter's places split clearly into two kinds, the kind further
+from the card holds tokens (GB: 18 against 85; FNM: 8 and 8 against 32 and
+48). Where they are all alike they are all empty if they look like the card.
+The home token always leaves its place when a company starts, so if the
+place costing nothing looks full the charter isn't laid out as expected and
+nothing is said.
+
+A **train card** whose number wasn't read -- a single figure on its own is
+the hardest thing for Vision to read; it missed FNM's 4 -- still shows its
+price, and where only one kind of train costs that (in 1844 every price is
+different), the price says which. A card whose number was read shows its
+price beside it too, so that one isn't counted twice.
+
+**Certificate stripes** count the cards in a stack better than their edges'
+small print can be read (Vision missed all three of FNM's 10% edges): each
+card's edge carries one stripe for a single share or two for a double, in
+some colour that isn't the card's white, from top to bottom. A band across
+the stack at the top card's large figure crosses each card's stripes in
+turn -- narrow columns that aren't card all the way down; the logo has white
+in it at some heights, so its columns don't count -- and stripes a stripe's
+width apart are one card's. The top card is its large figure; each one under
+it a single or double share of the company's (GB: 50 + 25; FNM: 20 + 10 + 10
++ 10). Where there are no stripes, the edges are read as before.
+
+**Charters differ a lot between titles**, and so far this has seen one photo
+of one 1844 charter. What comes from each title's data -- company names and
+symbols, train names, token costs, certificate sizes -- should carry over.
+What is calibrated on 1844 is where a token place sits relative to its
+printed cost (centred 2.6 times the cost's height above it), the
+certificates' edge reading (`DIVIDENDE`), and that stacks are fanned out
+sideways with stripes on their edges. Where those don't fit, the reading
+says less rather than guessing, and the review screen lets everything be
+entered by hand. Charters
+also print rules (1844's says `Limit 2`, and has a table of trains, prices and
+rusting) that could stand in for a title without data; worth looking at once
+other titles' charters have been photographed.
 
 ## The rest
 
@@ -638,11 +865,12 @@ impassable borders block connections. Off-board revenue follows the session's
 phase.
 
 **Route search** ([processing/route_finder.dart](../../lib/processing/route_finder.dart))
-is as before, with two rules added: a route can end at an off-board area but not
-run through it, and a company's route can end at a city whose every circle holds
-another company's token but not run through it (`StationNode.blocks`); a city
-with an open circle, or one of the company's own tokens, lets it through.
-`maxStops` still stands in for train length.
+is the single route of so many stops, for a company without trains noted: a
+route can end at an off-board area but not run through it, and a company's
+route can end at a city whose every circle holds another company's token but
+not run through it (`StationNode.blocks`); a city with an open circle, or one
+of the company's own tokens, lets it through. With trains, see Trains and
+routes.
 
 **Revenue** comes from tile and map data. Where a hex is doubtful, the station
 editor can read the printed figure off that hex's stored picture using the
@@ -695,8 +923,18 @@ counts as read. Records from before then can't say what was read.)
 
 ## Deferred
 
-- Real train rules: train types, "+" trains, E/D trains, route groupings.
-  `maxStops` is the placeholder.
+- Train rules beyond those above: 1854's minors' automatic half pay and its
+  8Ox, 1889's private companies, other titles' route groupings. Unknown
+  train names run as many stops as the number they start with.
+- Money: player and company cash aren't tracked, by choice.
+- The Gotthard line's five-hex piece is drawn as five purple hexes with
+  full-width track, but the physical piece is grey with a thin line and its
+  name printed along it, so it reads as the unopened printing (five hexes
+  wrong on the 2 October photo; one tap on any of them sets all five).
+- Finding the grid by itself in a photo taken at a steep angle (see Finding
+  the grid): today it needs the user's four handles.
+- Charters and certificates of titles other than 1844 (see A player's area),
+  and certificate stripes.
 - Company logos. Companies, colours and homes are imported; a token away from
   home in a colour two companies share is left for the user to name.
 - Tokens on printed cities other than the company's home; see Station tokens.
@@ -732,6 +970,17 @@ counts as read. Records from before then can't say what was read.)
   boards drawn from the title data and re-photographed through a perspective
   transform, including turned, angled and unevenly lit), recognition end to end,
   session state and saving, close-up planning, and the screens.
+- `test/session_routes_test.dart` runs every company's trains on a saved
+  game and prints the routes and how long each took:
+
+  ```
+  ROUTE_SESSION=~/session.json ROUTE_TRAINS=5,5 \
+    flutter test test/session_routes_test.dart
+  ```
+
+  `PLAY_PHOTO=~/board_1790912047858.png flutter test
+  test/play_area_reader_test.dart` checks the token places on the real photo
+  of GB's charter.
 - `test/photo_fit_test.dart` runs detection against a real photo that isn't
   checked in:
 
@@ -751,6 +1000,24 @@ counts as read. Records from before then can't say what was read.)
   ```
 
 ## Notes for the next pass
+
+- **The eighth round** (2 October, early afternoon): a fresh game
+  (`sessions/1844-1790916212645289`) started over the board as it stood, and
+  photographed once from an angle (`board_1790916245408`), a close-up around
+  Bern under heavy glare (`board_1790916355724`) and FNM's charter beside four
+  certificates (`board_1790917100047`). The user's corrections to the fresh
+  game are the truth for the board: where it and the old game disagreed (20
+  hexes), the photo sided with the fresh one every time -- the old game had
+  low-confidence reads that were never checked. `photo_fit_test.dart` now
+  takes BOARD_TRUTH (which hexes were read wrong, each option's score in
+  parts), BOARD_POINTS (place the map from hand-picked hex centres, as the
+  align screen's handles do), BOARD_HINTS, BOARD_COMPARE and BOARD_PROFILE.
+
+- **The first photo of a player's area** (2 October, `board_1790912047858`):
+  GB's charter under glare, its one token left (the other on G18), its 3H
+  and 2H, and two certificates stacked, 50% on 25%. Read right: GB, both
+  trains, both token places (one filled) and both certificates. The live
+  session had no GB token on G18, which the token count now points out.
 
 - **The fourth round of photos** (1 October, evening): a whole-board photo
   that had to be placed by hand (now placed automatically from the session's

@@ -44,6 +44,10 @@ class StationNode {
   /// `GameSession.tokens`).
   List<String?> tokens;
 
+  /// The colour of what it's printed on, where known: some trains can't
+  /// visit red off-board areas.
+  final TileColor? color;
+
   StationNode({
     required this.hex,
     required this.stationIndex,
@@ -51,6 +55,7 @@ class StationNode {
     required this.revenue,
     this.slots = 1,
     List<String?>? tokens,
+    this.color,
   }) : tokens = tokens ?? List<String?>.filled(slots < 1 ? 1 : slots, null);
 
   String get id => '${hex.row}_${hex.col}_$stationIndex';
@@ -79,7 +84,24 @@ class TrackEdge {
   final StationNode from;
   final StationNode to;
   final List<HexCoord> hexPath;
-  const TrackEdge({required this.from, required this.to, required this.hexPath});
+
+  /// The pieces of printed track it runs over, one id per tile segment: two
+  /// trains of a company can't share any of them.
+  final List<String> segments;
+
+  /// Whether any of it is narrow gauge (1844's tunnels).
+  final bool narrow;
+
+  const TrackEdge({
+    required this.from,
+    required this.to,
+    required this.hexPath,
+    this.segments = const [],
+    this.narrow = false,
+  });
+
+  /// How many hexes it crosses into after leaving [from]'s.
+  int get hexSteps => hexPath.length - 1;
 
   /// Stable identity for a physical stretch of track, direction-independent,
   /// so a route can't traverse the same track twice.
@@ -146,6 +168,7 @@ class BoardGraph {
           kind: st.kind,
           revenue: st.revenueIn(phase),
           slots: st.slots,
+          color: def.color,
         );
         stations.add(node);
         stationByKey[node.id] = node;
@@ -159,10 +182,13 @@ class BoardGraph {
     String stationPort(HexCoord h, int index) => 'S:${h.row}_${h.col}_$index';
     String edgePort(HexCoord h, int edge) => 'E:${h.row}:${h.col}:$edge';
 
-    final raw = <String, List<String>>{};
-    void link(String a, String b) {
-      raw.putIfAbsent(a, () => []).add(b);
-      raw.putIfAbsent(b, () => []).add(a);
+    // Each link knows the tile segment it is, if it is one: links across a
+    // hex boundary aren't track.
+    final raw = <String, List<(String, String?)>>{};
+    final narrow = <String>{};
+    void link(String a, String b, [String? segment]) {
+      raw.putIfAbsent(a, () => []).add((b, segment));
+      raw.putIfAbsent(b, () => []).add((a, segment));
     }
 
     rotated.forEach((hex, def) {
@@ -170,10 +196,13 @@ class BoardGraph {
             EdgeEndpoint(:final edge) => edgePort(hex, edge),
             StationEndpoint(:final stationIndex) => stationPort(hex, stationIndex),
           };
-      for (final seg in def.segments) {
+      for (int i = 0; i < def.segments.length; i++) {
+        final seg = def.segments[i];
         // Track printed for a line that hasn't opened yet carries nothing.
         if (seg.future) continue;
-        link(portFor(seg.a), portFor(seg.b));
+        final id = '${hex.row},${hex.col}#$i';
+        if (seg.narrow) narrow.add(id);
+        link(portFor(seg.a), portFor(seg.b), id);
       }
       // Join this tile's track to the neighbouring tile's track where both
       // sides of a hex boundary carry track.
@@ -213,30 +242,40 @@ class BoardGraph {
         String current,
         List<HexCoord> hexPath,
         Set<String> visited,
+        List<String> segments,
       ) {
         if (current.startsWith('S:')) {
           final other = stationByKey[current.substring(2)];
           if (other == null) return;
           final path = List<HexCoord>.of(hexPath);
           if (path.isEmpty || path.last != other.hex) path.add(other.hex);
-          edges.add(TrackEdge(from: station, to: other, hexPath: path));
+          edges.add(TrackEdge(
+            from: station,
+            to: other,
+            hexPath: path,
+            segments: List.of(segments),
+            narrow: segments.any(narrow.contains),
+          ));
           return; // stations end a run of track; they don't pass through
         }
 
         final hex = _hexOfPort(current);
         final added = hexPath.isEmpty || hexPath.last != hex;
         if (added) hexPath.add(hex);
-        for (final next in raw[current] ?? const <String>[]) {
+        for (final (next, segment) in raw[current] ?? const <(String, String?)>[]) {
           if (next == previous || visited.contains(next)) continue;
           visited.add(next);
-          explore(current, next, hexPath, visited);
+          if (segment != null) segments.add(segment);
+          explore(current, next, hexPath, visited, segments);
+          if (segment != null) segments.removeLast();
           visited.remove(next);
         }
         if (added) hexPath.removeLast();
       }
 
-      for (final firstHop in raw[start] ?? const <String>[]) {
-        explore(start, firstHop, [station.hex], {start, firstHop});
+      for (final (firstHop, segment) in raw[start] ?? const <(String, String?)>[]) {
+        explore(start, firstHop, [station.hex], {start, firstHop},
+            [?segment]);
       }
       adjacency[station.id] = edges;
     }

@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:camera_macos/camera_macos.dart';
 import 'package:flutter/material.dart';
 
+import '../geometry/homography.dart';
 import '../processing/guide_follower.dart';
 import '../services/app_settings.dart';
 import '../services/photo_pipeline.dart';
@@ -35,6 +36,15 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
   int _misses = 0;
   bool _looking = false;
   Timer? _follow;
+
+  /// Once the outline has found the board on [_lockAfter] looks in a row,
+  /// where it is in the preview, perspective and all (see [trackGuide]):
+  /// from then on it follows the board however the camera is tilted, until
+  /// it loses it. Null until then. [_frame] is the preview's size.
+  Homography? _locked;
+  Size? _frame;
+  int _steady = 0;
+  static const int _lockAfter = 2;
 
   @override
   void initState() {
@@ -69,6 +79,30 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
       final frame = await _oneFrame(controller);
       if (frame == null || !mounted || _capturing) return;
       final size = Size(frame.width.toDouble(), frame.height.toDouble());
+      final locked = _locked;
+      if (locked != null) {
+        final next = await const PhotoPipeline().trackGuide(
+          map,
+          bytes: frame.bytes,
+          width: frame.width,
+          height: frame.height,
+          bytesPerRow: frame.bytesPerRow,
+          current: locked,
+          target: guide.target,
+        );
+        if (!mounted || _capturing) return;
+        setState(() {
+          if (next != null) {
+            _misses = 0;
+            _locked = stepToward(locked, next, guide.target.boardCenter, 0.6);
+          } else if (++_misses >= 3) {
+            // Lost the board: back to following it flat.
+            _locked = null;
+            _steady = 0;
+          }
+        });
+        return;
+      }
       final found = await const PhotoPipeline().followGuide(
         map,
         bytes: frame.bytes,
@@ -81,12 +115,22 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
       );
       if (!mounted || _capturing) return;
       setState(() {
+        _frame = size;
         if (found != null) {
           _misses = 0;
           _adjustment = _adjustment.toward(found, 0.6);
-        } else if (++_misses >= 3) {
-          // Lost the board: drift back to where the guide was drawn.
-          _adjustment = _adjustment.toward(GuideAdjustment.none, 0.4);
+          // Found it again and again: lock on, so that tilting the camera
+          // -- to keep the lamp's reflection off the board -- doesn't lose
+          // it.
+          if (++_steady >= _lockAfter) {
+            _locked = guide.adjusted(_adjustment).homographyFor(size);
+          }
+        } else {
+          _steady = 0;
+          if (++_misses >= 3) {
+            // Lost the board: drift back to where the guide was drawn.
+            _adjustment = _adjustment.toward(GuideAdjustment.none, 0.4);
+          }
         }
       });
     } catch (e) {
@@ -128,8 +172,8 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
       );
       await file.writeAsBytes(bytes);
       if (!mounted) return;
-      Navigator.of(context).pop(CapturedPhoto(file.path,
-          guide: widget.guide?.adjusted(_adjustment)));
+      Navigator.of(context).pop(
+          CapturedPhoto(file.path, guide: _placedGuide(widget.guide)));
     } catch (e) {
       if (!mounted) return;
       setState(() => _capturing = false);
@@ -235,12 +279,25 @@ class _MacWebcamCaptureState extends State<MacWebcamCapture> {
     return Center(
       child: AspectRatio(
         aspectRatio: size.width / size.height,
-        child: CaptureGuideOverlay(guide.adjusted(_adjustment)),
+        child: CaptureGuideOverlay(_placedGuide(guide)!),
       ),
     );
   }
 
+  /// [guide] where it has followed the board to.
+  CaptureGuide? _placedGuide(CaptureGuide? guide) {
+    final moved = guide?.adjusted(_adjustment);
+    final frame = _frame;
+    return _locked == null || frame == null
+        ? moved
+        : moved?.lockedTo(_locked, frame);
+  }
+
   String get _followingText {
+    if (_locked != null) {
+      return 'Locked on. Tilt the camera to keep the lamp\'s reflection off '
+          'the board: the outline follows it.';
+    }
     if (_misses > 0 || _adjustment.isNone) {
       return 'Get the outline roughly over the hexes, and it will follow '
           'the board from there.';

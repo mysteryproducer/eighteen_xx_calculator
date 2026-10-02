@@ -143,6 +143,63 @@ GuideAdjustment? followGuide(
   );
 }
 
+/// Where a close-up guide that has locked onto the board -- [current],
+/// board to the frame's pixels -- has moved to in [frame], perspective and
+/// all: the camera tilted to keep the lamp's reflection off the board,
+/// say, which no turn and scale can follow.
+///
+/// It is tracked from where it last was, a small step at a time: the step
+/// is refused if any corner of the [target] hex would move more than a
+/// third of a hex, so the outline can't slide onto the hex next door. Null
+/// when the board isn't clear enough in the frame, or the step is too big.
+Homography? trackGuide(
+  MapLayout map,
+  GrayFrame frame,
+  Homography current,
+  HexCoord target,
+) {
+  final fit = GridDetector(map, workingSize: _workingSize).refine(
+    frame.toImage(),
+    current,
+    at: target.boardCenter,
+    restrictTo: map.around([target], 2).toSet(),
+  );
+  if (fit.coverage < _clearEnough) return null;
+  final next = fit.boardToImage;
+  final hex = current.localScale(target.boardCenter);
+  for (int i = 0; i < 6; i++) {
+    final corner = HexGeometry.vertex(target.boardCenter, 1, i);
+    final a = current.apply(corner), b = next.apply(corner);
+    if (!b.dx.isFinite || !b.dy.isFinite) return null;
+    if ((b - a).distance > _mostStep * hex) return null;
+  }
+  return next;
+}
+
+/// Part of the way from [from] to [to], [t] of it, judged by where the
+/// hexes around [at] (board units) go: a tracked guide moves smoothly too.
+Homography stepToward(
+    Homography from, Homography to, Offset at, double t) {
+  final corners = [
+    for (final d in const [
+      Offset(-1.5, -1.5),
+      Offset(1.5, -1.5),
+      Offset(1.5, 1.5),
+      Offset(-1.5, 1.5),
+    ])
+      at + d,
+  ];
+  return Homography.fromFourPoints(corners, [
+        for (final c in corners)
+          Offset.lerp(from.apply(c), to.apply(c), t)!,
+      ]) ??
+      to;
+}
+
+/// The furthest a tracked guide's target hex may move in one look, in hex
+/// radii.
+const double _mostStep = 0.35;
+
 /// Preview frames are fitted small: a guide only needs to be close.
 const int _workingSize = 640;
 

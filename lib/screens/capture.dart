@@ -47,6 +47,12 @@ class CaptureGuide {
   /// How the guide has been moved to follow the board the camera sees.
   final GuideAdjustment adjustment;
 
+  /// Once the guide has locked onto the board, where it is, perspective and
+  /// all (see `trackGuide`): board to the frame in units of the frame's
+  /// shorter side, so the same placement holds on the preview and on the
+  /// photo taken from it. It takes over from [adjustment].
+  final Homography? locked;
+
   const CaptureGuide({
     required this.target,
     required this.hexes,
@@ -55,6 +61,7 @@ class CaptureGuide {
     this.turn = 0,
     this.map,
     this.adjustment = GuideAdjustment.none,
+    this.locked,
   });
 
   /// This guide, moved by [adjustment].
@@ -66,6 +73,21 @@ class CaptureGuide {
         turn: turn,
         map: map,
         adjustment: adjustment,
+        locked: locked,
+      );
+
+  /// This guide, locked onto the board at [placement] (board to a frame of
+  /// [size]), or unlocked if that is null.
+  CaptureGuide lockedTo(Homography? placement, Size size) => CaptureGuide(
+        target: target,
+        hexes: hexes,
+        instruction: instruction,
+        tiles: tiles,
+        turn: turn,
+        map: map,
+        adjustment: adjustment,
+        locked: placement?.then(Homography.similarity(
+            scale: 1 / math.min(size.width, size.height))),
       );
 
   /// The target hex's circumradius as a share of the frame's shorter side.
@@ -76,6 +98,11 @@ class CaptureGuide {
   /// Board to frame coordinates for a frame of [size]. The same relative
   /// placement is used on the preview and on the photo that comes out of it.
   Homography homographyFor(Size size) {
+    final placed = locked;
+    if (placed != null) {
+      return placed.then(
+          Homography.similarity(scale: math.min(size.width, size.height)));
+    }
     final drawn = unadjustedFor(size);
     return adjustment.isNone ? drawn : drawn.then(adjustment.inFrame(size));
   }
@@ -127,21 +154,28 @@ class CaptureGuidePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final h = guide.homographyFor(size);
     if (tileOpacity > 0 && guide.tiles.isNotEmpty) {
-      // The guide is a plain scale and shift, so each tile is drawn the way
-      // the board map draws it, just smaller or larger.
-      final radius = h.localScale(guide.target.boardCenter);
-      final tileSize = radius / TileRenderer.radiusShare;
+      // Each tile is drawn on the board, as the board map draws it, and the
+      // board is laid on the frame however the guide places it -- turned,
+      // scaled, or in perspective when the camera is tilted.
       canvas.saveLayer(Offset.zero & size,
           Paint()..color = Colors.black.withValues(alpha: tileOpacity));
+      canvas.save();
+      final m = h.m;
+      canvas.transform(Float64List.fromList([
+        m[0], m[3], 0, m[6], //
+        m[1], m[4], 0, m[7], //
+        0, 0, 1, 0, //
+        m[2], m[5], 0, m[8], //
+      ]));
+      const tileSize = 1 / TileRenderer.radiusShare;
       guide.tiles.forEach((coord, tile) {
-        final centre = h.apply(coord.boardCenter);
+        final centre = coord.boardCenter;
         canvas.save();
-        canvas.translate(centre.dx, centre.dy);
-        canvas.rotate(guide.turn + guide.adjustment.turn);
-        canvas.translate(-tileSize / 2, -tileSize / 2);
+        canvas.translate(centre.dx - tileSize / 2, centre.dy - tileSize / 2);
         TileRenderer.paint(canvas, tile, tileSize);
         canvas.restore();
       });
+      canvas.restore();
       canvas.restore();
     }
     for (final hex in guide.hexes) {

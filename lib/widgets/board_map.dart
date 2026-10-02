@@ -73,7 +73,9 @@ class BoardMapPainter extends CustomPainter {
   final GameSession session;
   final BoardGraph graph;
   final BoardMapGeometry geometry;
-  final RouteResult? route;
+  /// Routes to draw, each in its own colour (see [routeColours]): one per
+  /// train.
+  final List<RouteResult> routes;
   final HexCoord? highlighted;
 
   /// Hexes holding a tile that doesn't belong there by the rules.
@@ -95,12 +97,21 @@ class BoardMapPainter extends CustomPainter {
   /// Marks a hex the user set where a photo since shows something else.
   static const Color suggested = Color(0xFF8E24AA);
 
+  /// The colours routes are drawn in, a train each.
+  static const List<Color> routeColours = [
+    Colors.deepOrange,
+    Color(0xFF1E88E5),
+    Color(0xFF43A047),
+    Color(0xFFD81B60),
+    Color(0xFF6D4C41),
+  ];
+
   BoardMapPainter({
     required this.title,
     required this.session,
     required this.graph,
     required this.geometry,
-    this.route,
+    this.routes = const [],
     this.highlighted,
     this.misfits = const {},
     this.selected = const {},
@@ -179,10 +190,17 @@ class BoardMapPainter extends CustomPainter {
   }
 
   void _paintRoute(Canvas canvas, Map<HexCoord, TileDefinition> content) {
-    final active = route;
-    if (active == null || active.track.isEmpty) return;
+    for (int i = 0; i < routes.length; i++) {
+      _paintOneRoute(canvas, content, routes[i],
+          routeColours[i % routeColours.length]);
+    }
+  }
+
+  void _paintOneRoute(Canvas canvas, Map<HexCoord, TileDefinition> content,
+      RouteResult active, Color colour) {
+    if (active.track.isEmpty) return;
     final paint = Paint()
-      ..color = Colors.deepOrange.withValues(alpha: 0.85)
+      ..color = colour.withValues(alpha: 0.85)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 6
       ..strokeCap = StrokeCap.round
@@ -205,7 +223,13 @@ class BoardMapPainter extends CustomPainter {
   }
 
   void _paintStations(Canvas canvas, Map<HexCoord, TileDefinition> content) {
-    final onRoute = {for (final s in route?.stops ?? const <StationNode>[]) s.id};
+    // Each stop ringed in the colour of the first route through it.
+    final onRoute = <String, Color>{};
+    for (int i = routes.length - 1; i >= 0; i--) {
+      for (final s in routes[i].stops) {
+        onRoute[s.id] = routeColours[i % routeColours.length];
+      }
+    }
     void ring(Offset at, double radius, Color colour) => canvas.drawCircle(
         at,
         radius + 2,
@@ -223,7 +247,8 @@ class BoardMapPainter extends CustomPainter {
           orElse: () => def.stations.first);
       final radius = boardMapScale *
           (station.kind == StationKind.city ? 0.2 : 0.16);
-      final route = onRoute.contains(station.id);
+      final routeColour = onRoute[station.id];
+      final route = routeColour != null;
       Company? only;
       if (station.kind == StationKind.city) {
         // Each token in its own circle, where the tile prints the circle.
@@ -244,14 +269,14 @@ class BoardMapPainter extends CustomPainter {
           } else if (company != null && session.tokenDoubts.contains(id)) {
             ring(at, size, uncertain);
           } else if (route) {
-            ring(at, size, Colors.deepOrange);
+            ring(at, size, routeColour);
           }
         }
         if (station.revenueSource == RevenueSource.unverified) {
           ring(centre, radius * 2.2, uncertain);
         }
       } else if (route || station.revenueSource == RevenueSource.unverified) {
-        ring(centre, radius, route ? Colors.deepOrange : uncertain);
+        ring(centre, radius, routeColour ?? uncertain);
       }
 
       // A city printed with no value yet (1844 prints `revenue:0`) has

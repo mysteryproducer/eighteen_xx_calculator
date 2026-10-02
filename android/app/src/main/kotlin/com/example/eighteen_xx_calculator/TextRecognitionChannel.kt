@@ -25,7 +25,10 @@ class TextRecognitionChannel(messenger: BinaryMessenger) : MethodChannel.MethodC
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        if (call.method != "recognizeText") {
+        // "recognizeTextLines" answers with each line and where it lies, as
+        // {text, left, top, right, bottom} from 0 to 1 across and down.
+        val lines = call.method == "recognizeTextLines"
+        if (call.method != "recognizeText" && !lines) {
             result.notImplemented()
             return
         }
@@ -35,8 +38,27 @@ class TextRecognitionChannel(messenger: BinaryMessenger) : MethodChannel.MethodC
             result.error("bad_image", "Expected PNG bytes under \"image\".", null)
             return
         }
+        val width = bitmap.width.toDouble()
+        val height = bitmap.height.toDouble()
         recognizer.process(InputImage.fromBitmap(bitmap, 0))
-            .addOnSuccessListener { text -> result.success(text.text) }
+            .addOnSuccessListener { text ->
+                if (!lines) {
+                    result.success(text.text)
+                    return@addOnSuccessListener
+                }
+                result.success(text.textBlocks.flatMap { block ->
+                    block.lines.mapNotNull { line ->
+                        val box = line.boundingBox ?: return@mapNotNull null
+                        mapOf(
+                            "text" to line.text,
+                            "left" to box.left / width,
+                            "top" to box.top / height,
+                            "right" to box.right / width,
+                            "bottom" to box.bottom / height,
+                        )
+                    }
+                })
+            }
             .addOnFailureListener { error ->
                 result.error("recognition_failed", error.message, null)
             }

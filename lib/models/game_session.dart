@@ -244,6 +244,57 @@ class GameSession {
   /// Revenue the user typed in, by station id.
   final Map<String, int> revenueOverrides;
 
+  /// The players, in seating order.
+  final List<String> players;
+
+  /// The share certificates each player holds: by player, by company id,
+  /// the percentage on each certificate.
+  final Map<String, Map<String, List<int>>> holdings;
+
+  /// Each company's trains, by company id: the trains' names.
+  final Map<String, List<String>> companyTrains;
+
+  /// Station tokens still on each company's charter, by company id, where
+  /// they have been counted.
+  final Map<String, int> charterTokens;
+
+  /// The share of [company] that [player] holds, in percent.
+  int percentHeld(String player, String company) =>
+      (holdings[player]?[company] ?? const <int>[])
+          .fold(0, (total, share) => total + share);
+
+  /// Adds a player called [name], unless there is one already.
+  void addPlayer(String name) {
+    if (name.isNotEmpty && !players.contains(name)) players.add(name);
+  }
+
+  /// Renames player [from] to [to], keeping their place and certificates.
+  void renamePlayer(String from, String to) {
+    final at = players.indexOf(from);
+    if (at < 0 || to.isEmpty || from == to || players.contains(to)) return;
+    players[at] = to;
+    final held = holdings.remove(from);
+    if (held != null) holdings[to] = held;
+  }
+
+  /// Takes player [name] out of the game, and their certificates with them.
+  void removePlayer(String name) {
+    players.remove(name);
+    holdings.remove(name);
+  }
+
+  /// Records that [player] holds [percents] of [company]'s certificates --
+  /// all of them, replacing what was noted before.
+  void setHolding(String player, String company, List<int> percents) {
+    final held = holdings.putIfAbsent(player, () => {});
+    if (percents.isEmpty) {
+      held.remove(company);
+      if (held.isEmpty) holdings.remove(player);
+    } else {
+      held[company] = List.of(percents);
+    }
+  }
+
   /// Which way the board faced in the latest photo of all of it, in radians
   /// clockwise from the photo's x axis to the map's rows running east: zero
   /// when photographed from the map's south edge. Players photograph from
@@ -270,7 +321,15 @@ class GameSession {
     this.colourProfile,
     Map<String, double>? glare,
     this.facing,
-  })  : glare = glare ?? {},
+    List<String>? players,
+    Map<String, Map<String, List<int>>>? holdings,
+    Map<String, List<String>>? companyTrains,
+    Map<String, int>? charterTokens,
+  })  : players = players ?? [],
+        holdings = holdings ?? {},
+        companyTrains = companyTrains ?? {},
+        charterTokens = charterTokens ?? {},
+        glare = glare ?? {},
         hexes = hexes ?? {},
         tokens = tokens ?? {},
         tokenDoubts = tokenDoubts ?? {},
@@ -511,6 +570,10 @@ class GameSession {
           },
         if (facing != null) 'facing': double.parse(facing!.toStringAsFixed(4)),
         'revenueOverrides': revenueOverrides,
+        if (players.isNotEmpty) 'players': players,
+        if (holdings.isNotEmpty) 'holdings': holdings,
+        if (companyTrains.isNotEmpty) 'companyTrains': companyTrains,
+        if (charterTokens.isNotEmpty) 'charterTokens': charterTokens,
       };
 
   static GameSession fromJson(Map<String, Object?> json) {
@@ -579,6 +642,24 @@ class GameSession {
             e.key as String: (e.value as num).toDouble(),
         },
         facing: (json['facing'] as num?)?.toDouble(),
+        players: [for (final p in json['players'] as List? ?? const []) p as String],
+        holdings: {
+          for (final e in (json['holdings'] as Map? ?? {}).entries)
+            e.key as String: {
+              for (final c in (e.value as Map).entries)
+                c.key as String: [
+                  for (final share in c.value as List) (share as num).toInt(),
+                ],
+            },
+        },
+        companyTrains: {
+          for (final e in (json['companyTrains'] as Map? ?? {}).entries)
+            e.key as String: [for (final t in e.value as List) t as String],
+        },
+        charterTokens: {
+          for (final e in (json['charterTokens'] as Map? ?? {}).entries)
+            e.key as String: (e.value as num).toInt(),
+        },
         revenueOverrides: {
           for (final e in (json['revenueOverrides'] as Map? ?? {}).entries)
             e.key as String: (e.value as num).toInt(),
