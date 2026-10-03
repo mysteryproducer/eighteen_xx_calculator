@@ -3,6 +3,7 @@ import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:image/image.dart' as img;
 
 import '../geometry/homography.dart';
@@ -112,18 +113,70 @@ class PhotoPipeline {
   /// background. Throws [TextRecognitionUnavailable] where the platform
   /// can't place lines of text.
   Future<PlayAreaReading> readPlayArea(GameTitle title, img.Image photo) async {
-    final bytes = await Isolate.run(() {
-      // Big enough for a card's small print; a phone's full size would only
-      // slow the encoding down.
-      final longest = math.max(photo.width, photo.height);
-      final sized = longest <= 2400
-          ? photo
-          : img.copyResize(photo,
-              width: photo.width * 2400 ~/ longest,
-              interpolation: img.Interpolation.average);
-      return img.encodeJpg(sized, quality: 92);
-    });
-    final lines = await RevenueOcr.recognizeLines(bytes);
-    return PlayAreaReader(title).read(lines, photo: photo);
+    Future<Uint8List> encoded(img.Image image, int turn) => Isolate.run(() {
+          // Big enough for a card's small print; a phone's full size would
+          // only slow the encoding down.
+          final longest = math.max(image.width, image.height);
+          var sized = longest <= 2400
+              ? image
+              : img.copyResize(image,
+                  width: image.width * 2400 ~/ longest,
+                  interpolation: img.Interpolation.average);
+          if (turn != 0) sized = img.copyRotate(sized, angle: turn);
+          return img.encodeJpg(sized, quality: 92);
+        });
+    var lines = await RevenueOcr.recognizeLines(await encoded(photo, 0));
+    var reading = PlayAreaReader(title).read(lines, photo: photo);
+    // A charter photographed sideways -- a portrait photo of a card lying
+    // landscape -- is read anyway, but its large train figures often
+    // aren't, and where a token's place lies, above its cost, is beside it.
+    // Turned upright it reads properly; which way is upright is whichever
+    // reads better.
+    if (_sideways(lines, photo)) {
+      for (final turn in [90, 270]) {
+        final turned = await Isolate.run(() => img.copyRotate(photo, angle: turn));
+        final turnedLines = await RevenueOcr.recognizeLines(await encoded(turned, 0));
+        final turnedReading = PlayAreaReader(title).read(turnedLines, photo: turned);
+        if (_score(turnedReading) > _score(reading)) {
+          reading = turnedReading;
+          lines = turnedLines;
+        }
+      }
+    }
+    if (reading.isEmpty) {
+      // What the recognizer made of it, for working out why (on Android,
+      // `adb logcat -s flutter`).
+      debugPrint('Nothing found in a player\'s area. ${lines.length} lines '
+          'read: ${lines.map((l) => '"${l.text}" '
+              '(${l.left.toStringAsFixed(3)}, ${l.top.toStringAsFixed(3)}, '
+              '${l.right.toStringAsFixed(3)}, ${l.bottom.toStringAsFixed(3)})').join(', ')}');
+    }
+    return reading;
   }
+
+  /// Whether most of the text read in [photo] runs up and down the frame:
+  /// the cards are lying sideways in it.
+  static bool _sideways(List<RecognizedWord> lines, img.Image photo) {
+    final long = [
+      for (final l in lines)
+        if (l.text.trim().length >= 4) l,
+    ];
+    if (long.length < 3) return false;
+    final tall = long.where((l) =>
+        (l.bottom - l.top) * photo.height > 1.5 * (l.right - l.left) * photo.width);
+    return tall.length * 2 > long.length;
+  }
+
+  /// How much a reading found, and above all whether it read the charters
+  /// the right way up: what decides which way a sideways photo is turned.
+  static int _score(PlayAreaReading reading) =>
+      10 * reading.upright +
+      reading.charters.fold<int>(
+          0,
+          (t, c) =>
+              t +
+              2 * c.trains.length +
+              c.slots.length +
+              2 * c.slots.where((s) => s.filled != null).length) +
+      reading.certificates.fold<int>(0, (t, c) => t + c.percents.length);
 }

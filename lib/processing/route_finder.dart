@@ -92,15 +92,17 @@ class RouteFinder {
       for (final edge in graph.edgesFrom(current)) {
         final next = edge.to;
         if (visitedStations.contains(next.id)) continue;
-        if (usedTrack.contains(edge.id)) continue;
+        // No piece of track, and no hex side, twice.
+        final pieces = _piecesOf(edge);
+        if (pieces.any(usedTrack.contains)) continue;
         visitedStations.add(next.id);
-        usedTrack.add(edge.id);
+        usedTrack.addAll(pieces);
         stops.add(next);
         track.add(edge);
         walk(next, visitedStations, usedTrack, stops, track,
             revenue + next.revenue, firstEdge ?? edge);
         visitedStations.remove(next.id);
-        usedTrack.remove(edge.id);
+        usedTrack.removeAll(pieces);
         stops.removeLast();
         track.removeLast();
       }
@@ -166,6 +168,11 @@ class RouteFinder {
     return best;
   }
 }
+
+/// The track [edge] uses: its tile segments and the sides it crosses, or
+/// for an edge built without them, the edge itself.
+List<String> _piecesOf(TrackEdge edge) =>
+    edge.segments.isEmpty ? [edge.id] : edge.segments;
 
 class _Arm {
   final TrackEdge firstEdge;

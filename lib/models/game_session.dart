@@ -2,6 +2,7 @@ import 'dart:ui' show Offset;
 
 import 'board.dart';
 import 'board_graph.dart';
+import 'company.dart';
 import 'game_title.dart';
 import 'map_layout.dart';
 import 'tile_definition.dart';
@@ -258,6 +259,12 @@ class GameSession {
   /// they have been counted.
   final Map<String, int> charterTokens;
 
+  /// Companies whose home token isn't down: they haven't started, and the
+  /// user has said so. Every other company with a home is taken to have its
+  /// token there (see [graph]) -- a home city prints the company's logo in
+  /// its circle, which a photo can't tell from a token laid on it.
+  final Set<String> homeTokensOff;
+
   /// The share of [company] that [player] holds, in percent.
   int percentHeld(String player, String company) =>
       (holdings[player]?[company] ?? const <int>[])
@@ -325,7 +332,9 @@ class GameSession {
     Map<String, Map<String, List<int>>>? holdings,
     Map<String, List<String>>? companyTrains,
     Map<String, int>? charterTokens,
+    Set<String>? homeTokensOff,
   })  : players = players ?? [],
+        homeTokensOff = homeTokensOff ?? {},
         holdings = holdings ?? {},
         companyTrains = companyTrains ?? {},
         charterTokens = charterTokens ?? {},
@@ -417,6 +426,23 @@ class GameSession {
           tokens[slotId(station.id, slot)],
       ];
     }
+    // Each company's home token, unless the user has said it isn't down
+    // ([homeTokensOff]): in the first open circle of its home city, where
+    // the company has no token on the hex already.
+    for (final c in title.companies) {
+      final home = c.homeHex == null ? null : title.map.byId(c.homeHex!);
+      if (home == null || homeTokensOff.contains(c.id)) continue;
+      final cities = [
+        for (final s in graph.stations)
+          if (s.hex == home.coord && s.kind == StationKind.city) s,
+      ];
+      if (cities.isEmpty || cities.any((s) => s.holds(c.id))) continue;
+      final city = cities.firstWhere(
+          (s) => s.stationIndex == (c.homeCity ?? 0),
+          orElse: () => cities.first);
+      final open = city.tokens.indexOf(null);
+      if (open >= 0) city.tokens[open] = c.id;
+    }
     return graph;
   }
 
@@ -424,10 +450,20 @@ class GameSession {
   /// with why. A company keeps a circle free in its home city until its
   /// home token is down there: no company's starting token can be blocked,
   /// so a token that fills the last free circle of someone else's home is
-  /// out of place.
+  /// out of place. And a company's first token goes in its home city, so
+  /// one with tokens down and none on its home hex has one on the wrong hex.
   Map<String, String> tokenProblems(GameTitle title) {
     final problems = <String, String>{};
-    for (final station in graph(title).stations) {
+    final stations = graph(title).stations;
+    for (final MapEntry(key: id, value: circles)
+        in awayFromHome(title, stations).entries) {
+      final company = title.companyById(id)!;
+      final home = title.map.byId(company.homeHex!);
+      for (final circle in circles) {
+        problems[circle] = homeMissing(company, home?.displayName);
+      }
+    }
+    for (final station in stations) {
       if (station.kind != StationKind.city) continue;
       final hex = title.map.at(station.hex);
       if (hex == null) continue;
@@ -460,6 +496,36 @@ class GameSession {
     }
     return problems;
   }
+
+  /// Each company with tokens on [stations] but none on its home hex, with
+  /// the circles (see [slotId]) its tokens are in. A company's first token
+  /// goes in its home city, so one of those is on the wrong hex. A company
+  /// with no home of its own -- 1844's SBB, which takes over others' tokens
+  /// -- is never away from it.
+  Map<String, List<String>> awayFromHome(
+      GameTitle title, List<StationNode> stations) {
+    final circles = <String, List<String>>{};
+    final home = <String>{};
+    for (final station in stations) {
+      final hexId = title.map.at(station.hex)?.id;
+      for (int slot = 0; slot < station.tokens.length; slot++) {
+        final id = station.tokens[slot];
+        final homeHex = title.companyById(id)?.homeHex;
+        if (id == null || homeHex == null) continue;
+        (circles[id] ??= []).add(slotId(station.id, slot));
+        if (homeHex == hexId) home.add(id);
+      }
+    }
+    circles.removeWhere((id, _) => home.contains(id));
+    return circles;
+  }
+
+  /// Why a token of [company] is out of place when none of its tokens is
+  /// on its home hex, which the map calls [home].
+  static String homeMissing(Company company, String? home) =>
+      '${company.label}\'s first token goes on its home, '
+      '${home ?? company.homeHex}, and none of its tokens is there: one of '
+      'them is on the wrong hex.';
 
   /// The user says [hex] holds [tile] (null for nothing laid).
   void setManually(MapHex hex, PlacedTile? tile) {
@@ -511,9 +577,12 @@ class GameSession {
         reference: agrees && reliable ? reference : old.reference,
         referenceChroma:
             agrees && reliable ? referenceChroma : old.referenceChroma,
+        // An upgrade of what they set is worth showing them on less: play
+        // moves on, and a tile laid since looks much like the one under it
+        // to a reader that expects the hex not to have changed.
         suggestion: agrees
             ? null
-            : reliable
+            : reliable || (upgrade && confidence >= suggestUpgradeFrom)
                 ? HexSuggestion(
                     tile: tile, confidence: confidence, source: source, when: now)
                 : old.suggestion,
@@ -536,6 +605,10 @@ class GameSession {
 
   static bool _same(PlacedTile? a, PlacedTile? b) =>
       a?.tileId == b?.tileId && (a == null || a.rotation == b!.rotation);
+
+  /// How sure a photo has to be of an upgrade of a tile the user set to
+  /// suggest it to them.
+  static const double suggestUpgradeFrom = 0.3;
 
   /// Bumped when saved state stops meaning what it used to. Version 2 is
   /// where hex sides were renumbered to match tobymao/18xx (see
@@ -574,6 +647,7 @@ class GameSession {
         if (holdings.isNotEmpty) 'holdings': holdings,
         if (companyTrains.isNotEmpty) 'companyTrains': companyTrains,
         if (charterTokens.isNotEmpty) 'charterTokens': charterTokens,
+        'homeTokensOff': homeTokensOff.toList()..sort(),
       };
 
   static GameSession fromJson(Map<String, Object?> json) {
@@ -659,6 +733,19 @@ class GameSession {
         charterTokens: {
           for (final e in (json['charterTokens'] as Map? ?? {}).entries)
             e.key as String: (e.value as num).toInt(),
+        },
+        homeTokensOff: switch (json['homeTokensOff']) {
+          final List<Object?> off => {for (final id in off) id as String},
+          // Saved before home tokens were taken as down: a company with no
+          // token anywhere hadn't started.
+          _ => {
+              for (final c in GameTitle.byId(json['titleId'] as String)
+                      ?.companies ??
+                  const <Company>[])
+                if (c.homeHex != null &&
+                    !(json['tokens'] as Map? ?? {}).values.contains(c.id))
+                  c.id,
+            },
         },
         revenueOverrides: {
           for (final e in (json['revenueOverrides'] as Map? ?? {}).entries)

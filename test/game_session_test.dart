@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' show Color, Offset;
@@ -142,6 +143,29 @@ void main() {
       expect(session.stateOf(basel).suggestion, isNull);
     });
 
+    test("an upgrade of the user's tile is suggested on less", () {
+      // Grey laid over a brown the user set: read, but not surely, since the
+      // reader expects the hex not to have changed.
+      final session = newGame();
+      final langnau = title.map.byId('F13')!;
+      session.setManually(langnau, const PlacedTile('58', rotation: 4));
+      session.recordReading(langnau,
+          tile: const PlacedTile('87', rotation: 4),
+          confidence: 0.45,
+          source: HexSource.overview,
+          upgrade: true);
+      expect(session.tileAt(langnau)?.tileId, '58');
+      expect(session.stateOf(langnau).suggestion?.tile?.tileId, '87');
+      // A doubtful reading that is no upgrade still changes nothing.
+      final other = newGame()
+        ..setManually(langnau, const PlacedTile('58', rotation: 4));
+      other.recordReading(langnau,
+          tile: const PlacedTile('4', rotation: 1),
+          confidence: 0.45,
+          source: HexSource.overview);
+      expect(other.stateOf(langnau).suggestion, isNull);
+    });
+
     test('a confident reading that is no upgrade is kept for review, not taken',
         () {
       final session = newGame();
@@ -265,6 +289,10 @@ void main() {
       final altdorf = title.map.byId('G18')!;
       session.setManually(altdorf, const PlacedTile('5', rotation: 4));
       final id = '${altdorf.coord.row}_${altdorf.coord.col}_0';
+      // The FNM's own home token is down, at Como.
+      final como = title.map.byId('L21')!.coord;
+      final home = GameSession.slotId('${como.row}_${como.col}_0', 0);
+      session.tokens[home] = 'FNM';
       session.tokens[GameSession.slotId(id, 0)] = 'FNM';
       expect(session.tokenProblems(title).keys, [GameSession.slotId(id, 0)]);
       expect(session.tokenProblems(title).values.single, contains('GB'));
@@ -276,7 +304,62 @@ void main() {
       session.setManually(altdorf, const PlacedTile('15'));
       session.tokens
         ..clear()
+        ..[home] = 'FNM'
         ..[GameSession.slotId(id, 1)] = 'FNM';
+      expect(session.tokenProblems(title), isEmpty);
+    });
+
+    test("a company's home token is taken as down unless turned off", () {
+      // Home cities print the company's logo in the circle, which a photo
+      // can't tell from a token on it.
+      final session = newGame();
+      final altdorf = title.map.byId('G18')!; // the Gotthardbahn's home
+      String home() =>
+          '${altdorf.coord.row}_${altdorf.coord.col}_0';
+      final gb = session.graph(title).stations.firstWhere((s) => s.id == home());
+      expect(gb.tokens, ['GB']);
+      session.homeTokensOff.add('GB');
+      expect(session.graph(title).stations.firstWhere((s) => s.id == home()).tokens,
+          [null]);
+      // Saved and loaded, the choice stays.
+      final again = GameSession.fromJson(
+          jsonDecode(jsonEncode(session.toJson())) as Map<String, Object?>);
+      expect(again.homeTokensOff, contains('GB'));
+    });
+
+    test('a game saved before home tokens were taken as down keeps its '
+        'unstarted companies off', () {
+      final old = newGame().toJson()
+        ..remove('homeTokensOff')
+        ..['tokens'] = {'2_6_0_0': 'SCB'};
+      final loaded = GameSession.fromJson(old);
+      expect(loaded.homeTokensOff, isNot(contains('SCB')));
+      expect(loaded.homeTokensOff, containsAll(['GB', 'NOB', 'BLS']));
+    });
+
+    test("a company's tokens are out of place while none is on its home", () {
+      // Zürich (D19) is the Nordostbahn's home, where its first token goes:
+      // with tokens elsewhere and none there -- its home token turned off --
+      // one of them is on the wrong hex.
+      final session = newGame()..homeTokensOff.add('NOB');
+      String circle(String hexId) {
+        final coord = title.map.byId(hexId)!.coord;
+        return GameSession.slotId('${coord.row}_${coord.col}_0', 0);
+      }
+
+      session.tokens[circle('B19')] = 'NOB';
+      session.tokens[circle('D13')] = 'NOB';
+      final problems = session.tokenProblems(title);
+      expect(problems.keys, unorderedEquals([circle('B19'), circle('D13')]));
+      expect(problems.values.first,
+          allOf(contains('NOB'), contains('D19 Zurich')));
+      // One of them is moved to Zürich, and all is well.
+      session.tokens
+        ..remove(circle('B19'))
+        ..[circle('D19')] = 'NOB';
+      expect(session.tokenProblems(title), isEmpty);
+      // A company with no home of its own is never away from it.
+      session.tokens[circle('B19')] = 'SBB';
       expect(session.tokenProblems(title), isEmpty);
     });
 

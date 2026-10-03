@@ -24,10 +24,18 @@ class TileReading {
   /// Every option considered, best first, with its score (higher is better).
   final List<(TileOption, double)> ranked;
 
+  /// Which of [option]'s drawings matched best (see `TileClassifier`): the
+  /// way the row of a city's circles runs, [slotTurn], and whether the tile
+  /// shows the side that prints its circles in a shade of the tile.
+  final int slotTurn;
+  final bool shadedSide;
+
   const TileReading({
     required this.option,
     required this.confidence,
     required this.ranked,
+    this.slotTurn = 0,
+    this.shadedSide = false,
   });
 
   /// Confidence at or above which a reading is trusted without the user
@@ -86,9 +94,21 @@ class ColourModel {
 /// The options come from `TileRules`, so a hex is only ever matched against
 /// what could legally be there.
 class TileClassifier {
+  /// How the tiles print their stops, and whether each has a second side
+  /// printing them in a shade of the tile (see `GameTitle.tileStyle`).
+  final TileStyle style;
+  final bool doubleSided;
+
+  TileClassifier({this.style = TileStyle.plain, this.doubleSided = false});
+
   /// Each option's drawings: one, or for a tile with a city of several
-  /// slots in its middle, one for each way its row of slots could run.
+  /// slots in its middle, one for each way its row of slots could run --
+  /// and each again for the other side of a double-sided tile.
   final Map<String, List<HexPatch>> _templates = {};
+
+  /// How many ways each option's row of circles is drawn ([_templates]
+  /// holds that many per side).
+  final Map<String, int> _slotTurns = {};
   final Map<String, Future<void>> _rendering = {};
 
   int get templateCount => _templates.length;
@@ -100,10 +120,16 @@ class TileClassifier {
     contents.forEach((key, def) {
       if (_templates.containsKey(key)) return;
       pending.add(_rendering[key] ??= () async {
+        final turns = TileRenderer.hasSlotRow(def) ? 3 : 1;
+        _slotTurns[key] = turns;
         _templates[key] = [
-          for (int turn = 0; turn < (TileRenderer.hasSlotRow(def) ? 3 : 1); turn++)
-            HexPatch.fromTileImage(await TileRenderer.rasterize(def,
-                size: HexPatch.size, slotTurn: turn)),
+          for (final side in [
+            style,
+            if (doubleSided && def.stations.isNotEmpty) style.shaded,
+          ])
+            for (int turn = 0; turn < turns; turn++)
+              HexPatch.fromTileImage(await TileRenderer.rasterize(def,
+                  size: HexPatch.size, slotTurn: turn, style: side)),
         ];
         _rendering.remove(key);
       }());
@@ -144,16 +170,19 @@ class TileClassifier {
   }) {
     assert(options.isNotEmpty);
     final scored = <(TileOption, double)>[];
+    final matched = <TileOption, int>{};
     for (int i = 0; i < options.length; i++) {
       final option = options[i];
       final drawings = _templates[keyOf(option)];
       HexPatch? drawing;
       var shape = 1.0;
-      for (final d in drawings ?? const <HexPatch>[]) {
+      for (int k = 0; k < (drawings?.length ?? 0); k++) {
+        final d = drawings![k];
         final distance = patch.distanceTo(d);
         if (drawing == null || distance < shape) {
           shape = distance;
           drawing = d;
+          matched[option] = k;
         }
       }
       if (i == 0 && reference != null) {
@@ -204,10 +233,16 @@ class TileClassifier {
     }
     scored.sort((a, b) => b.$2.compareTo(a.$2));
     final margin = scored.length < 2 ? 4.0 : scored[0].$2 - scored[1].$2;
+    final best = scored.first.$1;
+    final drawingCount = _templates[keyOf(best)]?.length ?? 1;
+    final turns = _slotTurns[keyOf(best)] ?? 1;
+    final k = matched[best] ?? 0;
     return TileReading(
-      option: scored.first.$1,
+      option: best,
       confidence: confidenceFor(margin),
       ranked: scored,
+      slotTurn: k % turns,
+      shadedSide: drawingCount > turns && k >= turns,
     );
   }
 

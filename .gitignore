@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Labelled photos for measuring and training the recognizer; too big for
+# git (see test/build_dataset_test.dart).
+/dataset/

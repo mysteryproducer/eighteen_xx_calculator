@@ -37,6 +37,10 @@ class StationNode {
   /// records whether that stood or was replaced.
   int revenue;
 
+  /// What a D train is paid here instead, where the printing says so (see
+  /// `TileStation.dieselRevenue`).
+  final int? dieselRevenue;
+
   RevenueSource revenueSource = RevenueSource.tile;
 
   /// Whose token is in each of the city's circles, in order: a company id,
@@ -53,12 +57,22 @@ class StationNode {
     required this.stationIndex,
     required this.kind,
     required this.revenue,
+    this.dieselRevenue,
     this.slots = 1,
     List<String?>? tokens,
     this.color,
   }) : tokens = tokens ?? List<String?>.filled(slots < 1 ? 1 : slots, null);
 
   String get id => '${hex.row}_${hex.col}_$stationIndex';
+
+  /// What a train called [train] is paid here: a D train its diesel figure,
+  /// unless the revenue has been set some other way than by the tile.
+  int revenueFor(String train) =>
+      dieselRevenue != null &&
+              revenueSource == RevenueSource.tile &&
+              train.toUpperCase() == 'D'
+          ? dieselRevenue!
+          : revenue;
 
   /// The first company with a token here, if any.
   String? get companyId => tokens.whereType<String>().firstOrNull;
@@ -85,8 +99,9 @@ class TrackEdge {
   final StationNode to;
   final List<HexCoord> hexPath;
 
-  /// The pieces of printed track it runs over, one id per tile segment: two
-  /// trains of a company can't share any of them.
+  /// The pieces of printed track it runs over, one id per tile segment, and
+  /// the hex sides it crosses: no route uses one twice, and two trains of a
+  /// company can't share any.
   final List<String> segments;
 
   /// Whether any of it is narrow gauge (1844's tunnels).
@@ -167,6 +182,7 @@ class BoardGraph {
           stationIndex: st.index,
           kind: st.kind,
           revenue: st.revenueIn(phase),
+          dieselRevenue: st.dieselRevenue,
           slots: st.slots,
           color: def.color,
         );
@@ -182,13 +198,14 @@ class BoardGraph {
     String stationPort(HexCoord h, int index) => 'S:${h.row}_${h.col}_$index';
     String edgePort(HexCoord h, int edge) => 'E:${h.row}:${h.col}:$edge';
 
-    // Each link knows the tile segment it is, if it is one: links across a
-    // hex boundary aren't track.
-    final raw = <String, List<(String, String?)>>{};
+    // Each link is a piece of a tile's track, or a crossing of a hex side
+    // from one tile's track to the next; each has an id, so a route can use
+    // it only once.
+    final raw = <String, List<(String, String, bool)>>{}; // to, id, crossing
     final narrow = <String>{};
-    void link(String a, String b, [String? segment]) {
-      raw.putIfAbsent(a, () => []).add((b, segment));
-      raw.putIfAbsent(b, () => []).add((a, segment));
+    void link(String a, String b, String id, {bool crossing = false}) {
+      raw.putIfAbsent(a, () => []).add((b, id, crossing));
+      raw.putIfAbsent(b, () => []).add((a, id, crossing));
     }
 
     rotated.forEach((hex, def) {
@@ -221,7 +238,9 @@ class BoardGraph {
         // Link once per boundary, not twice (each hex would otherwise add it).
         if (hex.row < neighbour.row ||
             (hex.row == neighbour.row && hex.col < neighbour.col)) {
-          link(edgePort(hex, edge), edgePort(neighbour, opposite));
+          link(edgePort(hex, edge), edgePort(neighbour, opposite),
+              '${hex.row},${hex.col}|$edge',
+              crossing: true);
         }
       }
     });
@@ -232,6 +251,12 @@ class BoardGraph {
     // The walk forks rather than following one way, because a hexside can
     // carry more than one track: on a tile like #23 a train entering by side 0
     // can leave by either side 3 or side 4, and both are real connections.
+    // But track only meets at a side to run on into the next hex: a train
+    // that comes to a side along one of a tile's tracks crosses it, and one
+    // that crosses it takes one of the next tile's tracks. Two tracks of
+    // the same tile that meet at a side -- 1844's 29 at H11, a curve each
+    // way from the side facing H13 -- are no junction; only a city or a
+    // town joins tracks.
     final adjacency = <String, List<TrackEdge>>{};
     for (final station in stations) {
       final start = stationPort(station.hex, station.stationIndex);
@@ -243,6 +268,7 @@ class BoardGraph {
         List<HexCoord> hexPath,
         Set<String> visited,
         List<String> segments,
+        bool crossedIn,
       ) {
         if (current.startsWith('S:')) {
           final other = stationByKey[current.substring(2)];
@@ -262,20 +288,25 @@ class BoardGraph {
         final hex = _hexOfPort(current);
         final added = hexPath.isEmpty || hexPath.last != hex;
         if (added) hexPath.add(hex);
-        for (final (next, segment) in raw[current] ?? const <(String, String?)>[]) {
+        for (final (next, id, crossing)
+            in raw[current] ?? const <(String, String, bool)>[]) {
           if (next == previous || visited.contains(next)) continue;
+          // Along a tile's track to a side, then across it; across, then
+          // along the next tile's track.
+          if (crossing == crossedIn) continue;
           visited.add(next);
-          if (segment != null) segments.add(segment);
-          explore(current, next, hexPath, visited, segments);
-          if (segment != null) segments.removeLast();
+          segments.add(id);
+          explore(current, next, hexPath, visited, segments, crossing);
+          segments.removeLast();
           visited.remove(next);
         }
         if (added) hexPath.removeLast();
       }
 
-      for (final (firstHop, segment) in raw[start] ?? const <(String, String?)>[]) {
-        explore(start, firstHop, [station.hex], {start, firstHop},
-            [?segment]);
+      for (final (firstHop, id, crossing)
+          in raw[start] ?? const <(String, String, bool)>[]) {
+        explore(start, firstHop, [station.hex], {start, firstHop}, [id],
+            crossing);
       }
       adjacency[station.id] = edges;
     }

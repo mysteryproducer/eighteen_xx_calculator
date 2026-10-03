@@ -30,6 +30,14 @@ class TileRenderer {
         TileColor.purple => const Color(0xFFB39DDB),
       };
 
+  /// The darker shade a tile of [color] prints its circles in on the
+  /// textured side of 1889's tiles: ochre on yellow, deeper green and brown
+  /// on the others.
+  static Color shadeFor(TileColor color) => switch (color) {
+        TileColor.yellow => const Color(0xFFB0782E),
+        _ => Color.lerp(backgroundFor(color), Colors.black, 0.45)!,
+      };
+
   /// Where a stop sits inside the hex.
   ///
   /// A stop with a `loc:` sits half a radius out towards that side (or
@@ -263,7 +271,10 @@ class TileRenderer {
   /// the row of slots of a city in the middle further, for recognition to
   /// try each way it could be printed.
   static void paint(Canvas canvas, TileDefinition def, double size,
-      {int slotTurn = 0}) {
+      {int slotTurn = 0, TileStyle style = TileStyle.plain}) {
+    // What a city or town circle is filled with: white, or on the textured
+    // side of 1889's tiles a darker shade of the tile.
+    final fill = style.shadedStops ? shadeFor(def.color) : Colors.white;
     final center = Offset(size / 2, size / 2);
     final radius = size * radiusShare;
 
@@ -354,6 +365,17 @@ class TileRenderer {
           continue;
         }
       }
+      // Track into a place a route can only end at -- an off-board area,
+      // or one of 1844's mountain railways -- just points into the hex, as
+      // the board prints it: drawn on to the middle, several of them read
+      // as a junction to run through.
+      final side = [seg.a, seg.b].whereType<EdgeEndpoint>().firstOrNull;
+      final end = [seg.a, seg.b].whereType<StationEndpoint>().firstOrNull;
+      if (side != null && end != null && _endsRoutes(def, end.stationIndex)) {
+        _paintSpur(canvas, center, radius, side.edge, positionOf(end),
+            paint.strokeWidth, paint.color);
+        continue;
+      }
       final path = Path()
         ..moveTo(positionOf(seg.a).dx, positionOf(seg.a).dy)
         ..lineTo(positionOf(seg.b).dx, positionOf(seg.b).dy);
@@ -392,9 +414,11 @@ class TileRenderer {
       final pos = stationPosition(def, station.index, center, radius);
       switch (station.kind) {
         case StationKind.city:
-          _paintCity(canvas, def, station, pos, center, size, radius, slotTurn);
+          _paintCity(
+              canvas, def, station, pos, center, size, radius, slotTurn, fill);
         case StationKind.town:
-          _paintTown(canvas, def, station, pos, center, size, radius);
+          _paintTown(canvas, def, station, pos, center, size, radius,
+              style: style, fill: fill);
         case StationKind.offboard:
           break; // the hex's own colour says what it is
       }
@@ -489,6 +513,7 @@ class TileRenderer {
     double size,
     double radius,
     int slotTurn,
+    Color fill,
   ) {
     final ringRadius = radius * slotRadiusFor(station);
     final slots =
@@ -501,7 +526,7 @@ class TileRenderer {
             ..lineTo(slots[1].dx, slots[1].dy)
             ..lineTo(slots[2].dx, slots[2].dy)
             ..close(),
-          Paint()..color = Colors.white);
+          Paint()..color = fill);
     }
     if (slots.length == 2) {
       final row = slots[1] - slots[0];
@@ -512,7 +537,7 @@ class TileRenderer {
         ..lineTo(slots[1].dx - across.dx, slots[1].dy - across.dy)
         ..lineTo(slots[0].dx - across.dx, slots[0].dy - across.dy)
         ..close();
-      canvas.drawPath(band, Paint()..color = Colors.white);
+      canvas.drawPath(band, Paint()..color = fill);
       final edge = Paint()
         ..color = trackColor
         ..style = PaintingStyle.stroke
@@ -523,7 +548,7 @@ class TileRenderer {
     }
     for (final at in slots) {
       canvas
-        ..drawCircle(at, ringRadius, Paint()..color = Colors.white)
+        ..drawCircle(at, ringRadius, Paint()..color = fill)
         ..drawCircle(
           at,
           ringRadius,
@@ -544,8 +569,10 @@ class TileRenderer {
     Offset pos,
     Offset center,
     double size,
-    double radius,
-  ) {
+    double radius, {
+    TileStyle style = TileStyle.plain,
+    Color fill = Colors.white,
+  }) {
     final sides = <int>[];
     for (final seg in def.segments) {
       final touches = [seg.a, seg.b].any((e) =>
@@ -555,9 +582,37 @@ class TileRenderer {
         if (e is EdgeEndpoint) sides.add(e.edge);
       }
     }
+    if (def.icons.contains('port')) {
+      _paintPort(canvas, pos, radius, size);
+      return;
+    }
+    // On 1889's tiles a town is a dot on the track, or on the textured side
+    // a ring in a shade of the tile.
+    if (style.townDots && station.style != 'rect') {
+      if (style.shadedStops) {
+        canvas
+          ..drawCircle(pos, radius * _townDot, Paint()..color = fill)
+          ..drawCircle(
+              pos,
+              radius * _townDot,
+              Paint()
+                ..color = trackColor
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = size * 0.02);
+      } else {
+        canvas.drawCircle(pos, radius * _townDot, Paint()..color = trackColor);
+      }
+      return;
+    }
     final asBar = station.style == 'rect' ||
         (station.style == null && sides.isNotEmpty && sides.length < 3);
     if (!asBar) {
+      // A black dot ringed in white, as the board prints Brig and Altdorf:
+      // bigger than the track, so it shows where three or more lines meet
+      // -- a plain dot there is lost in the junction, and the town looks
+      // like track running through.
+      canvas.drawCircle(
+          pos, radius * (_townDot + _townRing), Paint()..color = Colors.white);
       canvas.drawCircle(pos, radius * _townDot, Paint()..color = trackColor);
       return;
     }
@@ -579,8 +634,56 @@ class TileRenderer {
     );
   }
 
-  /// A town dot's radius and half the length of a town bar, likewise.
-  static const double _townDot = 0.1;
+  /// A port: a black disc with an anchor in it, as 1889's port tile (437)
+  /// prints its town -- drawn as a bar, the tile looked just like 58.
+  static void _paintPort(Canvas canvas, Offset pos, double radius, double size) {
+    canvas.drawCircle(pos, radius * 0.19, Paint()..color = trackColor);
+    final anchor = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = size * 0.014
+      ..strokeCap = StrokeCap.round;
+    final r = radius * 0.12;
+    canvas
+      ..drawLine(pos + Offset(0, -r), pos + Offset(0, r), anchor)
+      ..drawLine(pos + Offset(-r * 0.5, -r * 0.45), pos + Offset(r * 0.5, -r * 0.45), anchor)
+      ..drawArc(Rect.fromCircle(center: pos + Offset(0, r * 0.15), radius: r * 0.8),
+          0.35, 2.44, false, anchor);
+  }
+
+  /// Whether a route can only end at stop [index] of [def], not run on
+  /// through it.
+  static bool _endsRoutes(TileDefinition def, int index) =>
+      def.stations.any((s) => s.index == index && s.kind == StationKind.offboard);
+
+  /// Track pointing in from side [edge] towards [target], as a long, narrow
+  /// triangle: its base the width of the track ([width]) where the side is,
+  /// its point a little under halfway to the middle.
+  static void _paintSpur(Canvas canvas, Offset center, double radius, int edge,
+      Offset target, double width, Color color) {
+    final from = HexGeometry.edgeMidpoint(center, radius, edge);
+    final towards = target - from;
+    final length = towards.distance;
+    if (length < 1e-6) return;
+    final along = towards / length;
+    final across = Offset(-along.dy, along.dx) * (width * 0.6);
+    final tip = from + along * math.min(length, radius * _spurLength);
+    canvas.drawPath(
+        Path()
+          ..moveTo(from.dx + across.dx, from.dy + across.dy)
+          ..lineTo(tip.dx, tip.dy)
+          ..lineTo(from.dx - across.dx, from.dy - across.dy)
+          ..close(),
+        Paint()..color = color);
+  }
+
+  /// How far a spur reaches in, as a share of the circumradius.
+  static const double _spurLength = 0.42;
+
+  /// A town dot's radius, the white ring round it, and half the length of
+  /// a town bar, likewise.
+  static const double _townDot = 0.15;
+  static const double _townRing = 0.04;
   static const double _townBar = 0.22;
 
   /// Draws track from the middle of side [a] to the middle of side [b] as
@@ -652,7 +755,7 @@ class TileRenderer {
 
   /// Rasterizes [def] into an [img.Image] for template matching.
   static Future<img.Image> rasterize(TileDefinition def,
-      {int size = 64, int slotTurn = 0}) async {
+      {int size = 64, int slotTurn = 0, TileStyle style = TileStyle.plain}) async {
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(
       recorder,
@@ -662,7 +765,7 @@ class TileRenderer {
       Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()),
       Paint()..color = Colors.white,
     );
-    paint(canvas, def, size.toDouble(), slotTurn: slotTurn);
+    paint(canvas, def, size.toDouble(), slotTurn: slotTurn, style: style);
     final picture = recorder.endRecording();
     final uiImage = await picture.toImage(size, size);
     final data = await uiImage.toByteData(format: ui.ImageByteFormat.rawRgba);

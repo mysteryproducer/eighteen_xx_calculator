@@ -182,6 +182,11 @@ class MapLayout {
   /// Four hexes near the corners of the map, spread as far apart as the map
   /// allows. Dragging these onto their places in a photo fixes the whole
   /// map's perspective when automatic alignment needs help.
+  ///
+  /// Where the hex nearest a corner has no name, a named place a step or two
+  /// from it is taken instead -- the one furthest out, so the four stay
+  /// spread: a board like 1889's prints no grid references, only its towns'
+  /// names, and a bare hex among bare hexes is hard to find.
   List<MapHex> get anchors {
     final bounds = boardBounds;
     final corners = [
@@ -202,7 +207,22 @@ class MapLayout {
           best = h;
         }
       }
-      if (best != null) chosen.add(best);
+      if (best == null) continue;
+      if (best.name == null) {
+        MapHex? named;
+        double furthest = -1;
+        for (final h in hexes) {
+          if (chosen.contains(h) || h.name == null) continue;
+          if (h.coord.distanceTo(best.coord) > 2) continue;
+          final out = (h.coord.boardCenter - bounds.center).distance;
+          if (out > furthest) {
+            furthest = out;
+            named = h;
+          }
+        }
+        if (named != null) best = named;
+      }
+      chosen.add(best);
     }
     return chosen;
   }

@@ -44,7 +44,8 @@ class TileOption {
 ///
 /// * tiles go on in colour order (yellow, green, brown, grey);
 /// * an upgrade keeps every hex side the old tile's track reached;
-/// * the number of cities and towns stays the same;
+/// * the number of cities and towns stays the same, except that a labelled
+///   city (`L`, `OO`...) may merge its cities in a later colour;
 /// * a labelled hex (`OO`, `B`, `Z`...) only takes tiles with its label;
 /// * track may not run off the edge of the map or across a printed
 ///   impassable border.
@@ -104,6 +105,11 @@ class TileRules {
         .any((o) => o.tileId == tile.tileId && o.rotation == tile.rotation)) {
       return null;
     }
+    if (title.tilesOnlyOn[tile.tileId] case final hexes?
+        when !hexes.contains(hex.id)) {
+      return 'Tile ${tile.tileId} goes only on '
+          '${(hexes.toList()..sort()).join(', ')}.';
+    }
     final printed = hex.printed;
     String stops(TileDefinition d) {
       // Circles too, where a city has more than one: "1 city" alone reads
@@ -120,7 +126,9 @@ class TileRules {
       return parts.isEmpty ? 'no stop' : parts.join(' and ');
     }
 
-    if (def.cityCount != printed.cityCount || def.townCount != printed.townCount) {
+    if (def.townCount != printed.townCount ||
+        (def.cityCount != printed.cityCount &&
+            (printed.label ?? hex.futureLabel) == null)) {
       return '${hex.id} has ${stops(printed)} printed, but tile '
           '${tile.tileId} has ${stops(def)}.';
     }
@@ -262,13 +270,25 @@ class TileRules {
     final special = from.isPrinted ? title.specialUpgrades[hex.id] : null;
 
     for (final tile in title.tiles.values) {
+      if (title.tilesOnlyOn[tile.id] case final hexes?
+          when !hexes.contains(hex.id)) {
+        continue;
+      }
       if (special != null) {
         if (!special.contains(tile.id)) continue;
       } else {
         if (tile.color != nextColour) continue;
         if (tile.label != requiredLabel) continue;
-        if (tile.cityCount != base.cityCount ||
-            tile.townCount != base.townCount) {
+        if (tile.townCount != base.townCount) continue;
+        // A labelled city may change how many cities it has, as tobymao
+        // allows: 1844's Lausanne is two cities in green and one of two
+        // circles in brown, and OO cities merge in some titles' browns.
+        // Not from bare map, though (an OO hex's first tile keeps both), and
+        // never down to none.
+        if (tile.cityCount != base.cityCount &&
+            (base.label == null ||
+                base.color == TileColor.plain ||
+                tile.cityCount == 0)) {
           continue;
         }
       }

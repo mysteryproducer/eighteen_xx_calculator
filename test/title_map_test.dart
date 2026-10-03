@@ -87,11 +87,22 @@ void main() {
       expect(drawn('C4').dx, lessThan(drawn('K4').dx));
     });
 
-    test('off-boards pay by phase, diesel last', () {
+    test("a session's phases are the colours the title's phases bring", () {
+      expect(g1889.phaseColours,
+          [TileColor.yellow, TileColor.green, TileColor.brown]);
+      expect(g1844.phaseColours.last, TileColor.grey);
+      expect(g1854.phaseColours.last, TileColor.grey);
+    });
+
+    test('off-boards pay by phase, and a D train more', () {
       final imabari = g1889.map.byId('F1')!.printed.stations.single;
       expect(imabari.revenueIn(TileColor.yellow), 30);
+      expect(imabari.revenueIn(TileColor.green), 30);
       expect(imabari.revenueIn(TileColor.brown), 60);
-      expect(imabari.revenueIn(TileColor.grey), 100);
+      // Phase D brings no new colour of tile, and a train other than a D
+      // is still paid the brown figure.
+      expect(imabari.revenueIn(TileColor.grey), 60);
+      expect(imabari.dieselRevenue, 100);
     });
 
     test('tiles listed twice for a variant are imported once', () {
@@ -174,6 +185,14 @@ void main() {
       // A hex at the top of the map has neighbours that aren't on it.
       final corner = g1844.map.byId('A18')!.coord;
       expect(corner.neighbors.where(g1844.map.contains).length, lessThan(6));
+    });
+
+    test("1889's hexes to drag are places printed on its board", () {
+      // It prints no grid references: the bare hex nearest a corner (A8)
+      // gives way to the town beside it.
+      expect(g1889.map.anchors.map((h) => h.id), ['A10', 'J1', 'L7', 'G14']);
+      expect(g1889.map.anchors.map((h) => h.name),
+          ['Sukumo', 'Sakaide & Okayama', 'Naruto & Awaji', 'Muroto']);
     });
 
     test('anchors are spread to the corners of the map', () {

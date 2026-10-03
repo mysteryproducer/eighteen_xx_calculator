@@ -130,7 +130,7 @@ class BoardMapPainter extends CustomPainter {
       canvas.translate(centre.dx, centre.dy);
       canvas.rotate(geometry.turn);
       canvas.translate(-tileSize / 2, -tileSize / 2);
-      TileRenderer.paint(canvas, def, tileSize);
+      TileRenderer.paint(canvas, def, tileSize, style: title.tileStyle);
       canvas.restore();
 
       final label = TextPainter(
@@ -282,8 +282,7 @@ class BoardMapPainter extends CustomPainter {
       // A city printed with no value yet (1844 prints `revenue:0`) has
       // nothing worth showing until a tile gives it one.
       if (station.revenue == 0) continue;
-      final boxed = station.kind == StationKind.offboard ||
-          (station.kind == StationKind.city && station.tokens.length > 1);
+      final boxed = station.kind != StationKind.city || station.tokens.length > 1;
       final text = TextPainter(
         text: TextSpan(
           text: '${station.revenue}',
@@ -300,10 +299,14 @@ class BoardMapPainter extends CustomPainter {
         ),
         textDirection: TextDirection.ltr,
       )..layout();
-      // Above an off-board area; between a city's circles, on a label.
-      final offset = station.kind == StationKind.offboard
-          ? Offset(0, -radius * 1.4)
-          : Offset.zero;
+      // Above an off-board area; beside a town, whose dot or bar shows it is
+      // a town to run through -- under its figure, Brig looked just like the
+      // mountain railways' dead ends; between a city's circles, on a label.
+      final offset = switch (station.kind) {
+        StationKind.offboard => Offset(0, -radius * 1.4),
+        StationKind.town => Offset(radius * 1.9, -radius * 1.9),
+        StationKind.city => Offset.zero,
+      };
       if (boxed) {
         final box = Rect.fromCenter(
           center: centre + offset,

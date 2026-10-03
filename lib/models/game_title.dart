@@ -55,6 +55,9 @@ class GameTitle {
     this.mountainPlates = const [],
     this.flat = false,
     this.specialUpgrades = const {},
+    this.tilesOnlyOn = const {},
+    this.tileStyle = TileStyle.plain,
+    this.doubleSidedTiles = false,
     this.trains = const [],
     this.phases = const [],
     this.halfPay = false,
@@ -76,6 +79,16 @@ class GameTitle {
   /// The kinds of train, and the phases of the game they bring.
   final List<TrainType> trains;
   final List<GamePhase> phases;
+
+  /// The colours of tile the game's phases bring in, in order: the phases
+  /// a session can be in. All of them for a title without phases; 1889's
+  /// stop at brown, its diesels paying more by train, not by phase.
+  List<TileColor> get phaseColours => phases.isEmpty
+      ? tilePhases
+      : [
+          for (final c in tilePhases)
+            if (phases.any((p) => p.tiles.contains(c))) c,
+        ];
 
   /// Whether a company may pay out half its revenue and keep half. None of
   /// the titles imported so far lets a player choose to.
@@ -118,6 +131,29 @@ class GameTitle {
   /// tiles that can go on the printing. 1844's Aarau (D15) is printed with
   /// two small cities, which its first tile joins into one of two circles.
   final Map<String, Set<String>> specialUpgrades;
+
+  /// [tilesOnlyOn] for the titles that have them: tiles only a private
+  /// company's power lays, in tobymao's company data rather than the tile's.
+  static const Map<String, Map<String, Set<String>>> _tilesOnlyOn = {
+    '1889': {
+      // The port, which the Mitsubishi Ferry lays on a coastal town.
+      '437': {'B11', 'G10', 'I12', 'J9'},
+    },
+  };
+
+  /// Tiles that may go only on certain hexes, by tile id: the hexes.
+  final Map<String, Set<String>> tilesOnlyOn;
+
+  /// How the physical tiles print their stops (see [TileStyle]), and
+  /// whether they are double-sided -- the other side printing its circles
+  /// in a shade of the tile ([TileStyle.shaded]) -- for the edition the
+  /// user plays: the tiles of the 1889 the app was tried on.
+  final TileStyle tileStyle;
+  final bool doubleSidedTiles;
+  static const Map<String, TileStyle> _tileStyles = {
+    '1889': TileStyle(townDots: true),
+  };
+  static const Set<String> _doubleSided = {'1889'};
 
   /// Whether the board is printed with flat-topped hexes. The app keeps
   /// every map pointy-topped (see [MapLayout.coordFromFlatId]); drawing
@@ -192,6 +228,9 @@ class GameTitle {
           ),
       ],
       specialUpgrades: _specialUpgrades[data.id] ?? const {},
+      tilesOnlyOn: _tilesOnlyOn[data.id] ?? const {},
+      tileStyle: _tileStyles[data.id] ?? TileStyle.plain,
+      doubleSidedTiles: _doubleSided.contains(data.id),
       routeRules: _routeRules[data.id] ?? RouteRules.none,
       stopGroups: {
         for (final h in data.hexes)

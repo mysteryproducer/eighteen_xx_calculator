@@ -263,6 +263,25 @@ void main() {
       expect(rules.explain(aarau, const PlacedTile('611', rotation: 1)), isNull);
     });
 
+    test("Lausanne's two cities merge in brown, as a labelled city may", () {
+      // Printed and green, two cities; brown 902 and grey 903 have one.
+      final lausanne = title.map.byId('I4')!;
+      final fromGreen = rules
+          .options(lausanne, const PlacedTile('901', rotation: 1),
+              maxSteps: 2)
+          .map((o) => o.tileId)
+          .toSet();
+      expect(fromGreen, containsAll({'902', '903'}));
+      // So the grey tile laid there in the game is allowed.
+      expect(
+          rules.explain(lausanne, const PlacedTile('903', rotation: 1)), isNull);
+      // An unlabelled city keeps its count: Basel takes no OO tile.
+      final basel = title.map.byId('C12')!;
+      expect(
+          rules.options(basel, null, maxSteps: 3).map((o) => o.tileId),
+          isNot(contains('64')));
+    });
+
     test('an OO tile on Aarau is still refused, and says why', () {
       final aarau = title.map.byId('D15')!;
       expect(rules.explain(aarau, const PlacedTile('59')), isNotNull);
@@ -289,6 +308,34 @@ void main() {
       expect(rules.mountainPlates(title.map.byId('F13')!), isEmpty);
       // Gotthard is a mountain to tunnel through, not one to climb.
       expect(rules.mountainPlates(title.map.byId('H19')!), isEmpty);
+    });
+  });
+
+  group("1889's own hexes", () {
+    final g1889 = GameTitle.byId('1889')!;
+    final rules1889 = TileRules(g1889);
+    Set<String?> on(String hexId, {int steps = 1}) => tileIds(
+        rules1889.options(g1889.map.byId(hexId)!, null, maxSteps: steps));
+
+    test('a lettered city takes only tiles of its letter', () {
+      // Kotohira (I4) is H, Takamatsu (K4) T, and Kouchi (F9) K.
+      expect(on('I4', steps: 3), {null, '438', '439', '492'});
+      expect(on('K4', steps: 2), {null, '440', '466'});
+      expect(on('F9'), {null, '465'});
+    });
+
+    test('the port tile goes only on a coastal town', () {
+      // The Mitsubishi Ferry lays it on B11, G10, I12 or J9; Ritsurin Kouen
+      // (J5) is a town inland.
+      for (final port in ['B11', 'G10', 'I12', 'J9']) {
+        expect(on(port), contains('437'), reason: port);
+      }
+      expect(on('J5'), isNot(contains('437')));
+      expect(on('J5'), containsAll({'3', '58'}));
+      expect(
+          rules1889.explain(
+              g1889.map.byId('J5')!, const PlacedTile('437')),
+          'Tile 437 goes only on B11, G10, I12, J9.');
     });
   });
 }

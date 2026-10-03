@@ -6,6 +6,17 @@ import '../models/game_title.dart';
 import '../models/tile_definition.dart';
 import 'route_finder.dart';
 
+/// One part of what a route earns besides its stops, and why.
+class RouteBonus {
+  final String reason;
+  final int amount;
+
+  const RouteBonus(this.reason, this.amount);
+
+  @override
+  String toString() => '$reason: $amount';
+}
+
 /// One train's run.
 class TrainRun {
   /// The train's name, as the title has it.
@@ -21,8 +32,9 @@ class TrainRun {
   final List<StationNode> paid;
 
   /// What the route earns besides its stops: running over tunnel track,
-  /// joining two off-board groups.
+  /// joining two off-board groups. [bonuses] says how it adds up.
   final int bonus;
+  final List<RouteBonus> bonuses;
 
   final int revenue;
 
@@ -33,6 +45,7 @@ class TrainRun {
     required this.paid,
     required this.bonus,
     required this.revenue,
+    this.bonuses = const [],
   });
 
   const TrainRun.idle(this.train)
@@ -40,7 +53,15 @@ class TrainRun {
         track = const [],
         paid = const [],
         bonus = 0,
+        bonuses = const [],
         revenue = 0;
+
+  /// The stops it visits but isn't paid for: an express's beyond its best
+  /// few.
+  List<StationNode> get unpaid => [
+        for (final s in stops)
+          if (!paid.contains(s)) s,
+      ];
 
   bool get runs => stops.isNotEmpty;
 
@@ -188,7 +209,9 @@ class TrainRouter {
         trains.length, (i) => TrainRun.idle(trains[i]));
     for (int k = 0; k < order.length; k++) {
       final c = picked[k];
-      if (c != null) runs[order[k]] = c.run(trains[order[k]]);
+      if (c != null) {
+        runs[order[k]] = c.run(trains[order[k]], _bonusesOf(c.paid, c.track));
+      }
     }
     return CompanyRuns(runs, complete: !_cutShort);
   }
@@ -307,10 +330,12 @@ class TrainRouter {
       outer:
       for (int i = 0; i + 1 < arms.length; i++) {
         final a = arms[i];
-        if (a.best + arms[i + 1].best + home.revenue + cap <= threshold) break;
+        if (a.best + arms[i + 1].best + spec.earns(home) + cap <= threshold) {
+          break;
+        }
         for (int j = i + 1; j < arms.length; j++) {
           final b = arms[j];
-          if (a.best + b.best + home.revenue + cap <= threshold) break;
+          if (a.best + b.best + spec.earns(home) + cap <= threshold) break;
           if (!budget.take()) {
             _cutShort = true;
             break outer;
@@ -411,16 +436,16 @@ class TrainRouter {
     var sum = 0;
     if (spec.kind != TrainKind.express) {
       for (final s in stops) {
-        sum += s.revenue;
+        sum += spec.earns(s);
       }
       return sum;
     }
     final others = <int>[];
     for (final s in stops) {
       if (s.color == TileColor.red) {
-        sum += s.revenue;
+        sum += spec.earns(s);
       } else {
-        others.add(s.revenue);
+        others.add(spec.earns(s));
       }
     }
     others.sort((a, b) => b.compareTo(a));
@@ -440,7 +465,7 @@ class TrainRouter {
         spec.kind == TrainKind.express ? _expressPaid(spec, stops) : stops;
     var revenue = 0;
     for (final s in paid) {
-      revenue += s.revenue;
+      revenue += spec.earns(s);
     }
     var bonus = _pairBonus(paid);
     if (a.narrow || (b?.narrow ?? false)) {
@@ -465,7 +490,7 @@ class TrainRouter {
     final pays = spec.pays!;
     if (stops.length <= pays) return stops;
     final byRevenue = [...stops]
-      ..sort((a, b) => b.revenue.compareTo(a.revenue));
+      ..sort((a, b) => spec.earns(b).compareTo(spec.earns(a)));
     final paid = byRevenue.sublist(0, pays);
     final rest = byRevenue.sublist(pays);
     if (!paid.any((s) => s.holds(company))) {
@@ -476,6 +501,49 @@ class TrainRouter {
     paid.addAll(rest.where((s) => s.color == TileColor.red));
     return paid;
   }
+
+  /// How a route's bonus adds up, for the user to see: tunnel track at so
+  /// much a stop, and each pair of off-board groups it joins, with what
+  /// each area pays.
+  List<RouteBonus> _bonusesOf(
+      List<StationNode> paid, List<TrackEdge> track) {
+    final rules = title.routeRules;
+    final bonuses = <RouteBonus>[];
+    if (rules.narrowBonus > 0 && track.any((e) => e.narrow)) {
+      bonuses.add(RouteBonus(
+          'Tunnel track: ${rules.narrowBonus} for each of the '
+          '${paid.length} stops paid for',
+          rules.narrowBonus * paid.length));
+    }
+    final groups = {
+      for (final s in paid) ...?title.stopGroups[_hexIds[s.id]],
+    };
+    String nameOf(StationNode s) {
+      final hex = title.map.at(s.hex);
+      return hex?.name ?? hex?.id ?? '${s.hex}';
+    }
+
+    for (final (one, other) in rules.bonusPairs) {
+      if (!groups.contains(one) || !groups.contains(other)) continue;
+      final paying = [
+        for (final s in paid)
+          if ((title.groupBonus[_hexIds[s.id]] ?? 0) > 0) s,
+      ];
+      bonuses.add(RouteBonus(
+          '${_groupWord(one)} to ${_groupWord(other).toLowerCase()}: '
+          '${paying.map((s) => '${nameOf(s)} ${title.groupBonus[_hexIds[s.id]]}').join(' + ')}',
+          paying.fold(0, (t, s) => t + title.groupBonus[_hexIds[s.id]]!)));
+    }
+    return bonuses;
+  }
+
+  static String _groupWord(String group) => switch (group) {
+        'E' => 'East',
+        'W' => 'West',
+        'N' => 'North',
+        'S' => 'South',
+        _ => group,
+      };
 
   /// What joining two off-board groups earns (1844's east-west and
   /// north-south runs): every bonus the route's stops pay, for each pair
@@ -529,7 +597,9 @@ class TrainRouter {
 
   /// Whether a train of [spec]'s may stop at [station] at all.
   bool _canVisit(_Spec spec, StationNode station) {
-    if (title.routeRules.noEmptyStops && station.revenue <= 0) return false;
+    if (title.routeRules.noEmptyStops && spec.earns(station) <= 0) {
+      return false;
+    }
     if (spec.kind == TrainKind.hexes && station.color == TileColor.red) {
       return false;
     }
@@ -582,8 +652,15 @@ class _Spec {
   final int? pays;
   final bool freeTowns;
 
-  const _Spec(this.name, this.kind, this.distance,
-      {this.pays, this.freeTowns = false});
+  /// A D train, which some stops pay more (see `StationNode.revenueFor`).
+  final bool diesel;
+
+  _Spec(this.name, this.kind, this.distance,
+      {this.pays, this.freeTowns = false})
+      : diesel = name.toUpperCase() == 'D';
+
+  /// What a stop pays this train.
+  int earns(StationNode s) => diesel ? s.revenueFor(name) : s.revenue;
 
   /// The train called [name], or for a title that doesn't list it, a train
   /// of as many stops as the number it starts with.
@@ -649,13 +726,15 @@ class _Candidate {
   /// found.
   late final String key = segments.join(',');
 
-  TrainRun run(String train) => TrainRun(
+  TrainRun run(String train, [List<RouteBonus> bonuses = const []]) =>
+      TrainRun(
         train: train,
         stops: stops,
         track: track,
         paid: paid,
         bonus: bonus,
         revenue: revenue,
+        bonuses: bonuses,
       );
 }
 

@@ -124,6 +124,7 @@ class TokenDetector {
     // side doesn't move it.
     final ring = <List<double>>[];
     final middle = <List<double>>[];
+    final around = <List<double>>[];
     for (int a = 0; a < 36; a++) {
       final dir = Offset(math.cos(a * math.pi / 18), math.sin(a * math.pi / 18));
       for (final r in _ringRadii) {
@@ -133,6 +134,10 @@ class TokenDetector {
       for (final r in _middleRadii) {
         final c = at(slot + dir * (r * slotRadius));
         if (c != null) middle.add(c);
+      }
+      for (final r in _aroundRadii) {
+        final c = at(slot + dir * (r * slotRadius));
+        if (c != null) around.add(c);
       }
     }
     if (ring.length < 72 || middle.length < 54) return TokenDetection.unseen;
@@ -151,15 +156,23 @@ class TokenDetector {
     final fromWhite = math.sqrt(redness * redness +
         yellowness * yellowness +
         math.pow(math.max(0.0, 255 - lightness), 2));
-    // A logo: printing much darker than the white around it.
+    // A logo: printing that stands out from the disc it is on -- dark on a
+    // pale token, light on a dark one.
     final logo = middle
-            .where((c) => (c[0] + c[1] + c[2]) / 3 < 0.7 * 255)
+            .where((c) => ((c[0] + c[1] + c[2]) / 3 - lightness).abs() > 0.3 * 255)
             .length /
         middle.length;
 
     final colourEvidence = ((fromWhite - 40) / 40).clamp(0.0, 1.0);
     if (!onTile) return _homeToken(seen, colour, colourEvidence, home);
     final logoEvidence = ((logo - 0.1) / 0.2).clamp(0.0, 1.0);
+    // Some tiles print their city circles not white but a darker shade of
+    // the tile -- one side of 1889's double-sided tiles -- and an empty one
+    // of those is coloured too. Unless a logo stands out in it, a circle the
+    // tile's own colour, darker, is empty.
+    if (logoEvidence < 0.5 && _tileColouredCircle(seen, around)) {
+      return TokenDetection(present: false, confidence: 0.8, color: colour);
+    }
     final evidence = math.max(colourEvidence, logoEvidence);
     final present = evidence >= 0.5;
     final confidence = present ? evidence : 1 - evidence;
@@ -190,6 +203,30 @@ class TokenDetector {
       company: best.$1,
       companyConfidence: companyConfidence,
     );
+  }
+
+  /// Whether [seen], a circle's colour, is the colour of the tile [around]
+  /// it, darker: an empty circle printed in a shade of the tile.
+  static bool _tileColouredCircle(List<double> seen, List<List<double>> around) {
+    if (around.length < 36) return false;
+    double light(List<double> c) => (c[0] + c[1] + c[2]) / 3;
+    // The tile, not the track or the black ring on it: the lighter half.
+    final sorted = [...around]..sort((a, b) => light(b).compareTo(light(a)));
+    final tile = sorted.take(sorted.length ~/ 2).toList();
+    final bg = [
+      for (int k = 0; k < 3; k++)
+        (tile.map((c) => c[k]).toList()..sort())[tile.length ~/ 2],
+    ];
+    (double, double) hue(List<double> c) =>
+        (c[0] - c[1], (c[0] + c[1]) / 2 - c[2]);
+    final (br, by) = hue(bg);
+    final (sr, sy) = hue(seen);
+    final bgChroma = math.sqrt(br * br + by * by);
+    final seenChroma = math.sqrt(sr * sr + sy * sy);
+    if (bgChroma < 20 || seenChroma < 10) return false;
+    final cos = (br * sr + by * sy) / (bgChroma * seenChroma);
+    final ratio = light(seen) / math.max(1.0, light(bg));
+    return cos > 0.85 && ratio > 0.3 && ratio < 0.85;
   }
 
   /// A printed city: is [home]'s token on it? Only a token that is clearly
@@ -257,6 +294,9 @@ class TokenDetector {
   /// sampled.
   static const List<double> _ringRadii = [0.5, 0.6, 0.7, 0.8];
   static const List<double> _middleRadii = [0.1, 0.2, 0.3];
+
+  /// And the tile around it, outside its black ring.
+  static const List<double> _aroundRadii = [1.3, 1.45, 1.6];
 
   /// How much nearer the home company's colour is made to seem.
   static const double _homeFavour = 0.6;

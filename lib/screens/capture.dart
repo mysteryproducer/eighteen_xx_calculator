@@ -33,6 +33,9 @@ class CaptureGuide {
   /// everywhere.
   final Map<HexCoord, TileDefinition> tiles;
 
+  /// How those tiles print their stops (see `GameTitle.tileStyle`).
+  final TileStyle tileStyle;
+
   final String instruction;
 
   /// Which way the board faces in the frame, in radians as
@@ -58,6 +61,7 @@ class CaptureGuide {
     required this.hexes,
     required this.instruction,
     this.tiles = const {},
+    this.tileStyle = TileStyle.plain,
     this.turn = 0,
     this.map,
     this.adjustment = GuideAdjustment.none,
@@ -70,6 +74,7 @@ class CaptureGuide {
         hexes: hexes,
         instruction: instruction,
         tiles: tiles,
+        tileStyle: tileStyle,
         turn: turn,
         map: map,
         adjustment: adjustment,
@@ -83,6 +88,7 @@ class CaptureGuide {
         hexes: hexes,
         instruction: instruction,
         tiles: tiles,
+        tileStyle: tileStyle,
         turn: turn,
         map: map,
         adjustment: adjustment,
@@ -172,7 +178,7 @@ class CaptureGuidePainter extends CustomPainter {
         final centre = coord.boardCenter;
         canvas.save();
         canvas.translate(centre.dx - tileSize / 2, centre.dy - tileSize / 2);
-        TileRenderer.paint(canvas, tile, tileSize);
+        TileRenderer.paint(canvas, tile, tileSize, style: guide.tileStyle);
         canvas.restore();
       });
       canvas.restore();

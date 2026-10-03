@@ -20,6 +20,24 @@ library;
 /// a map: red off-board areas, blue water, and purple special hexes.
 enum TileColor { plain, yellow, green, brown, grey, red, blue, purple }
 
+/// How a title's tiles print their stops, where it differs from 1844's.
+class TileStyle {
+  /// A town on a run of track printed as a dot on it rather than a bar
+  /// across it, as 1889's tiles print them.
+  final bool townDots;
+
+  /// City and town circles printed in a darker shade of the tile rather
+  /// than white: the textured side of 1889's double-sided tiles.
+  final bool shadedStops;
+
+  const TileStyle({this.townDots = false, this.shadedStops = false});
+
+  static const TileStyle plain = TileStyle();
+
+  /// This style, with its stops in a shade of the tile.
+  TileStyle get shaded => TileStyle(townDots: townDots, shadedStops: true);
+}
+
 /// The colours a laid tile can have, in upgrade order.
 const List<TileColor> tilePhases = [
   TileColor.yellow,
@@ -88,6 +106,11 @@ class TileStation {
   /// Empty when the revenue is a single figure.
   final Map<TileColor, int> phaseRevenue;
 
+  /// What a D train is paid here instead, where the printing says so:
+  /// 1889's off-boards (`yellow_30|brown_60|diesel_100`) pay a diesel more
+  /// than the phase's figure, and only a diesel, as tobymao has it.
+  final int? dieselRevenue;
+
   /// Where on the hex this stop is printed, as tobymao/18xx's `loc:`: a side
   /// number, or a half number for the corner between two sides. Null means
   /// the middle of the hex.
@@ -108,6 +131,7 @@ class TileStation {
     required this.revenue,
     this.slots = 1,
     this.phaseRevenue = const {},
+    this.dieselRevenue,
     this.loc,
     this.style,
     this.turn = 0,
@@ -121,6 +145,7 @@ class TileStation {
         revenue: revenue,
         slots: slots,
         phaseRevenue: phaseRevenue,
+        dieselRevenue: dieselRevenue,
         loc: loc == null ? null : (loc! + steps) % 6,
         style: style,
         turn: (turn + steps) % 6,
@@ -170,6 +195,11 @@ class TileDefinition {
   /// along a lake or mountain ridge). Track may not cross them.
   final Set<int> impassable;
 
+  /// The icons printed on it, by name: tobymao's `icon=image:port` is
+  /// `port` (1889's port tile, 437), `icon=image:1844/bonus_30` is
+  /// `bonus_30`.
+  final Set<String> icons;
+
   const TileDefinition({
     required this.id,
     required this.color,
@@ -177,6 +207,7 @@ class TileDefinition {
     required this.segments,
     this.label,
     this.impassable = const {},
+    this.icons = const {},
   });
 
   int get cityCount => stations.where((s) => s.kind == StationKind.city).length;
@@ -239,6 +270,7 @@ class TileDefinition {
       stations: [for (final station in stations) station.rotated(s)],
       label: label,
       impassable: {for (final e in impassable) (e + s) % 6},
+      icons: icons,
       segments: [
         for (final seg in segments)
           TileSegment(rotateEndpoint(seg.a), rotateEndpoint(seg.b),
@@ -257,6 +289,7 @@ class TileDefinition {
       color: color,
       label: label,
       impassable: impassable,
+      icons: icons,
       segments: segments,
       stations: [
         for (final s in stations)
@@ -267,6 +300,7 @@ class TileDefinition {
                   revenue: source.first.revenue,
                   slots: s.slots,
                   phaseRevenue: source.first.phaseRevenue,
+                  dieselRevenue: source.first.dieselRevenue,
                   loc: s.loc,
                   style: s.style,
                   turn: s.turn,
@@ -284,6 +318,7 @@ class TileDefinition {
         stations: stations,
         label: label,
         impassable: impassable,
+        icons: icons,
         segments: [...segments, ...extra],
       );
 
@@ -309,20 +344,23 @@ class TileDefinition {
       final kv = part.split('_');
       if (kv.length != 2) continue;
       final value = int.tryParse(kv[1]);
-      // Phases are named by tile colour, except the last in some titles:
-      // 1889's off-boards pay by "diesel", which comes after brown.
-      final phase =
-          kv[0] == 'diesel' ? TileColor.grey : tileColorFromName(kv[0]);
-      if (value != null) result[phase] = value;
+      // Phases are named by tile colour. A "diesel" figure is for D trains,
+      // whatever the phase (see [TileStation.dieselRevenue]).
+      if (kv[0] == 'diesel') continue;
+      if (value != null) result[tileColorFromName(kv[0])] = value;
     }
     return result;
   }
+
+  static int? _parseDieselRevenue(String raw) => int.tryParse(
+      RegExp(r'(?:^|\|)diesel_(\d+)').firstMatch(raw)?.group(1) ?? '');
 
   /// Parses a tile DSL string (see class doc) into a [TileDefinition].
   static TileDefinition parseDsl(String id, TileColor color, String dsl) {
     final stations = <TileStation>[];
     final segments = <TileSegment>[];
     final impassable = <int>{};
+    final icons = <String>{};
     String? label;
 
     for (final rawPart in dsl.split(';')) {
@@ -343,12 +381,14 @@ class TileDefinition {
           double? loc;
           String? style;
           var phaseRevenue = const <TileColor, int>{};
+          int? dieselRevenue;
           for (final sp in subParts) {
             final kv = sp.split(':');
             if (kv.length != 2) continue;
             if (kv[0] == 'revenue') {
               revenue = _parseRevenue(kv[1]);
               phaseRevenue = _parsePhaseRevenue(kv[1]);
+              dieselRevenue = _parseDieselRevenue(kv[1]);
             }
             if (kv[0] == 'slots') slots = int.tryParse(kv[1]) ?? 1;
             if (kv[0] == 'loc') loc = double.tryParse(kv[1]);
@@ -364,6 +404,7 @@ class TileDefinition {
             revenue: revenue,
             slots: slots,
             phaseRevenue: phaseRevenue,
+            dieselRevenue: dieselRevenue,
             loc: loc,
             style: style,
           ));
@@ -398,8 +439,13 @@ class TileDefinition {
           }
           if (edge != null && type == 'impassable') impassable.add(edge);
           break;
+        case 'icon':
+          for (final sp in subParts) {
+            if (sp.startsWith('image:')) icons.add(sp.substring(6).split('/').last);
+          }
+          break;
         default:
-          // upgrade=, icon=, frame=, junction... -- skipped.
+          // upgrade=, frame=, junction... -- skipped.
           break;
       }
     }
@@ -411,6 +457,7 @@ class TileDefinition {
       segments: segments,
       label: label,
       impassable: impassable,
+      icons: icons,
     );
   }
 }

@@ -725,6 +725,62 @@ void main() {
       expect(find.text('SCB runs 3H, 2H.'), findsOneWidget);
     });
 
+    Future<void> chooseCompany(WidgetTester tester, String label) async {
+      await tester.tap(find.text('Any company'));
+      await tester.pumpAndSettle();
+      // Further down the list than the window shows, and only built once
+      // scrolled to.
+      await tester.scrollUntilVisible(find.textContaining(label), 100,
+          scrollable: find.byType(Scrollable).last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining(label).hitTestable().last);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets("a company's tokens away from its home are pointed out",
+        (tester) async {
+      // MOB's home is Montreux (I6); a token at Thun (H13) and none there
+      // (its home token turned off) means one is on the wrong hex.
+      await openSession(tester, setUp: (session) {
+        session.homeTokensOff.add('MOB');
+        final h13 = title.map.byId('H13')!.coord;
+        session.tokens[GameSession.slotId('${h13.row}_${h13.col}_0', 0)] =
+            'MOB';
+      });
+      expect(find.textContaining('1 token in red'), findsOneWidget);
+      await chooseCompany(tester, 'MOB');
+      expect(
+          find.text("MOB's first token goes on its home, I6 Montreux, and "
+              'none of its tokens is there: one of them is on the wrong hex.'),
+          findsOneWidget);
+    });
+
+    testWidgets("a route's bonus is spelt out at a tap", (tester) async {
+      // MOB from Bern's neighbour H13 through H11's curve and the tunnel
+      // under I12 to Brig: tunnel track pays 10 a stop.
+      await openSession(tester, setUp: (session) {
+        session.setManually(
+            title.map.byId('H13')!, const PlacedTile('915', rotation: 4));
+        session.setManually(
+            title.map.byId('H11')!, const PlacedTile('29', rotation: 4));
+        session.tunnels['I12'] = (2, 5);
+        final h13 = title.map.byId('H13')!.coord;
+        session.tokens[GameSession.slotId('${h13.row}_${h13.col}_0', 0)] =
+            'MOB';
+        session.companyTrains['MOB'] = ['2'];
+      });
+      await chooseCompany(tester, 'MOB');
+      await tester.tap(find.text('Find routes'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('H13 - J13 pays 90'), findsOneWidget);
+      expect(find.textContaining('Tunnel track'), findsNothing);
+      await tester.tap(find.text(' (20 of it bonus ▸)'));
+      await tester.pumpAndSettle();
+      expect(
+          find.text('Tunnel track: 10 for each of the 2 stops paid for: 20'),
+          findsOneWidget);
+    });
+
     testWidgets('the camera takes a photo of the board or of a player area',
         (tester) async {
       await openSession(tester);

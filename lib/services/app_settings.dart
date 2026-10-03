@@ -26,6 +26,11 @@ class AppSettings {
 
   static const double defaultOverlayOpacity = 0.5;
 
+  /// Whether the hexes to drag on the align screen are labelled by the place
+  /// printed there (`Sukumo`) rather than by grid reference (`A10`): a board
+  /// like 1889's prints only names.
+  final ValueNotifier<bool> labelAnchorsByName = ValueNotifier(true);
+
   bool _loaded = false;
 
   /// Reads the saved settings, once; anything unreadable keeps its default.
@@ -39,6 +44,8 @@ class AppSettings {
       if (json is! Map) return;
       final opacity = json['overlayOpacity'];
       if (opacity is num) overlayOpacity.value = opacity.toDouble().clamp(0.0, 1.0);
+      final byName = json['labelAnchorsByName'];
+      if (byName is bool) labelAnchorsByName.value = byName;
     } catch (e) {
       debugPrint('Could not read settings: $e');
     }
@@ -49,11 +56,19 @@ class AppSettings {
     await _save();
   }
 
+  Future<void> setLabelAnchorsByName(bool value) async {
+    labelAnchorsByName.value = value;
+    await _save();
+  }
+
   Future<void> _save() async {
     try {
       final file = await _file();
       await file.parent.create(recursive: true);
-      await file.writeAsString(jsonEncode({'overlayOpacity': overlayOpacity.value}));
+      await file.writeAsString(jsonEncode({
+        'overlayOpacity': overlayOpacity.value,
+        'labelAnchorsByName': labelAnchorsByName.value,
+      }));
     } catch (e) {
       debugPrint('Could not save settings: $e');
     }

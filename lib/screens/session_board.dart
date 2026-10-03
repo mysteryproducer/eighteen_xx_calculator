@@ -82,9 +82,16 @@ class _SessionBoardState extends State<SessionBoard> {
   /// The selected company's trains' runs, when it has trains noted.
   CompanyRuns? _runs;
 
+  /// Which of [_runs]' trains have their bonus spelt out, by index.
+  final Set<int> _bonusesShown = {};
+
   /// Whether the company pays out half its revenue (where the title lets
   /// it), for what each player is paid.
   bool _halfPay = false;
+
+  /// A phase the user said not yet to (see [_offerPhase]); only a later one
+  /// is offered again.
+  TileColor? _phaseDeclined;
   HexCoord? _highlighted;
   bool _busy = false;
   String _status = '';
@@ -147,6 +154,70 @@ class _SessionBoardState extends State<SessionBoard> {
 
   void _refresh() {
     setState(_rebuild);
+    _save();
+  }
+
+  (TileColor, String)? _laterPhase() =>
+      CompanyRules(widget.title).laterPhase(_session);
+
+  /// After a photo: offers to move to the phase the board or the trains
+  /// show, if later than the session's.
+  Future<void> _offerPhase() async {
+    final later = _laterPhase();
+    if (later == null || !mounted) return;
+    final (colour, why) = later;
+    final declined = _phaseDeclined;
+    if (declined != null &&
+        widget.title.phaseColours.indexOf(colour) <=
+            widget.title.phaseColours.indexOf(declined)) {
+      return;
+    }
+    final move = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Move to the ${colour.name} phase?'),
+        content: Text('The game is in the ${_session.phase.name} phase, but '
+            '$why says it has reached ${colour.name}: off-board areas pay '
+            'their ${colour.name} figures from then on.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Not yet'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text('Move to ${colour.name}'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (move == true) {
+      setState(() {
+        _session.phase = colour;
+        _rebuild();
+      });
+      await _save();
+    } else {
+      _phaseDeclined = colour;
+    }
+  }
+
+  /// After the user has set a tile or a train: moves to the phase it shows,
+  /// without asking -- they have just said so.
+  void _followPhase() {
+    final later = _laterPhase();
+    if (later == null) return;
+    final (colour, why) = later;
+    _refreshWith(() => _session.phase = colour);
+    _snack('Moved to the ${colour.name} phase: $why.');
+  }
+
+  void _refreshWith(void Function() change) {
+    setState(() {
+      change();
+      _rebuild();
+    });
     _save();
   }
 
@@ -246,6 +317,7 @@ class _SessionBoardState extends State<SessionBoard> {
     if (confirmed == null || !mounted) return;
     confirmed.applyTo(_session);
     await _save();
+    await _offerPhase();
     if (!mounted) return;
     final first = confirmed.companies.firstOrNull;
     setState(() {
@@ -407,6 +479,7 @@ class _SessionBoardState extends State<SessionBoard> {
         '${doubtful == 0 ? 'none' : doubtful} to check.'
         '${glared.isEmpty ? '' : ' Glare over ${_listed(glared)}: close-ups of '
             'those from another angle will read better.'}');
+    await _offerPhase();
   }
 
   /// Hex ids for a message: a few, then how many more.
@@ -530,6 +603,7 @@ class _SessionBoardState extends State<SessionBoard> {
               _session.tunnels.containsKey(_map.at(c)!.id))
             c: content[c]!,
       },
+      tileStyle: widget.title.tileStyle,
       instruction: '${label == null ? '' : '$label. '}'
           'Line the outline up with ${target.displayName} and the hexes '
           'around it.',
@@ -1041,6 +1115,7 @@ class _SessionBoardState extends State<SessionBoard> {
                       }
                       Navigator.of(context).pop();
                       _refresh();
+                      _followPhase();
                     },
                     child: const Text('Apply'),
                   ),
@@ -1153,6 +1228,18 @@ class _SessionBoardState extends State<SessionBoard> {
           'allowed here.';
     }
 
+    // A company's first token goes on its home hex; one of its tokens here
+    // with none there is out of place (see [GameSession.tokenProblems]).
+    List<String> awayFromHome() => [
+          for (final c in companies)
+            if (c.homeHex case final home?
+                when chosen.contains(c.id) &&
+                    home != hex?.id &&
+                    !_graph.stations.any(
+                        (s) => _map.at(s.hex)?.id == home && s.holds(c.id)))
+              GameSession.homeMissing(c, _map.byId(home)?.displayName),
+        ];
+
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -1249,8 +1336,18 @@ class _SessionBoardState extends State<SessionBoard> {
                     ],
                   ),
                 ],
+              if (station.kind == StationKind.city && homes.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Home of ${homes.map((c) => c.label).join(' and ')}: a '
+                    'home token is taken as down until you set its circle to '
+                    'None, for a company that hasn\'t started.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
               if (station.kind == StationKind.city)
-                if (blocking() case final why?)
+                for (final why in [?blocking(), ...awayFromHome()])
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(why,
@@ -1282,6 +1379,15 @@ class _SessionBoardState extends State<SessionBoard> {
                       // The user has looked at it: whatever it is now is
                       // settled.
                       _session.tokenDoubts.remove(id);
+                    }
+                    // A home token taken off is a company that hasn't
+                    // started; put back, it has.
+                    for (final c in homes) {
+                      if (chosen.contains(c.id)) {
+                        _session.homeTokensOff.remove(c.id);
+                      } else {
+                        _session.homeTokensOff.add(c.id);
+                      }
                     }
                     Navigator.of(context).pop();
                     _refresh();
@@ -1356,6 +1462,7 @@ class _SessionBoardState extends State<SessionBoard> {
       final runs = TrainRouter(widget.title, _graph, company.id).best(trains);
       setState(() {
         _runs = runs;
+        _bonusesShown.clear();
         _route = null;
       });
       if (runs.revenue == 0) {
@@ -1424,7 +1531,7 @@ class _SessionBoardState extends State<SessionBoard> {
               _save();
             },
             itemBuilder: (context) => [
-              for (final phase in tilePhases)
+              for (final phase in widget.title.phaseColours)
                 PopupMenuItem(value: phase, child: Text('${phase.name} phase')),
             ],
             child: Center(
@@ -1799,6 +1906,18 @@ class _SessionBoardState extends State<SessionBoard> {
                   ),
                 ],
               ),
+            // Routes from tokens that can't all be right.
+            if (company?.homeHex case final home?
+                when _session
+                    .awayFromHome(widget.title, _graph.stations)
+                    .containsKey(company!.id))
+              Text(
+                GameSession.homeMissing(company, _map.byId(home)?.displayName),
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: BoardMapPainter.wrong),
+              ),
             if (_runs case final runs? when company != null)
               ..._runLines(runs, company),
             if (route != null && !route.isEmpty)
@@ -1829,7 +1948,7 @@ class _SessionBoardState extends State<SessionBoard> {
         if (_session.percentHeld(p, company.id) > 0) p,
     ];
     return [
-      for (int i = 0; i < runs.runs.length; i++)
+      for (int i = 0; i < runs.runs.length; i++) ...[
         Padding(
           padding: const EdgeInsets.only(top: 2),
           child: Row(
@@ -1842,19 +1961,58 @@ class _SessionBoardState extends State<SessionBoard> {
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: Text(
-                  runs.runs[i].runs
-                      ? '${runs.runs[i].train}: '
-                          '${runs.runs[i].stops.map(stop).join(' - ')} '
-                          'pays ${runs.runs[i].revenue}'
-                          '${runs.runs[i].bonus == 0 ? '' : ' (${runs.runs[i].bonus} of it bonus)'}'
-                      : '${runs.runs[i].train}: nowhere left to run',
-                  style: theme.bodyMedium,
+                child: Text.rich(
+                  TextSpan(
+                    style: theme.bodyMedium,
+                    children: [
+                      TextSpan(
+                        text: runs.runs[i].runs
+                            ? '${runs.runs[i].train}: '
+                                '${runs.runs[i].stops.map(stop).join(' - ')} '
+                                'pays ${runs.runs[i].revenue}'
+                            : '${runs.runs[i].train}: nowhere left to run',
+                      ),
+                      // How the bonus adds up, a tap away.
+                      if (runs.runs[i].bonus != 0)
+                        WidgetSpan(
+                          alignment: PlaceholderAlignment.baseline,
+                          baseline: TextBaseline.alphabetic,
+                          child: InkWell(
+                            onTap: () => setState(() {
+                              if (!_bonusesShown.remove(i)) {
+                                _bonusesShown.add(i);
+                              }
+                            }),
+                            child: Text(
+                              ' (${runs.runs[i].bonus} of it bonus'
+                              '${_bonusesShown.contains(i) ? ' ▾' : ' ▸'})',
+                              style: theme.bodyMedium?.copyWith(
+                                color: Theme.of(context).colorScheme.primary,
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             ],
           ),
         ),
+        if (_bonusesShown.contains(i))
+          for (final line in [
+            for (final b in runs.runs[i].bonuses) '${b.reason}: ${b.amount}',
+            if (runs.runs[i].unpaid.isNotEmpty)
+              'Paid for the best ${runs.runs[i].paid.length} of its '
+                  '${runs.runs[i].stops.length} stops, not '
+                  '${runs.runs[i].unpaid.map((s) => '${stop(s)} (${s.revenue})').join(', ')}',
+          ])
+            Padding(
+              padding: const EdgeInsets.only(left: 16, top: 1),
+              child: Text(line, style: theme.bodySmall),
+            ),
+      ],
       Padding(
         padding: const EdgeInsets.only(top: 4),
         child: Row(
@@ -1922,6 +2080,7 @@ class _SessionBoardState extends State<SessionBoard> {
       _runs = null;
     });
     await _save();
+    _followPhase();
   }
 }
 

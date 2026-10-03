@@ -60,6 +60,34 @@ class CompanyRules {
     return title.phases[at];
   }
 
+  /// A phase later than [session]'s that the game shows it has reached,
+  /// and what shows it: a tile of a later colour on the board, or a train
+  /// whose purchase brought in a later colour of tile. Null when the
+  /// session's phase is as late as anything seen.
+  (TileColor, String)? laterPhase(GameSession session) {
+    final order = title.phaseColours;
+    var best = order.indexOf(session.phase);
+    String? why;
+    for (final hex in title.map.hexes) {
+      final tile = session.tileAt(hex);
+      final colour = tile == null ? null : title.tiles[tile.tileId]?.color;
+      final i = colour == null ? -1 : order.indexOf(colour);
+      if (i > best) {
+        best = i;
+        why = 'a ${colour!.name} tile on ${hex.displayName}';
+      }
+    }
+    final phase = this.phase(session);
+    if (phase != null && phase.on != null) {
+      final i = phase.tiles.map(order.indexOf).fold(-1, (a, b) => a > b ? a : b);
+      if (i > best) {
+        best = i;
+        why = 'a ${phase.on} train';
+      }
+    }
+    return why == null ? null : (order[best], why);
+  }
+
   /// What is wrong with [company] owning [trains], in sentences: a train
   /// the title doesn't have, more than the phase allows, or one that a
   /// train seen with it -- its own, others in the same photo ([alsoSeen]),
@@ -102,11 +130,15 @@ class CompanyRules {
     return problems;
   }
 
-  /// Where [company]'s station tokens are: on the board (from the
-  /// session's tokens) and, once counted, on its charter.
+  /// Where [company]'s station tokens are: on the board (the session's
+  /// tokens, its home token among them unless it is turned off) and, once
+  /// counted, on its charter.
   TokenCount tokens(GameSession session, Company company) => TokenCount(
         total: company.tokenCount,
-        onBoard: session.tokens.values.where((c) => c == company.id).length,
+        onBoard: session
+            .graph(title)
+            .stations
+            .fold(0, (n, s) => n + s.tokens.where((t) => t == company.id).length),
         onCharter: session.charterTokens[company.id],
       );
 

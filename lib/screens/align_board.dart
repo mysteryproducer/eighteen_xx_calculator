@@ -10,10 +10,16 @@ import '../models/board.dart';
 import '../models/game_title.dart';
 import '../models/map_layout.dart';
 import '../processing/grid_detector.dart';
+import '../services/app_settings.dart';
 import '../services/photo_pipeline.dart';
 
 /// The photo area, so tests can find it without depending on the widget tree.
 const Key alignCanvasKey = ValueKey('align-canvas');
+
+/// What a hex to drag is labelled: the place printed there when [byName]
+/// and it has one (`Sukumo`), otherwise its grid reference (`A10`).
+String anchorLabel(MapHex hex, {required bool byName}) =>
+    byName ? hex.name ?? hex.id : hex.id;
 
 /// [hexes] laid over the middle of a photo of [size], as large as fits: where
 /// the grid starts when detection has nothing to offer, and where "Fit to
@@ -110,6 +116,9 @@ class _AlignBoardState extends State<AlignBoard> {
   void initState() {
     super.initState();
     _anchors = _chooseAnchors();
+    AppSettings.shared.load().then((_) {
+      if (mounted) setState(() {});
+    });
     _detect();
   }
 
@@ -312,6 +321,7 @@ class _AlignBoardState extends State<AlignBoard> {
                             toDisplay: _toDisplay,
                             anchors: _adjusting ? _anchors : const [],
                             handles: _adjusting ? _handles : const [],
+                            byName: AppSettings.shared.labelAnchorsByName.value,
                             focus: widget.focus,
                           ),
                         ),
@@ -488,6 +498,20 @@ class _AlignBoardState extends State<AlignBoard> {
                     onPressed: _busy ? null : _resetToPhoto,
                     icon: const Icon(Icons.fit_screen),
                   ),
+                  // Names for a board that prints no grid references.
+                  IconButton(
+                    tooltip: AppSettings.shared.labelAnchorsByName.value
+                        ? 'Label by grid reference'
+                        : 'Label by place name',
+                    onPressed: () => setState(() {
+                      // Saved in the background; the labels change now.
+                      AppSettings.shared.setLabelAnchorsByName(
+                          !AppSettings.shared.labelAnchorsByName.value);
+                    }),
+                    icon: Icon(AppSettings.shared.labelAnchorsByName.value
+                        ? Icons.grid_3x3
+                        : Icons.place),
+                  ),
                 ],
               ),
             Row(
@@ -524,6 +548,10 @@ class _AlignPainter extends CustomPainter {
   final Offset Function(Offset) toDisplay;
   final List<MapHex> anchors;
   final List<Offset> handles;
+
+  /// Whether to label [anchors] by place name rather than grid reference
+  /// (see [anchorLabel]).
+  final bool byName;
   final Set<HexCoord>? focus;
 
   const _AlignPainter({
@@ -533,6 +561,7 @@ class _AlignPainter extends CustomPainter {
     required this.toDisplay,
     required this.anchors,
     required this.handles,
+    this.byName = true,
     this.focus,
   });
 
@@ -574,7 +603,7 @@ class _AlignPainter extends CustomPainter {
         );
       final label = TextPainter(
         text: TextSpan(
-          text: anchors[i].id,
+          text: anchorLabel(anchors[i], byName: byName),
           style: const TextStyle(
             color: Colors.amberAccent,
             fontSize: 12,

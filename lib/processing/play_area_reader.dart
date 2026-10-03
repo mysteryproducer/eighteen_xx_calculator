@@ -58,9 +58,15 @@ class PlayAreaReading {
   final List<CharterReading> charters;
   final List<CertificateReading> certificates;
 
+  /// How many of [charters] have their company's name above what was read
+  /// on them, as a charter is printed: how sure it is that the photo was
+  /// read the right way up (text recognition reads upside down too).
+  final int upright;
+
   const PlayAreaReading({
     this.charters = const [],
     this.certificates = const [],
+    this.upright = 0,
   });
 
   bool get isEmpty => charters.isEmpty && certificates.isEmpty;
@@ -85,24 +91,40 @@ class PlayAreaReader {
   /// many times wider than tall the photo is -- says how far apart things
   /// are.
   PlayAreaReading read(
-    List<RecognizedWord> lines, {
+    List<RecognizedWord> recognized, {
     img.Image? photo,
     double? aspect,
   }) {
     final across = aspect ?? (photo == null ? 1.0 : photo.width / photo.height);
     Offset centre(RecognizedWord w) =>
         Offset((w.left + w.right) / 2 * across, (w.top + w.bottom) / 2);
-
-    final anchors = <(Company, Offset)>[
-      for (final line in lines)
-        if (_companyNamed(line.text) case final company?)
-          (company, centre(line)),
+    final trainNames = {for (final t in title.trains) _key(t.name): t.name};
+    final lines = [
+      for (final line in recognized)
+        for (final piece in _costsIn(line)) ..._trainsIn(piece, trainNames),
     ];
+
+    // A charter may print its company's name over two lines ("Ferrovie" /
+    // "Nord Milano (H1)"), so each line is tried with the one under it too;
+    // and a recognizer may run a logo's letters into the name beside them
+    // ("FNM Ferrovie"), so a symbol leading a line counts.
+    final anchors = <(Company, Offset)>[];
+    for (final line in lines) {
+      if (_companyNamed(line.text) ?? _symbolLeading(line.text)
+          case final company?) {
+        anchors.add((company, centre(line)));
+        continue;
+      }
+      final below = _under(line, lines);
+      if (below == null) continue;
+      if (_companyNamed('${line.text} ${below.text}') case final company?) {
+        anchors.add((company, (centre(line) + centre(below)) / 2));
+      }
+    }
     if (anchors.isEmpty) return const PlayAreaReading();
 
     // Train cards: a train's name, printed larger than most of what's
     // around it -- the charter's table of trains names them too, small.
-    final trainNames = {for (final t in title.trains) _key(t.name): t.name};
     String? trainIn(RecognizedWord line) {
       if (line.text.contains('/')) return null;
       final key = _key(line.text);
@@ -122,12 +144,33 @@ class PlayAreaReader {
         if (trainIn(l) case final name? when l.height >= usual * 1.5)
           (name, l),
     ]..sort((a, b) => a.$2.left.compareTo(b.$2.left));
+    // A card whose large figure wasn't read can say which train it is in
+    // its small print -- 1889's cards say what scraps them: `RUSTED BY 4`
+    // is a 2 -- unless that train is already counted next to it.
+    for (final l in lines) {
+      final m = _rustedBy.firstMatch(_fold(l.text).toUpperCase());
+      if (m == null) continue;
+      final by = m[1]!.toUpperCase();
+      final scrapped = [
+        for (final t in title.trains)
+          if (t.rustsOn?.toUpperCase() == by && t.base == t.name) t.name,
+      ];
+      if (scrapped.length != 1) continue;
+      final near = trains.any((t) =>
+          t.$1 == scrapped.single &&
+          (centre(t.$2) - centre(l)).distance < 4 * math.max(l.height, l.width * 0.3));
+      if (!near) trains.add((scrapped.single, l));
+    }
+    trains.sort((a, b) => a.$2.left.compareTo(b.$2.left));
 
-    // Token places: a cost with its currency, `40 Fr.`.
+    // Token places: a cost with its currency, `40 Fr.`, or a home place
+    // that costs nothing, `FREE` (1889).
     final slots = <(int, RecognizedWord)>[
       for (final l in lines)
         if (trainIn(l) == null)
-          if (_slotPattern.firstMatch(_fold(l.text).trim()) case final m?)
+          if (_plain(l.text) == 'free')
+            (0, l)
+          else if (_slotPattern.firstMatch(_fold(l.text).trim()) case final m?)
             if ((m[1] != null || m[3] != null) &&
                 !(m[3] ?? '').contains('%'))
               (int.parse(m[2]!), l),
@@ -213,6 +256,35 @@ class PlayAreaReader {
       charterSlots.putIfAbsent(company, () => []).add(line);
       slotCosts[line] = cost;
     }
+    // A place with a token on it can have its cost covered -- 1889 prints
+    // the cost beside the ring -- and isn't read. Tokens leave the charter
+    // from the left, so the places read are the first of the company's
+    // costs, evenly spaced in a row, and the rest are further along it. (A
+    // place whose cost isn't printed at all, like an 1844 home place, isn't
+    // one of the first, and nothing is made up.)
+    charterSlots.forEach((company, found) {
+      if (found.length < 2 || found.length >= company.tokenCosts.length) return;
+      final row = [...found]..sort((a, b) => a.left.compareTo(b.left));
+      for (int i = 0; i < row.length; i++) {
+        if (slotCosts[row[i]] != company.tokenCosts[i]) return;
+      }
+      final missing = company.tokenCosts.sublist(row.length);
+      final step = Offset(row[1].left - row[0].left, row[1].top - row[0].top);
+      if (step.dx <= 0) return;
+      for (int i = 2; i < row.length; i++) {
+        final gap = Offset(row[i].left - row[i - 1].left, row[i].top - row[i - 1].top);
+        if ((gap - step).distance > 0.25 * step.distance) return;
+      }
+      var last = row.last;
+      for (final cost in missing) {
+        final next = RecognizedWord('', last.left + step.dx, last.right + step.dx,
+            top: last.top + step.dy, bottom: last.bottom + step.dy);
+        if (next.right > 1 || next.bottom > 1) break;
+        found.add(next);
+        slotCosts[next] = cost;
+        last = next;
+      }
+    });
     final charters = <CharterReading>[
       for (final company in {...charterTrains.keys, ...charterSlots.keys})
         CharterReading(
@@ -239,7 +311,22 @@ class PlayAreaReader {
       byCompany.putIfAbsent(company, () => []).add((value, p.$2, p.$3));
     }
     final certificates = <CertificateReading>[];
+    // 1889's certificates are fanned so that a strip along each card shows
+    // its share -- `1 SHARE  10%` -- and every percentage beside a SHARE is
+    // a card of its own; there is no large figure repeating the top one.
+    final shares = [
+      for (final l in lines)
+        if (RegExp(r'^\d?\s*SHARES?$').hasMatch(_key(l.text))) l,
+    ];
+    bool onStrip(RecognizedWord p) => shares.any((s) =>
+        (centre(s) - centre(p)).distance <
+        8 * math.max(p.height, s.height));
     byCompany.forEach((company, found) {
+      if (found.every((f) => onStrip(f.$3))) {
+        certificates.add(CertificateReading(
+            company, [for (final f in found) f.$1]..sort((a, b) => b - a)));
+        return;
+      }
       final big = [
         for (final f in found)
           if (f.$2 && f.$3.height >= usual * 2.5) f,
@@ -284,7 +371,29 @@ class PlayAreaReader {
       }
     });
 
-    return PlayAreaReading(charters: charters, certificates: certificates);
+    // The right way up, a charter's name is above its trains and places.
+    var upright = 0;
+    for (final charter in charters) {
+      // The name on the charter itself, not on a certificate beside it.
+      final names = [
+        for (int a = 0; a < anchors.length; a++)
+          if (anchors[a].$1 == charter.company && !onCertificate.contains(a))
+            anchors[a].$2,
+      ];
+      if (names.isEmpty) continue;
+      final top = names.map((a) => a.dy).reduce(math.min);
+      final items = [
+        for (final (_, line) in trains)
+          if (nearestCompany(line, certificate: false) == charter.company)
+            centre(line).dy,
+        for (final slot in charter.slots) slot.label.center.dy,
+      ];
+      if (items.isNotEmpty && items.where((y) => y > top).length * 2 > items.length) {
+        upright++;
+      }
+    }
+    return PlayAreaReading(
+        charters: charters, certificates: certificates, upright: upright);
   }
 
   /// The token places read, cheapest first, and whether a token covers
@@ -512,17 +621,112 @@ class PlayAreaReader {
       RegExp(r'^([^\d\s]{1,2})?\s*(\d{1,3})\s*([^\d\s]{1,4})?$');
   static final _percentPattern = RegExp(r'^\D{0,3}?(\d{1,3})\s*(%)?');
 
+  /// The line printed just under [line], starting about where it does: the
+  /// second line of a name.
+  static RecognizedWord? _under(RecognizedWord line, List<RecognizedWord> lines) {
+    RecognizedWord? best;
+    for (final other in lines) {
+      if (identical(other, line)) continue;
+      final gap = other.top - line.bottom;
+      if (gap < -0.3 * line.height || gap > line.height) continue;
+      if ((other.left - line.left).abs() > 2 * line.height) continue;
+      if (best == null || other.top < best.top) best = other;
+    }
+    return best;
+  }
+
+  /// The company whose symbol is the first word of [text], for a line that
+  /// runs a logo's letters into what follows. Only symbols of two letters
+  /// or more: 1854's minors are numbered, and a line starting with a figure
+  /// is a train, a cost or a price far more often.
+  Company? _symbolLeading(String text) {
+    final words = text.trim().split(RegExp(r'\s+'));
+    if (words.length < 2) return null;
+    final first = _plain(words.first);
+    for (final c in title.companies) {
+      final symbol = _plain(c.id);
+      if (symbol.length >= 2 &&
+          symbol.contains(RegExp('[a-z]')) &&
+          first == symbol) {
+        return c;
+      }
+    }
+    return null;
+  }
+
+  /// [line] cut into the token costs it runs together -- `0 Fr. 40 Fr.
+  /// 100 Fr.` -- each with its share of the line's width, as a recognizer
+  /// that joins things printed in a row reads them; otherwise the line
+  /// itself.
+  static List<RecognizedWord> _costsIn(RecognizedWord line) {
+    final text = _fold(line.text);
+    final costs = [
+      for (final m in _costPattern.allMatches(text))
+        if (m[1] != null || m[2] != null) m,
+    ];
+    if (costs.length < 2) return [line];
+    final covered = costs.fold(0, (t, m) => t + m[0]!.replaceAll(' ', '').length);
+    if (covered < text.replaceAll(' ', '').length) return [line];
+    final width = line.right - line.left;
+    return [
+      for (final m in costs)
+        RecognizedWord(m[0]!.trim(),
+            line.left + width * m.start / text.length,
+            line.left + width * m.end / text.length,
+            top: line.top, bottom: line.bottom),
+    ];
+  }
+
+  /// [line] cut into the train names it runs together -- `8E 6`, two cards
+  /// side by side -- each with its share of the line's width; otherwise the
+  /// line itself. [names] are the title's train names by [_key].
+  static List<RecognizedWord> _trainsIn(
+      RecognizedWord line, Map<String, String> names) {
+    final words = line.text.trim().split(RegExp(r'\s+'));
+    if (words.length < 2 || !words.every((w) => names.containsKey(_key(w)))) {
+      return [line];
+    }
+    final text = line.text.trim();
+    final width = line.right - line.left;
+    final pieces = <RecognizedWord>[];
+    var from = 0;
+    for (final word in words) {
+      final start = text.indexOf(word, from);
+      from = start + word.length;
+      pieces.add(RecognizedWord(word,
+          line.left + width * start / text.length,
+          line.left + width * from / text.length,
+          top: line.top, bottom: line.bottom));
+    }
+    return pieces;
+  }
+
+  /// The small print saying which train scraps a card's: `RUSTED BY 4`.
+  static final _rustedBy = RegExp(r'RUSTED\s*BY\s*([0-9]{1,2}[A-Z]?|[A-Z])\b');
+
+  /// A cost with its currency before or after it: `40 Fr.`, `¥40`.
+  static final _costPattern =
+      RegExp(r'([¥$£€]\s*)?\d{1,3}(\s*[A-Za-z]{1,3}\.?)?');
+
   /// The company [text] names, by symbol (all of it) or name (most of it).
   Company? _companyNamed(String text) {
     final plain = _plain(text);
     if (plain.isEmpty) return null;
+    // Editions name a company differently at the end -- 1889's "Uwajima
+    // Railroad" is tobymao's "Uwajima Railway", and its "Tosa Electric
+    // Rail" -- so the part that tells it apart is compared too.
+    final telling = _plain(_telling(text));
     Company? best;
     var bestLikeness = 0.0;
     for (final c in title.companies) {
       if (plain == _plain(c.id)) return c;
       final name = _plain(c.name);
       if (name.length < 5) continue;
-      final likeness = _likeness(plain, name);
+      var likeness = _likeness(plain, name);
+      final part = _plain(_telling(c.name));
+      if (telling.length >= 4 && part.length >= 4) {
+        likeness = math.max(likeness, _likeness(telling, part));
+      }
       if (likeness > bestLikeness) {
         bestLikeness = likeness;
         best = c;
@@ -530,6 +734,16 @@ class PlayAreaReader {
     }
     return bestLikeness >= 0.8 ? best : null;
   }
+
+  /// [name] without the words for a railway at its end, or the edition's
+  /// (V1)-style tag: the part that tells one company from another.
+  static String _telling(String name) => name
+      .replaceAll(RegExp(r'\(.*?\)'), ' ')
+      .replaceAll(
+          RegExp(r'\b(rail ?roads?|rail ?ways?|rail|line|company|co)\b\.?\s*$',
+              caseSensitive: false),
+          ' ')
+      .trim();
 
   /// How alike [text] is to [name], from 0 to 1: the best match of the name
   /// against any stretch of the text as long as it.

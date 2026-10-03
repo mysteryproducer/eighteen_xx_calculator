@@ -77,7 +77,9 @@ class BoardReader {
     TileClassifier? classifier,
     TokenDetector? tokenDetector,
   })  : rules = TileRules(title),
-        classifier = classifier ?? TileClassifier(),
+        classifier = classifier ??
+            TileClassifier(
+                style: title.tileStyle, doubleSided: title.doubleSidedTiles),
         tokenDetector =
             tokenDetector ?? TokenDetector(companies: title.companies);
 
@@ -412,7 +414,8 @@ class BoardReader {
               img.encodePng(HexPatch.picture(rgb, boardToImage, c)),
           tokens: (glare[c] ?? 0) > 0.5
               ? const {}
-              : _tokens(rgb, boardToImage, hex, reading.option),
+              : _tokens(rgb, boardToImage, hex, reading.option,
+                  slotTurn: reading.slotTurn),
           isUpgrade: _isUpgrade(state.basis, reading.option),
           glare: washedOut,
         ));
@@ -858,9 +861,15 @@ class BoardReader {
     RgbImage photo,
     Homography boardToImage,
     MapHex hex,
-    TileOption option,
-  ) {
+    TileOption option, {
+    int slotTurn = 0,
+  }) {
     final result = <String, TokenDetection>{};
+    // On the printed map the only token to look for is a home token, and a
+    // home city prints the company's logo in its circle, which a photo can't
+    // tell from the token on it: home tokens are taken as down unless the
+    // user says otherwise (`GameSession.homeTokensOff`).
+    if (option.isPrinted) return result;
     final content = rules.contentOf(hex, option);
     if (content == null || content.cityCount == 0) return result;
     final centre = hex.coord.boardCenter;
@@ -871,8 +880,11 @@ class BoardReader {
       for (final c in title.companies) {
         if (c.isHomeOf(hex.id, station.index)) home = c;
       }
-      final circles =
-          TileRenderer.slotPositions(content, station.index, centre, 1);
+      // Where the circles are as the tile prints them: the way of running
+      // its row that matched the photo best.
+      final circles = TileRenderer.slotPositions(
+          content, station.index, centre, 1,
+          extraTurn: slotTurn);
       for (int slot = 0; slot < circles.length; slot++) {
         result[GameSession.slotId(
             '${hex.coord.row}_${hex.coord.col}_${station.index}', slot)] =

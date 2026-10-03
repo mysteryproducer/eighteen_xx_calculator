@@ -202,8 +202,21 @@ class GridDetector {
 
     final visible = _visibleHexes(work.lines, h, map.coords);
     h = _refine(work, h, visible, searchFractions: const [0.2, 0.12, 0.08]);
-    return _result(work, h,
+    final fit = _result(work, h,
         placementMargin: placement.margin, tiled: hints?.tiled);
+    // Growing the lattice can leave the far parts of the board a fraction
+    // of a hex out, a different fraction in each corner.
+    final settled = _settle(work, h);
+    if (settled == null) return fit;
+    final tightened = _result(
+        work,
+        _refine(work, settled, _visibleHexes(work.lines, settled, map.coords),
+            searchFractions: const [0.2, 0.12, 0.08]),
+        placementMargin: placement.margin,
+        tiled: hints?.tiled);
+    log?.call('settled: coverage ${fit.coverage.toStringAsFixed(2)} to '
+        '${tightened.coverage.toStringAsFixed(2)}');
+    return tightened.coverage >= fit.coverage ? tightened : fit;
   }
 
   /// Fits a close-up whose rough placement [guess] (board to photo pixels)
@@ -338,16 +351,161 @@ class GridDetector {
 
   /// Pulls a hand-made alignment [guess] (board to photo pixels) onto the
   /// printed hex outlines nearby.
+  ///
+  /// Each hex only has to be within about half a hex of its place, as
+  /// four handles dragged roughly onto their hexes leave it (see
+  /// [_settle]).
   GridFit snap(img.Image photo, Homography guess) {
-    // Two ways to tighten it: measure the printed grid afresh around the
-    // middle and grow it outwards, which puts right a placement a hex out
-    // here and there; or pull the placement itself onto the outlines, which
-    // keeps the perspective the user gave it -- all a photo taken at a
-    // steep angle can go on, where the grid repeats at one size on the near
-    // side and two thirds of it on the far side. Whichever sits better.
+    var work = _Working.of(photo, workingSize,
+        hexSpacing: _expectedSpacing(photo, guess, map.boardBounds.center));
+    final start = guess.then(work.toWorking);
+    work = work.normalized(
+        _latticeOf(start, map.boardBounds.center).east.distance);
+    final settled = _settle(work, start);
+    if (settled != null) {
+      return _result(
+          work,
+          _refine(work, settled, _visibleHexes(work.lines, settled, map.coords),
+              searchFractions: const [0.2, 0.12, 0.08]));
+    }
+    // Too few hexes with their outlines showing (a close-up of tiles, say).
+    // Two other ways to tighten it: measure the printed grid afresh around
+    // the middle and grow it outwards, which puts right a placement a hex
+    // out here and there; or pull the placement itself onto the outlines,
+    // which keeps the perspective the user gave it -- all a photo taken at
+    // a steep angle can go on, where the grid repeats at one size on the
+    // near side and two thirds of it on the far side. Whichever sits
+    // better.
     final measured = _snapToLattice(photo, guess);
     final pulled = refine(photo, guess);
     return pulled.coverage > measured.coverage ? pulled : measured;
+  }
+
+  /// Settles a placement [h] (board to working pixels) that has every hex
+  /// within about half a hex of its place, perspective and all, hex cluster
+  /// by hex cluster: each visible hex and its neighbours find, on their own,
+  /// the shift that puts their outlines best on the printed lines, and a
+  /// placement is fitted to the clusters that agree with each other,
+  /// ignoring the rest (tiles over the outlines, glare). Null when too few
+  /// clusters have outlines to go on.
+  ///
+  /// Each cluster only has to be right on its own, so a placement off by a
+  /// different amount in each corner -- what four handles dragged roughly
+  /// onto their hexes give -- settles as well as one that is simply shifted;
+  /// pulling every outline onto its nearest line at once ([_refine]) only
+  /// recovers from about a tenth of a hex.
+  Homography? _settle(_Working work, Homography h) {
+    final visible = _visibleHexes(work.lines, h, map.coords);
+    final from = <Offset>[], to = <Offset>[], widths = <double>[];
+    final sharpness = <double>[];
+    final onMap = map.coords.toSet();
+    for (final hex in visible) {
+      final cluster = [
+        hex,
+        for (final n in hex.neighbors)
+          if (onMap.contains(n)) n,
+      ];
+      if (cluster.length < 5) continue;
+      final width = _latticeOf(h, hex.boardCenter).east.distance;
+      final (shift, sharp) = _bestShift(work, h, cluster, width);
+      if (sharp <= 0) continue;
+      from.add(hex.boardCenter);
+      to.add(h.apply(hex.boardCenter) + shift);
+      widths.add(width);
+      sharpness.add(sharp);
+    }
+    if (from.length < _minClusters) return null;
+    // The placement most clusters agree on, to within a sixth of a hex: fit
+    // to four at random, count who agrees, keep the best.
+    final random = math.Random(7);
+    var agreeing = <int>[];
+    for (int trial = 0; trial < 300; trial++) {
+      final pick = <int>{};
+      while (pick.length < 4) {
+        pick.add(random.nextInt(from.length));
+      }
+      final model = Homography.fit(
+          [for (final i in pick) from[i]], [for (final i in pick) to[i]]);
+      if (model == null) continue;
+      final agree = [
+        for (int i = 0; i < from.length; i++)
+          if ((model.apply(from[i]) - to[i]).distance < widths[i] / 6) i,
+      ];
+      if (agree.length > agreeing.length) agreeing = agree;
+    }
+    if (agreeing.length < _minClusters) return null;
+    return Homography.fit([for (final i in agreeing) from[i]],
+        [for (final i in agreeing) to[i]],
+        weights: [for (final i in agreeing) sharpness[i]]);
+  }
+
+  /// How many hex clusters have to agree for [_settle] to go by them.
+  static const int _minClusters = 8;
+
+  /// The shift, up to a little over half a hex ([width] is a hex's width in
+  /// working pixels), that puts the outlines of [hexes] best on the printed
+  /// lines, and how much better it sits there than the grid does on average
+  /// over all the shifts tried: nothing, where there are no outlines to go
+  /// on.
+  static (Offset, double) _bestShift(
+      _Working work, Homography h, List<HexCoord> hexes, double width) {
+    final lines = work.lines;
+    final points = <Offset>[];
+    for (final hex in hexes) {
+      final c = hex.boardCenter;
+      for (int k = 0; k < 6; k++) {
+        final v1 = HexGeometry.vertex(c, 1, k);
+        final v2 = HexGeometry.vertex(c, 1, (k + 1) % 6);
+        for (final t in const [0.25, 0.5, 0.75]) {
+          points.add(h.apply(v1 + (v2 - v1) * t));
+        }
+      }
+    }
+    final cap = 2 * work.threshold;
+    double score(Offset shift) {
+      double sum = 0;
+      for (final p in points) {
+        final v = lines.sample(p.dx + shift.dx, p.dy + shift.dy);
+        sum += v < cap ? v : cap;
+      }
+      return sum / points.length;
+    }
+
+    final reach = 0.6 * width;
+    var step = math.max(1.0, width * 0.06);
+    var best = Offset.zero;
+    var bestScore = double.negativeInfinity;
+    double total = 0;
+    int count = 0;
+    for (double dy = -reach; dy <= reach; dy += step) {
+      for (double dx = -reach; dx <= reach; dx += step) {
+        final shift = Offset(dx, dy);
+        if (shift.distance > reach) continue;
+        final s = score(shift);
+        total += s;
+        count++;
+        if (s > bestScore) {
+          bestScore = s;
+          best = shift;
+        }
+      }
+    }
+    while (step > 0.4) {
+      step /= 2;
+      final centre = best;
+      for (int j = -2; j <= 2; j++) {
+        for (int i = -2; i <= 2; i++) {
+          final shift = centre + Offset(i * step, j * step);
+          final s = score(shift);
+          if (s > bestScore) {
+            bestScore = s;
+            best = shift;
+          }
+        }
+      }
+    }
+    final mean = count == 0 ? 0.0 : total / count;
+    return (best, mean <= 0 ? 0.0 : bestScore / mean - 1);
   }
 
   GridFit _snapToLattice(img.Image photo, Homography guess) {

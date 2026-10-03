@@ -37,9 +37,22 @@ void main() {
       for (final run in runs.runs) {
         // ignore: avoid_print
         print('  ${run.train}: ${run.stops.map((s) => '${title.map.at(s.hex)?.id}'
-            '(${s.revenue})').join(' - ')} = ${run.revenue}'
+            '(${s.revenueFor(run.train)})').join(' - ')} = ${run.revenue}'
             '${run.bonus == 0 ? '' : ' incl. ${run.bonus} bonus'}');
+        for (final bonus in run.bonuses) {
+          // ignore: avoid_print
+          print('    ${bonus.reason}: ${bonus.amount}');
+        }
       }
+    }
+    for (final MapEntry(key: circle, value: why)
+        in session.tokenProblems(title).entries) {
+      final (station, slot) = GameSession.circleOf(circle);
+      final hex = title.map.at(graph.stations
+          .firstWhere((s) => s.id == station)
+          .hex);
+      // ignore: avoid_print
+      print('Token problem at ${hex?.id} circle ${slot + 1}: $why');
     }
   }, skip: saved == null ? 'Set ROUTE_SESSION to a saved session' : false);
 }

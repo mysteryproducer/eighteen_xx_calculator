@@ -1,4 +1,8 @@
+import 'dart:math' as math;
+
 import 'package:eighteen_xx_calculator/geometry/homography.dart';
+import 'package:eighteen_xx_calculator/models/board.dart';
+import 'package:eighteen_xx_calculator/models/board_graph.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
 import 'package:eighteen_xx_calculator/screens/capture.dart';
@@ -231,6 +235,52 @@ void main() {
       final fit = GridDetector(title.map).snap(flat, rough);
       expect(worstError(fit, flatTruth, fit.visible), lessThan(0.15));
       expect(fit.coverage, greaterThan(0.8));
+    });
+
+    test('handles dragged only roughly onto their hexes snap into place',
+        () async {
+      // A board a third covered in track, photographed from an angle, and
+      // each of the four handles 0.4 of a hex out in its own direction: the
+      // grid starts shifted, turned, stretched and skewed all at once, by a
+      // different amount in each corner. Pulling every outline onto its
+      // nearest line only recovers from about a tenth of a hex, and the
+      // track drew a lattice measured afresh a hex or two out.
+      final laid = <HexCoord, PlacedTile>{
+        for (final hex in title.map.hexes)
+          if (hex.takesTiles &&
+              hex.printed.stations.isEmpty &&
+              (hex.coord.row + hex.coord.col) % 3 == 0)
+            hex.coord: PlacedTile(hex.coord.col.isEven ? '8' : '9',
+                rotation: hex.coord.row % 6),
+      };
+      final camera = Homography([
+        0.86, 0.1, 40, //
+        -0.06, 0.82, 60, //
+        -0.00012, -0.00004, 1,
+      ]);
+      final tracked = await drawBoard(title.map, laid: laid);
+      final photo = warp(tracked, camera,
+          width: (tracked.width * 0.9).round(),
+          height: (tracked.height * 0.9).round());
+      final truth = flatTruth.then(camera);
+      final anchors = title.map.anchors;
+      for (final angles in [
+        [0.3, 2.1, 3.9, 5.2],
+        [5.5, 3.3, 1.2, 4.4],
+      ]) {
+        final rough = Homography.fit([
+          for (final a in anchors) a.coord.boardCenter,
+        ], [
+          for (int i = 0; i < anchors.length; i++)
+            truth.apply(anchors[i].coord.boardCenter) +
+                Offset(math.cos(angles[i]), math.sin(angles[i])) *
+                    (0.4 *
+                        truth.localScale(anchors[i].coord.boardCenter) *
+                        math.sqrt(3)),
+        ])!;
+        final fit = GridDetector(title.map).snap(photo, rough);
+        expect(worstError(fit, truth, fit.visible), lessThan(0.15));
+      }
     });
   });
 }

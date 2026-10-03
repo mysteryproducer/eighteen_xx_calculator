@@ -1,9 +1,11 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:eighteen_xx_calculator/geometry/homography.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
 import 'package:eighteen_xx_calculator/screens/align_board.dart';
+import 'package:eighteen_xx_calculator/services/app_settings.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -183,6 +185,43 @@ void main() {
       final start = scaleOf(startingPlacement());
       expect(scaleOf(await readBoard(tester, returned)) / start,
           closeTo(2, 0.1));
+    });
+
+    testWidgets('the hexes to drag are labelled by name or by grid reference',
+        (tester) async {
+      final dir = Directory.systemTemp.createTempSync('align_labels');
+      final original = AppSettings.shared;
+      AppSettings.shared = AppSettings(file: () async => File('${dir.path}/s.json'));
+      addTearDown(() {
+        AppSettings.shared = original;
+        dir.deleteSync(recursive: true);
+      });
+      await showAlign(tester, FakePhotoPipeline());
+      // By name to start with; a tap switches to grid references.
+      await tester.tap(find.byTooltip('Label by grid reference'));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Label by place name'), findsOneWidget);
+      expect(AppSettings.shared.labelAnchorsByName.value, isFalse);
+    });
+
+    test('the choice of labels is kept', () async {
+      final dir = Directory.systemTemp.createTempSync('align_labels');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final settings = AppSettings(file: () async => File('${dir.path}/s.json'));
+      await settings.load();
+      expect(settings.labelAnchorsByName.value, isTrue);
+      await settings.setLabelAnchorsByName(false);
+      final again = AppSettings(file: () async => File('${dir.path}/s.json'));
+      await again.load();
+      expect(again.labelAnchorsByName.value, isFalse);
+    });
+
+    test('a hex to drag is labelled by its place, or its reference', () {
+      final sukumo = GameTitle.byId('1889')!.map.byId('A10')!;
+      expect(anchorLabel(sukumo, byName: true), 'Sukumo');
+      expect(anchorLabel(sukumo, byName: false), 'A10');
+      final bare = GameTitle.byId('1889')!.map.byId('A8')!;
+      expect(anchorLabel(bare, byName: true), 'A8');
     });
 
     testWidgets('the grid can always be put back over the photo',

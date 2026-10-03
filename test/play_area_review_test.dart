@@ -60,13 +60,15 @@ void main() {
       (tester) async {
     final session =
         GameSession.start(title: title, name: 'Test', startedEmpty: true)
-          ..addPlayer('Ann');
+          ..addPlayer('Ann')
+          // As if GB hadn't started: no home token taken as down.
+          ..homeTokensOff.add('GB');
     final popped = await review(tester, session, gbPhoto);
     expect(find.widgetWithText(InputChip, '3H'), findsOneWidget);
     expect(find.widgetWithText(InputChip, '2H'), findsOneWidget);
     expect(find.text('50%'), findsWidgets);
     expect(find.text('= 75%'), findsOneWidget);
-    // The board has no GB token yet: its home token is unaccounted for.
+    // The board has no GB token: its home token is unaccounted for.
     expect(find.textContaining('leaves 1 unaccounted for'), findsOneWidget);
     expect(find.textContaining('only recorded once'), findsOneWidget);
 

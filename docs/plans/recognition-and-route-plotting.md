@@ -1,6 +1,6 @@
 # Recognition & Route Plotting
 
-Status: eighth pass. The app knows the title it is looking at, finds the hex
+Status: tenth pass. The app knows the title it is looking at, finds the hex
 grid in a photo by itself and corrects the camera's angle, keeps a game session
 between photos, and asks for close-ups of the hexes it isn't sure about. It has
 been through most of a real game of 1844: tiles up to brown, the five-hex
@@ -16,7 +16,25 @@ came from a fresh game started over the same board, photographed once from an
 angle to dodge the lamp's glare: tiles are now read from how their track runs
 on into the next hex as well as within their own, the cities on the green and
 brown tiles are drawn as they are printed, close-ups can be taken at an
-angle, and charters are read better (see each section).
+angle, and charters are read better (see each section). The ninth pass closes
+the 1844 game -- every grey tile down -- and checks more of the rules: a
+company with tokens down and none in its home city, plain track tiles whose
+two curves only look joined, and a route's bonus, spelt out on a tap. 1889's
+data has been gone over for the next game: its diesel off-board figure, its
+port tile and its phases (see Where the data comes from). The tenth pass came
+from the first sessions on an Android phone, a Nokia C32: its photos are
+sharper, and the automatic fit finds the grid in them; and snapping a rough
+placement now recovers from handles up to about half a hex out, where it used
+to need them within a tenth (see Finding the grid). The eleventh pass came
+from the first session of 1889, on an iPhone. That edition's tiles are
+double-sided, the usual drawing on one side and a geometric texture with
+darkened city circles on the other, and both are recognised; a circle
+darkened in the tile's colour is no longer taken for a token; a company's home
+token is taken as down, since 1889 prints each company's logo in its home
+city; 1889's charters and fanned certificates are read, from a photo taken
+sideways too; the align screen names the hexes to drag, as this board prints
+no grid; and a tile or train of a later colour offers the next phase (see
+each section).
 
 ## Context
 
@@ -36,7 +54,7 @@ board each time.
 
 ## What it does now
 
-1. Pick a title (1844 or 1854), then start or resume a game.
+1. Pick a title (1844, 1854 or 1889), then start or resume a game.
 2. Photograph the whole board once. The app finds the grid, deskews it, works out
    which hex is which, and reads the board.
 3. It flags hexes it isn't sure about and offers close-ups, grouped so one photo
@@ -122,8 +140,20 @@ pictures, the close-up guide and the align screen's starting grid.
 
 The importer also skips a tile printed exactly like one already listed --
 1889's beginner variant lists 6 again as Beg6, and so on, and two identical
-drawings would always tie in recognition -- and reads 1889's "diesel" phase
-revenue as the last phase's. Where the printed pieces place cities
+drawings would always tie in recognition. 1889's off-boards print a third
+figure, "diesel", which tobymao pays to a D train alone (its
+`route_base_revenue`): every other train is paid the brown figure to the end
+of the game. So it is kept apart from the phases (`TileStation.dieselRevenue`,
+`StationNode.revenueFor`), and a session's phase is one of the tile colours
+the title's phases bring in (`GameTitle.phaseColours`) -- for 1889, yellow to
+brown; it had been offered a grey phase, which paid every train the diesel
+figure. Checked against tobymao's 1889 game code, the rest of its data was
+already complete: the map, tiles and counts, companies with their homes,
+token costs and tobymao's default shares (a 20% director's and eight 10%), the
+trains (D, unlimited, runs any distance) and the phases with their train
+limits. Its private companies change money and when tiles may be laid, not
+routes, and aren't modelled, except that the port tile (437) goes only where
+the Mitsubishi Ferry may lay it (see Reading the hexes). Where the printed pieces place cities
 differently from tobymao's rule (see Reading the hexes), a small table in the
 importer gives their places.
 
@@ -311,19 +341,64 @@ handles are off screen. The grid moves by dragging, sizes by pinching (touch
 or trackpad), scrolling or buttons, turns a quarter at a time, and "Fit to the
 photo" puts it back over the photo whenever it gets lost.
 
+The four hexes to drag are near the board's corners, each moved to a named
+place within two hexes where there is one (`MapLayout.anchors`), and labelled
+by that place -- Sukumo, Sakaide & Okayama, Naruto & Awaji and Muroto on 1889,
+whose board prints no grid references at all -- or by grid reference, a
+choice the align screen toggles and keeps (`AppSettings.labelAnchorsByName`).
+
 **A photo taken at a steep angle** -- the 2 October game's, the far edge of
 the board three quarters the width of the near one -- defeats the lattice
 search: the rows come out much closer together than the hexes along them,
 and the size of hex changes across the frame, so the repeat smears out even
 in the middle. Stretching the photo back to proportion before searching was
 tried and kept as a last resort, but didn't find this one. What does work is
-the user's placement: "Fit to the photo" now also pulls the placement as it
-is onto the printed lines, perspective and all (`GridDetector.refine`),
-rather than only measuring the hex size afresh in the middle and growing
-from there, and keeps whichever sits better. From the user's four handles,
-roughly placed, that took the 2 October photo from no fit to 0.46 coverage
-and 85 of its 94 hexes read right; placed carelessly (a third of a hex out)
-it can't recover, so the handles need to sit on their hexes.
+the user's placement, snapped onto the printed lines ("Snap to lines").
+
+**Snapping a rough placement.** Snapping used to pull the placement as it was
+onto the lines (`GridDetector.refine`), or measure the hex size afresh in the
+middle and grow from there, keeping whichever sat better. Measured on five real
+photos -- two from the webcam and three from the phone, two of the five taken
+at an angle -- with the four handles moved off their hexes in random
+directions, neither recovered unless every handle was within about a tenth of
+a hex: a quarter of a hex out, neither ever did, and measuring afresh often
+ended half a hex out, misled by track and printing. A tenth of a hex is a few
+pixels on a phone's screen, which is why lining the grid up was so hard.
+
+Snapping now settles the placement hex cluster by hex cluster
+(`GridDetector._settle`). Each visible hex and its neighbours find, on their
+own, the shift of up to a little over half a hex that puts their outlines
+best on the printed lines; a placement is fitted to the clusters that agree
+with each other, to within a sixth of a hex, leaving out the ones under tiles
+or glare; and that is pulled onto the lines as before. Each cluster only has
+to be right where it is, so a placement out by a different amount in each
+corner -- shifted, turned, stretched and skewed at once, which is what four
+rough handles give -- settles as well as one that is merely shifted. With
+every handle a quarter of a hex out it recovered 8 times in 8 on all five
+photos; 0.4 of a hex out, 5 to 8 in 8; half a hex out, 3 to 8 in 8, the
+angled photos being the hardest. Beyond half a hex, a hex is nearer its
+neighbour's place than its own, which only the user can settle. It takes
+about a third of a second on a laptop, a third of what snapping took before.
+Where too few clusters show their outlines -- a close-up of tiles -- it falls
+back to the old two.
+
+The automatic fit ends with the same step, kept when the outlines sit better
+for it. The phone's whole-board photos had come out a fraction of a hex out
+towards their edges, and now read 94 of 94 hexes right where one read 86
+(against the round 9 game, which shows the same board). On twelve webcam
+photos it changed nothing the fit had right: no hex moved more than 0.03 of
+a hex. It can't put right a fit with every hex one place out, which is what
+the 2 October evening photo gets (below).
+
+The 2 October evening photo is misplaced too: the
+perspective comes out wrong as the lattice grows, and the map settles half a
+hex out. An affine fit while growing, a guard on each growth step, trying the
+half-hex alternatives and a wider search for the lattice's phase each placed
+it, and each broke others -- the 1 October photo with six tiles fell from 82
+hexes right to 78, the pre-play board's coverage from 0.78 to 0.22 -- so none
+was kept, and it is placed with the handles. Looked at again in the tenth
+pass, its grid is right but every hex is one place out (Bern is taken for
+E10): which hex is which went wrong, not where the outlines are.
 
 ## Reading the hexes
 
@@ -356,6 +431,18 @@ colour, same number of cities and towns, keeping the track already laid, matchin
 the hex's label, not running off the map or across an impassable border. That is
 usually a handful of options instead of every tile in every rotation, and it is
 the single biggest reason recognition is more accurate than in the first pass.
+A labelled city may change its number of cities, as tobymao allows -- 1844's
+Lausanne is two cities in green and one of two circles in brown and grey,
+which the rules had refused, so the grey 903 laid there in play was "not on
+offer" -- but not from bare map, and never down to none. And a title can keep
+a tile to certain hexes (`GameTitle.tilesOnlyOn`): 1889's port tile, which only
+the Mitsubishi Ferry lays, goes on one of its four coastal towns. It is drawn
+as printed now, its town a black disc with an anchor in it, but that is too
+small a difference from 58's dot to choose between them -- on the real G10
+the two score within 0.03 of each other, and 58 came out ahead -- so on those
+four towns the app asks rather than tells. (What else tells them apart is
+where the revenue sits, 437's 30 beside the town, which no tile's drawing
+shows.)
 
 Tiles are drawn the way tile art is drawn, because the drawing *is* the
 template recognition matches against: artwork that is merely recognisable to a
@@ -397,6 +484,17 @@ way: the printed OO hexes (Romont and Fribourg one above the other,
 Winterthur and Frauenfeld rising to the right) and tile 59, whose second city
 sits out by side 4 with its track curving round to it. Those come from the
 photos, through the importer's table.
+
+**A title's own style of tile** (`GameTitle.tileStyle`): 1889's tiles print a
+town as a dot on the track rather than as a bar across it, and the user's
+edition is double-sided (`GameTitle.doubleSidedTiles`): the usual drawing on
+one side, and on the other a geometric texture with the city circles and the
+towns' rings printed in a darker shade of the tile, brown on yellow
+(`TileStyle.shaded`). A tile with stops is matched against both drawings and
+the better kept, and the reading says which side it saw
+(`TileReading.shadedSide`). The texture is too faint to matter to the match;
+the dark circles would otherwise make every city look full. The board and the
+capture overlay draw tiles in the title's style too.
 
 City slots are the exception, measured off the real tiles instead, because
 tobymao's are drawn for a screen: its slots are a quarter of the radius, and
@@ -534,7 +632,11 @@ Two rules keep the state honest:
   editor shows what the photo saw with a button to take it. A doubtful photo
   changes nothing, and in particular doesn't loosen the user's hold on the
   hex -- which is how, before, a doubtful reading followed by a confident one
-  could quietly put back what the user had corrected.
+  could quietly put back what the user had corrected. An upgrade of what they
+  set is suggested on less (from 30%): a reader that expects a hex not to
+  have changed scores a tile laid since below one left alone, and the grey
+  tiles of the end of the 1844 game read right but short of sure, so none
+  were offered.
 
 Close-ups are the normal way to update a game. `planCloseUps` groups hexes into
 as few photos as possible (each covers a hex and its six neighbours), and the
@@ -699,9 +801,22 @@ A tile's slots are plain white, so there either the colour or a logo means a
 token. The printed map is harder: 1844's cities glow yellow in the middle,
 Lucerne's holds a lake, and every home city is printed with its company's logo
 on white, which looks just like a pale token. So on the map only the home
-company's token is looked for, by its colour; anywhere else there it says it
-can't tell, and nothing changes. Measured on the first real token (BLS's, on a
-tile on Bern) and the printed cities around it, that rule gets every one right.
+company's token was looked for, by its colour; anywhere else there it said it
+couldn't tell, and nothing changed. Measured on the first real token (BLS's,
+on a tile on Bern) and the printed cities around it, that rule got every one
+right. 1889 prints each company's logo in its home circle so like its token
+that no photo can tell them apart, so now nothing is read on the printed map,
+and a home token is taken as down (below).
+
+1889's double-sided tiles print their city circles on one side in a darker
+shade of the tile, which reads as a token of that colour: Anan's (J11) was
+taken for Tosa Electric's on the first 1889 board. A circle the colour of the
+tile around it, only darker, now counts as empty unless something in its
+middle stands out from its ring the way a logo does
+(`TokenDetector._tileColouredCircle`). On that session's saved hex pictures
+G4, G12 and F3 now read empty; J11 and I4 couldn't be judged from them (128
+pixels, a revenue oval beside the circle), so a real 1889 session has to
+confirm it.
 
 Most token errors turn out to be where the slots are looked for, not what is
 seen in them: a slot sampled a fifth of a hex off reads the tile beside it --
@@ -738,6 +853,24 @@ the last free circle of another company's home is shown in red with why
 Gotthardbahn had started, say. As with a tile that can't belong, the app shows
 what is on the board and says it is wrong rather than refusing it.
 
+A company's first token goes in its home city, so one with tokens down and none
+on its home hex has one of them on the wrong hex. Each of its tokens is shown
+in red with why (`GameSession.awayFromHome`), the station editor says so, and so
+does the route panel when that company is chosen -- its routes are worked out
+from tokens that can't all be right. The check goes by hex rather than by city,
+as a tile upgrade can renumber a hex's cities; a company with no home of its
+own (1844's SBB, which takes over others' tokens) is never away from it. On the
+2 October evening board, where the user set NOB's two tokens down at random to
+try it, both are flagged: NOB's home is Zürich (D19).
+
+A company's home token is taken as down (`GameSession.homeTokensOff` lists
+the exceptions): it is laid when the company starts, and on 1889's board the
+logo printed in the home circle can't be told from it. The station editor
+says so for a home city, and setting its circle to None marks a company that
+hasn't started yet. Counting a company's tokens, checking it isn't away from
+home, and its routes all go by the board with its home token in. Games saved
+before take each company with no token on the board as not started.
+
 ## Trains and routes
 
 [processing/train_routes.dart](../../lib/processing/train_routes.dart) finds
@@ -760,7 +893,22 @@ nothing can't be visited (a mountain railway before its plate is down, Torino
 in yellow); a route on tunnel track earns 10 more for every stop it is paid
 for; and a route joining an east and a west off-board area, or north and
 south, earns their bonuses too (`GameTitle.stopGroups` and `groupBonus`, read
-from the printed areas' groups and bonus icons).
+from the printed areas' groups and bonus icons). A route's bonus is spelt out
+when its "of it bonus" is tapped (`TrainRun.bonuses`): tunnel track at so much
+a stop, and each pair of groups joined, with what each area pays. On the 2
+October evening board, the MOB's 8E pays 560, 220 of it bonus: 80 for tunnel
+track (10 for each of the 8 stops it is paid for) and 140 for joining east to
+west (Innsbruck 90 and Dijon/Paris 50).
+
+Track without a stop on it is separate tracks, not a junction. 1844's H11 is a
+tight curve and a gentle one that share a side, and a route can't come in by
+one and leave by the other, turning in the middle of the hex -- which the
+MOB's 8E did, until this pass. So a route goes along a tile's track and then
+across a hex side, by turns, and each piece -- one of a tile's tracks, or a
+hex side crossed -- is used once in a route and once by a company's trains
+(`TrackEdge.segments`): the side H11's two curves share is used by one of
+them or the other, as are each of F9's four sides. Cities and towns are where
+track joins.
 
 The search enumerates half-routes out of each tokened city, joins pairs of
 them into routes, keeps each train's best few hundred, and picks one route
@@ -786,6 +934,15 @@ checks, each in a sentence for the screens to show:
   it where the title allows paying half (none of the three does: 1854's
   minors pay half by their own rule, which isn't modelled).
 
+The session's phase follows what is seen (`CompanyRules.laterPhase`): a tile
+of a later colour on the board, or a train on a charter whose purchase
+brought in a later colour, means the game has moved on (1844's OP tiles, laid
+early by their own rule, don't count). After a photo of the board or of a
+player's area, the app asks before moving to that phase -- a misread tile
+shouldn't change what every off-board pays -- and "Not yet" holds for that
+colour while the board is open. A tile or train the user sets by hand moves
+it at once, with a note saying so.
+
 A company without trains noted still gets the old single route of so many
 stops.
 
@@ -796,6 +953,20 @@ works from the lines of text Vision reads (`recognizeTextLines`, with where
 each lies; ML Kit answers the same on Android) and the photo. Companies are
 found by symbol (the logo's letters) or name, allowing a letter or two
 misread, and each thing found goes with the nearest of them:
+
+(The first charter photographed on the phone, FNM's, found nothing at all,
+though Vision reads the same photo perfectly. ML Kit runs things printed in a
+row into one line -- the logo's letters into the name beside them ("FNM
+Ferrovie"), the token costs into "0 Fr. 40 Fr. 100 Fr. 100 Fr. 100 Fr.", two
+train cards' numbers into "8E 6" -- and a name printed over two lines,
+"Ferrovie" / "Nord Milano (H1)", matches no company line by line, so no
+company was found and nothing else counted. Now Android cuts each line where
+a gap between its words is well over a space, using ML Kit's word boxes, and
+the reader tries each line with the one printed under it, takes a symbol
+leading a line, and splits a run of costs or train names into each one. Read
+merged that way, the phone's photo gives FNM, its 8E and 6 and both tokens
+left. Not yet checked on the phone; if a charter still reads as nothing, the
+lines read are written to the log, `adb logcat -s flutter`.)
 
 - a **train** is a train's name from the title in large print -- larger than
   most text around it, which leaves out the charter's own table of trains --
@@ -838,8 +1009,8 @@ width apart are one card's. The top card is its large figure; each one under
 it a single or double share of the company's (GB: 50 + 25; FNM: 20 + 10 + 10
 + 10). Where there are no stripes, the edges are read as before.
 
-**Charters differ a lot between titles**, and so far this has seen one photo
-of one 1844 charter. What comes from each title's data -- company names and
+**Charters differ a lot between titles**; so far this has seen 1844's (GB,
+FNM, MOB) and 1889's (below). What comes from each title's data -- company names and
 symbols, train names, token costs, certificate sizes -- should carry over.
 What is calibrated on 1844 is where a token place sits relative to its
 printed cost (centred 2.6 times the cost's height above it), the
@@ -850,6 +1021,37 @@ entered by hand. Charters
 also print rules (1844's says `Limit 2`, and has a table of trains, prices and
 rusting) that could stand in for a title without data; worth looking at once
 other titles' charters have been photographed.
+
+**1889's charters** -- Tosa Electric's and Uwajima Railroad's, on the iPhone
+-- needed five things:
+
+- the card's name isn't tobymao's: "Uwajima Railroad" against "Uwajima
+  Railway", and letter by letter "Awa Railroad" is nearer. Names are also
+  compared without the words companies share (railway, railroad, line,
+  company, and anything in brackets), so "Uwajima" finds it;
+- the first token place prints `FREE`, which is the place costing nothing;
+- a place's cost is printed beside its ring, where the token covers it, so a
+  place with a token isn't read. Tokens leave a charter from the left, so
+  when the places read are the first of the company's costs, evenly spaced,
+  the rest are further along the row, and are looked at as usual. (A place
+  whose cost isn't printed at all, 1844's home place, isn't one of the
+  first, and nothing is made up);
+- a train card prints `RUSTED BY 4` under its number: the train is the one a
+  4 scraps, counted where its number wasn't read nearby;
+- certificates are fanned top to bottom, each showing a strip along its
+  foot -- `2 SHARES 20%`, `1 SHARE 10%` -- with no large figure repeating the
+  top card: where every percentage is by a SHARE, each is a card.
+
+Both charters were photographed sideways, the card's long side down the
+portrait frame, and Vision reads sideways text as tall, broken lines. Where
+most lines of four letters or more come back taller than wide, the photo is
+turned a quarter each way and read again (`PhotoPipeline.readPlayArea`), and
+the reading kept is the one with the most charters upright -- trains and
+places below the name -- then the most trains, places, tokens and
+certificates. Read that way, Tosa Electric has three 2 trains, its places
+free, 40 and 40 with one token left, and certificates of 20, 10 and 10%;
+Uwajima has a 6 and a 4, one token left, and two 10% certificates
+(`test/play_area_reader_test.dart` keeps both photos' lines).
 
 ## The rest
 
@@ -876,6 +1078,18 @@ routes.
 editor can read the printed figure off that hex's stored picture using the
 platform text recognizers (Apple Vision on iOS, ML Kit on Android) over the
 existing method channel.
+
+**Drawing the board** ([processing/tile_renderer.dart](../../lib/processing/tile_renderer.dart)).
+Track into a place a route can only end at -- an off-board area, or 1844's
+mountain railways -- is drawn as the board prints it, a long narrow triangle
+pointing a little under halfway in, rather than a line to the middle: five
+lines meeting in Pilatus's hex read as a junction to run through. A town
+where three or more lines meet is a black dot ringed in white and bigger
+than the track, as the board prints Brig and Altdorf (a plain dot was lost in
+the junction), and on the board view a town's figure sits beside it rather
+than over it. The same drawing makes the templates recognition matches; on
+the data set (see Learning from corrections) it reads the same, one hex
+better.
 
 ## Learning from corrections
 
@@ -915,6 +1129,42 @@ needs a hand-built `libtensorflowlite_c` on macOS and ships as a pod on iOS,
 which would undo this project's CocoaPods-free iOS build for a model small
 enough to write out as a list of doubles.
 
+**The data set** (tenth pass). `dataset/` (not in git; see its README) gathers
+every photo from both devices -- 83 from the webcam, 7 from the phone -- every
+saved game and both devices' correction logs, and
+[test/build_dataset_test.dart](../../test/build_dataset_test.dart) cuts labelled
+hexes out of the whole-board photos whose board is known exactly: nine of them,
+under three truths (the board before play, round 8's and round 9's), placed from
+hand-picked hex centres where the detector can't, each placement drawn out to
+check. Labels known to be wrong are put right or left out there, not in the
+games: F9 is tile 70, not the 43 every desktop game had; D19's grey tile is
+turned illegally on the board; one phone correction was itself corrected
+later; and the old desktop game's 20 unchecked misreads aren't used. That
+gives 943 labelled pictures -- 837 from photos, 106 corrections -- over 50
+labels; but only 155 different things, (hex, label) pairs, 62 of them tiles:
+mostly the same hexes in other light and from other angles.
+
+Read fresh with nothing to go on, the app gets 92% of the photo pictures right
+(webcam 96%, phone 89%): bare map 98%, yellow 94%, green and brown 85%, grey
+62%, the purple Furka-Oberalp and Gotthard pieces 62%, heavy glare 83%; 95-99%
+by photo, except the upside-down one (71%, paler than the rest) and the
+90-degree one under glare (85%). That is the number for a trained classifier
+to beat, and where to look first: grey tiles against the bare map, the purple
+pieces (drawn unlike the physical ones, see Deferred), glare, and exposure.
+
+Whether to train a net now has numbers. The set is big enough to measure with
+and too narrow to learn from: 155 things, most tiles only ever on one hex, all
+of them 1844's, and a net trained on it would learn those hexes. The shape of
+a sensible first try is unchanged from below -- keep the pipeline, replace
+the shape term -- with two additions: train on tiles drawn by `TileRenderer`
+in every turn under made-up light, glare, blur, colour and perspective, then
+fit to the real pictures, measuring photo by photo with each photo held out;
+and predict what the matcher already measures -- background colour, which
+sides track leaves by, what kind of stop -- rather than tile names, so it
+carries to 1889 without retraining and `TileRules` still picks the legal
+tile. Finding the grid is a poor first job for a net: it would need hundreds
+of whole-board photos of several boards, and rough handles now snap.
+
 (Until the fourth pass every record said recognition had read exactly what
 the user then set: the editor sets the hex while the picture is still being
 loaded, and what was read was taken after that. It is now taken first, and
@@ -932,7 +1182,11 @@ counts as read. Records from before then can't say what was read.)
   name printed along it, so it reads as the unopened printing (five hexes
   wrong on the 2 October photo; one tap on any of them sets all five).
 - Finding the grid by itself in a photo taken at a steep angle (see Finding
-  the grid): today it needs the user's four handles.
+  the grid): it needs the user's four handles, though they only have to be
+  within about half a hex now. The handles could snap by themselves when let
+  go.
+- Telling which hex is which when the grid is found but the map placed one
+  hex out (the 2 October evening photo).
 - Charters and certificates of titles other than 1844 (see A player's area),
   and certificate stripes.
 - Company logos. Companies, colours and homes are imported; a token away from
@@ -954,8 +1208,13 @@ counts as read. Records from before then can't say what was read.)
   angle: they are drawn by the general rule, which 59 and 66 show isn't always
   the print's. An upright close-up of each would let the importer's table
   place their cities.
-- 1889's own rules (the private companies, the Kouchi port) beyond its map,
-  tiles and companies.
+- 1889's private companies, beyond where the port tile may go: they change
+  money and when tiles may be laid, not routes.
+- 1889's charters and certificates. The token places are looked for where an
+  1844 charter has them (`_ringAbove`, `_ringInside`); the first photo of an
+  1889 charter will show whether they sit the same way.
+- Icons and figures aren't drawn on the templates, so tiles printed alike
+  but for them read alike: 1889's port tile and 58.
 - Hexes at the very edge of the map (red off-board areas, the grey mountain
   railways) are printed as part-hexes running off the board, so a close-up
   centred on one has little grid to lock onto. The planner aims at hexes that
@@ -1000,6 +1259,76 @@ counts as read. Records from before then can't say what was read.)
   ```
 
 ## Notes for the next pass
+
+- **The first 1889 session** (iPhone SE, 3 Oct, after the 1844 photos): 25
+  photos, mostly of parts of the board, and three charters; the photos, the
+  game and the corrections are in the data set (`dataset/`, with what each
+  photo shows), though no 1889 photo is labelled yet -- the board changed all
+  through the session. Open from it:
+  - The port tile (437) and tile 58 still can't be told apart by recognition
+    (see Reading the hexes); drawing revenue where each tile prints it would
+    give the two different templates, at the cost of changing every
+    template.
+  - The darkened circles are taken for empty now (see Station tokens), which
+    wants a real 1889 board to confirm: the session's saved pictures were too
+    small to judge J11 and I4 by.
+  - Kotohira (I4) takes only an H tile, and a plain city laid there by
+    mistake was read as the H tile -- the only legal choice, so its revenue
+    was right but the board wasn't. Where an illegal tile matches far better
+    than any legal one, the reader could say so, as the tile editor does for
+    a tile that can't belong.
+  - The phase offer and the home-token default haven't been through a real
+    session yet.
+
+- **The second phone session** (the same board): a photo turned 90 degrees
+  under heavy glare (`CAP5253572290537228500`), found right first time; one
+  upside down from across the table (`CAP9068391036075008007`), which looked
+  not found; and FNM's charter (`CAP188738177176395477`), which found nothing
+  (see A player's area). Replayed with today's detector, the upside-down
+  photo is placed the right way round, but its outlines sit on the printed
+  lines at only 0.16 to 0.20 (placed by hand, 0.20) against the 0.6 the app
+  wants before it says it found the board, so it says "Not sure" and asks for
+  the handles. On a late game's board most outlines are under tiles: right
+  placements of the phone's photos score 0.43 to 0.50, a wrong one 0.26, so
+  that score no longer tells right from wrong well, and the "found" bar is
+  rarely met. Something better is wanted there -- the tiles' colours where
+  the game knows them, say.
+
+- **The first phone sessions** (Nokia C32, Android 13, after round 9; the
+  phone's clock reads June 2023, so its file and session times are off). The app is
+  a debug build there, so its private files can be copied over USB:
+  `adb exec-out run-as com.example.eighteen_xx_calculator tar cf - cache
+  app_flutter/sessions app_flutter/training > nokia.tar`. Photos stay in
+  `cache` as `CAP*.jpg` -- Android may clear them -- and sessions with their
+  hex pictures in `app_flutter/sessions`. Four photos: two whole-board shots
+  square on, a close-up of the L21/K22 corner and, in a second session in
+  other light, the whole board at an angle. They are 1920 x 1080, as `ResolutionPreset.
+  veryHigh` asks, cut 16:9 from a 4:3 sensor; the board itself is nearer 4:3,
+  so a 4:3 picture would give each hex more pixels. The board is round 9's
+  (F9 is 70 in the phone's game and 43 in round 9's; one of them is wrong).
+  Against round 9's game, the automatic fit placed both square-on shots and
+  they read 94 of 94 (one was 86 before the fit was settled); it finds
+  nothing in the angled one, as with the webcam's angled photos, and from
+  rough handles that snaps. Colour: the phone's colours are stronger -- yellow
+  and green stand twice as far from the bare map as in the webcam's -- but
+  under the lamp they varied more over the board, and the sharper picture
+  shows more of the grey mountain art on bare hexes, so colour alone sorts
+  66 and 67 of 82 hexes right in the square-on shots against the webcam's 76
+  of 79. The angled shot, in the other light, does best: 75 of 80, with
+  brown and grey clear of bare map. What the phone gains is sharpness, which finds the grid.
+
+- **The ninth round** (2 October, 21:10-21:18, evening lamp), the last of
+  1844: every grey tile down. A whole-board photo (`board_1790946641361`);
+  close-ups of the three grey tiles not read -- H13 (`board_1790946785823`),
+  D19 (`board_1790946865567`) and I4 (`board_1790946961369`); and NOB's and
+  MOB's charters (`board_1790947091764`). The game is the eighth round's
+  (`sessions/1844-1790916212645289`). Zürich's grey tile (D19) is turned
+  illegally on the board and the user took the app's legal 910@0, so D19 is
+  left out of tuning. Placed with the handles, the whole board reads 93 of
+  94 hexes right, Zürich the odd one; the grey tiles had been read right but
+  not offered (see Sessions and close-ups), and Lausanne's refused by the
+  rules (see Reading the hexes). NOB's two tokens were set down at random to
+  try the home check.
 
 - **The eighth round** (2 October, early afternoon): a fresh game
   (`sessions/1844-1790916212645289`) started over the board as it stood, and

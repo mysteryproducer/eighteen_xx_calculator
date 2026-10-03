@@ -1,3 +1,4 @@
+import 'package:eighteen_xx_calculator/models/board_graph.dart';
 import 'package:eighteen_xx_calculator/models/company_rules.dart';
 import 'package:eighteen_xx_calculator/models/game_session.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
@@ -72,6 +73,36 @@ void main() {
     });
   });
 
+  group('a later phase', () {
+    test('is shown by a tile of a later colour on the board', () {
+      final session = newGame();
+      expect(rules.laterPhase(session), isNull);
+      session.setManually(title.map.byId('F11')!, const PlacedTile('15'));
+      final (colour, why) = rules.laterPhase(session)!;
+      expect(colour, TileColor.green);
+      expect(why, contains('F11'));
+      session.phase = TileColor.green;
+      expect(rules.laterPhase(session), isNull);
+    });
+
+    test('or by a train that brought in a later colour of tile', () {
+      final g1889 = GameTitle.byId('1889')!;
+      final session = GameSession.start(title: g1889, name: 'T', startedEmpty: true)
+        ..companyTrains['TR'] = ['2', '2', '2'];
+      expect(CompanyRules(g1889).laterPhase(session), isNull);
+      session.companyTrains['UR'] = ['5'];
+      expect(CompanyRules(g1889).laterPhase(session),
+          (TileColor.brown, 'a 5 train'));
+    });
+
+    test("tiles the game lays itself don't count", () {
+      // 1844's purple Furka-Oberalp pieces are no phase's colour.
+      final session = newGame();
+      session.setManually(title.map.byId('H19')!, const PlacedTile('OP2'));
+      expect(rules.laterPhase(session), isNull);
+    });
+  });
+
   group('tokens', () {
     test('on the board and on the charter make up what a company has', () {
       final session = newGame();
@@ -83,7 +114,8 @@ void main() {
     });
 
     test('one unaccounted for is pointed out', () {
-      final session = newGame();
+      // GB's home token turned off: it isn't taken as down.
+      final session = newGame()..homeTokensOff.add('GB');
       expect(rules.tokenCountProblems(session, gb, 1).single,
           contains('0 on the board and 1 on its charter leaves 1 '
               'unaccounted for'));

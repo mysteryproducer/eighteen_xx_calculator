@@ -1,8 +1,10 @@
 import 'package:eighteen_xx_calculator/models/board.dart';
 import 'package:eighteen_xx_calculator/models/board_graph.dart';
+import 'package:eighteen_xx_calculator/models/game_session.dart';
 import 'package:eighteen_xx_calculator/models/game_title.dart';
 import 'package:eighteen_xx_calculator/models/map_layout.dart';
 import 'package:eighteen_xx_calculator/models/tile_definition.dart';
+import 'package:eighteen_xx_calculator/models/tile_rules.dart';
 import 'package:eighteen_xx_calculator/processing/train_routes.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -176,6 +178,23 @@ void main() {
       expect(router.best(['2H']).revenue, 30);
     });
 
+    test('a D train is paid the diesel figure, and only a D train', () {
+      // As 1889's off-boards print it.
+      final (title, graph) = board(row([
+        'offboard=revenue:yellow_30|brown_60|diesel_100;path=a:$east,b:_0',
+        city(20, eastEnd: true),
+      ], colours: {0: TileColor.red}));
+      at(graph, 1).tokens = ['A'];
+      final router = TrainRouter(title, graph, 'A');
+      expect(router.best(['2']).revenue, 50);
+      expect(router.best(['D']).revenue, 120);
+      // A figure the user set stands for every train.
+      at(graph, 0)
+        ..revenue = 70
+        ..revenueSource = RevenueSource.manual;
+      expect(TrainRouter(title, graph, 'A').best(['D']).revenue, 90);
+    });
+
     test('an express is paid for its best stops, one with a token, and red '
         'off-boards on top', () {
       final (title, graph) = board(row([
@@ -221,6 +240,34 @@ void main() {
   });
 
   group('the rules of a route', () {
+    test("two of a tile's tracks meeting at a side don't join there", () {
+      // A curve each way from the middle hex's west side, like 1844's 29
+      // at H11: a city at the far end of each curve, and one to the west.
+      final (title, graph) = board({
+        const HexCoord(2, 2): (
+          TileColor.green,
+          'path=a:$west,b:3;path=a:$west,b:5'
+        ),
+        const HexCoord(2, 1): (TileColor.yellow, 'city=revenue:20;path=a:$east,b:_0'),
+        // North-east of the middle, joined by its south-west side.
+        const HexCoord(1, 2): (TileColor.yellow, 'city=revenue:30;path=a:0,b:_0'),
+        // South-east of it, joined by its north-west side.
+        const HexCoord(3, 2): (TileColor.yellow, 'city=revenue:40;path=a:2,b:_0'),
+      });
+      final northEast = at(graph, 2, 1), southEast = at(graph, 2, 3);
+      // Each curve runs to the west city, not round to the other curve.
+      expect(graph.edgesFrom(northEast).map((e) => e.to),
+          [at(graph, 1, 2)]);
+      expect(graph.edgesFrom(southEast).map((e) => e.to),
+          [at(graph, 1, 2)]);
+      northEast.tokens = ['A'];
+      final runs = TrainRouter(title, graph, 'A').best(['2', '2']);
+      // North-east to west pays 50; the second train can't also cross the
+      // west side, so it has nowhere to go.
+      expect(runs.revenue, 50);
+      expect(runs.runs.where((r) => r.runs), hasLength(1));
+    });
+
     test("a full city ends a route", () {
       final (title, graph) = board(row([
         city(20, westEnd: true),
@@ -241,6 +288,9 @@ void main() {
       final run = TrainRouter(title, graph, 'A').best(['2']).runs.single;
       expect(run.bonus, 20);
       expect(run.revenue, 70);
+      expect(run.bonuses.map((b) => (b.reason, b.amount)), [
+        ('Tunnel track: 10 for each of the 2 stops paid for', 20),
+      ]);
     });
 
     test('joining east and west pays both bonuses', () {
@@ -261,6 +311,9 @@ void main() {
       final run = TrainRouter(title, graph, 'A').best(['3']).runs.single;
       expect(run.bonus, 80);
       expect(run.revenue, 30 + 20 + 40 + 80);
+      // Spelt out, with what each area adds.
+      expect(run.bonuses.single.reason, 'East to west: R0C2 30 + R0C0 50');
+      expect(run.bonuses.single.amount, 80);
     });
 
     test('a stop that pays nothing is out of bounds where the title says',
@@ -291,6 +344,40 @@ void main() {
       expect(title.trainNamed('8E')!.kind, TrainKind.express);
       expect(title.trainNamed('3H')!.kind, TrainKind.hexes);
       expect(GameTitle.byId('1854')!.trainNamed('2+')!.freeTowns, isTrue);
+    });
+  });
+
+  group("on 1889's map", () {
+    test('Matsuyama runs to Imabari, which pays a D train most', () {
+      final g1889 = GameTitle.byId('1889')!;
+      final rules = TileRules(g1889);
+      final matsuyama = g1889.map.byId('E2')!;
+      final imabari = g1889.map.byId('F1')!;
+      final toward = [
+        for (int side = 0; side < 6; side++)
+          if (Board.neighborOf(matsuyama.coord, side) == imabari.coord) side,
+      ].single;
+      // Imabari's own track meets that side.
+      expect(imabari.printed.edges, contains((toward + 3) % 6));
+      final session = GameSession.start(
+          title: g1889, name: 'Shikoku', startedEmpty: true);
+      final tile = rules.options(matsuyama, null, maxSteps: 1).firstWhere(
+          (o) =>
+              !o.isPrinted &&
+              rules.contentOf(matsuyama, o)!.edges.contains(toward));
+      session.setManually(
+          matsuyama, PlacedTile(tile.tileId!, rotation: tile.rotation));
+      final circle = '${matsuyama.coord.row}_${matsuyama.coord.col}_0';
+      session.tokens[GameSession.slotId(circle, 0)] = 'IR';
+      int pays(String train) =>
+          TrainRouter(g1889, session.graph(g1889), 'IR').best([train]).revenue;
+      // A yellow city of 20, and Imabari's 30 while tiles are yellow...
+      expect(pays('2'), 50);
+      // ...60 once they are brown...
+      session.phase = TileColor.brown;
+      expect(pays('6'), 80);
+      // ...and 100 to a diesel.
+      expect(pays('D'), 120);
     });
   });
 }
