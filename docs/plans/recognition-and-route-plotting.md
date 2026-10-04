@@ -48,7 +48,14 @@ tile 5 prints its city in a corner, which together take the detector from 7
 of 16 right to 12 (see Station tokens). And it adds the end of the game: end
 game OR sets, the last operating rounds run by themselves over each title's
 stock market, and what every player is worth, holdings typed in shares of
-each company's size (see The end of the game).
+each company's size (see The end of the game). The fourteenth closes 1889 --
+the last webcam session's steep and oblique views went into the data set to
+measure grid matching, which places none of them -- and gets ready for
+other titles: the importer now finds any of tobymao's titles by name,
+follows a variant to the title it varies, adds what it imports to the app's
+list, and reports what the data doesn't carry, which
+`docs/importing-a-title.md` turns into the code to change. Where to pick up
+with 1880 is `docs/resuming-with-1880.md`.
 
 ## Context
 
@@ -68,7 +75,7 @@ board each time.
 
 ## What it does now
 
-1. Pick a title (1844, 1854 or 1889), then start or resume a game.
+1. Pick a title (1807, 1844, 1854, 1880 or 1889), then start or resume a game.
 2. Photograph the whole board once. The app finds the grid, deskews it, works out
    which hex is which, and reads the board.
 3. It flags hexes it isn't sure about and offers close-ups, grouped so one photo
@@ -113,11 +120,19 @@ photo of a player's area
 MIT licensed) has both the tile designs and the per-title maps.
 `tool/import_tobymao_title.dart` fetches a title's `map.rb`, `tiles.rb`,
 `entities.rb` and the shared `config/tile.rb`, reads the Ruby constant hashes,
-and writes `lib/titles/title_<id>.dart`:
+and writes `lib/titles/title_<id>.dart`, adding it to `lib/titles/titles.dart`,
+the list `GameTitle.all` is built from:
 
 ```
 dart run tool/import_tobymao_title.dart 1844
 ```
+
+It takes a title as 18xx.games names it or as tobymao's folder does, takes
+what a variant (1807, of 1867) doesn't define from the title it varies, and
+ends with a report of what the data doesn't carry: rules in the game's code,
+tile code the app doesn't read, cities whose places to check against the
+print. `docs/importing-a-title.md` says what to do about each, and
+`test/every_title_test.dart` holds every title to what the app needs.
 
 That gives, for each title: every hex that exists, what is printed on it (cities,
 towns, off-board revenue by phase, pre-printed track, labels, impassable
@@ -1437,8 +1452,9 @@ counts as read. Records from before then can't say what was read.)
   there.
 - **A recognizer learned from the data set** (kept, 4 October): for photos
   at awkward angles and under glare, where the drawn templates fall short.
-  The data set (`dataset/`, see its README) is the start of one: 1,096
-  labelled hex pictures, but only about 200 different hexes-and-tiles.
+  The data set (`dataset/`, see its README) is the start of one: 1,456
+  labelled hex pictures, 419 of them 1889's, but only 222 different
+  hexes-and-tiles.
 - Photos at 4:3 rather than 16:9: the board is nearer 4:3, so each hex would
   get about a third more pixels.
 - Tokens found by the circles themselves (their black rings) rather than
@@ -1489,6 +1505,12 @@ counts as read. Records from before then can't say what was read.)
 
 ## Notes for the next pass
 
+- **1889 is packed up (4 October); 1880 is next.** Start from
+  `docs/resuming-with-1880.md`: where things stand, what 1880's rules the app
+  leaves out (its stock-market bonus above all, for the end of the game),
+  what to check against its board, and how to bring a session's files into
+  the data set.
+
 - **The first 1889 session** (iPhone SE, 3 Oct, after the 1844 photos): 25
   photos, mostly of parts of the board, and three charters; the photos, the
   game and the corrections are in the data set (`dataset/`, with what each
@@ -1504,9 +1526,11 @@ counts as read. Records from before then can't say what was read.)
     remembered across games -- and two port towns read, now limited to the
     one tile; which town is the port is still for the user.
 - **1880 and 1807** are imported but untested on real boards. Their special
-  rules beyond how trains run (1880's foreign investors and its 2R, 1807's
-  systems, mines and minors) aren't modelled; tobymao's 1807 lists a "Mine
-  bonus" box, which the align screen offers as a handle.
+  rules beyond how trains run (1880's stock-market bonus, ferries, Taiwan and
+  Trans-Siberian bonus, foreign investors and 2R; 1807's systems, mines,
+  loans and minors) aren't modelled, but 1807's companies may pay half, as
+  1867's do; tobymao's 1807 lists a "Mine bonus" box, which the align screen
+  offers as a handle.
 
 - **The second phone session** (the same board): a photo turned 90 degrees
   under heavy glare (`CAP5253572290537228500`), found right first time; one

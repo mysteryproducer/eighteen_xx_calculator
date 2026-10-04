@@ -1,11 +1,7 @@
 import 'dart:math' as math;
 
-import '../titles/title_1807.dart';
-import '../titles/title_1844.dart';
-import '../titles/title_1854.dart';
-import '../titles/title_1880.dart';
-import '../titles/title_1889.dart';
 import '../titles/title_data.dart';
+import '../titles/titles.dart';
 import 'board.dart';
 import 'company.dart';
 import 'map_layout.dart';
@@ -101,8 +97,8 @@ class GameTitle {
             if (phases.any((p) => p.tiles.contains(c))) c,
         ];
 
-  /// Whether a company may pay out half its revenue and keep half. None of
-  /// the titles imported so far lets a player choose to.
+  /// Whether a company may pay out half its revenue and keep half: 1807's
+  /// majors may, as 1867's do (see [_halfPay]).
   final bool halfPay;
 
   /// The train called [name], if the title has one.
@@ -167,6 +163,11 @@ class GameTitle {
     '1889': TileStyle(townDots: true, multiSlotRadius: 0.27),
   };
   static const Set<String> _doubleSided = {'1889'};
+
+  /// The titles whose companies may pay half ([halfPay]): a dividend step
+  /// that offers `half` (`step/dividend.rb`, or the one a title takes from
+  /// the title it's a variant of -- 1807's is 1867's).
+  static const Set<String> _halfPay = {'1807'};
 
   /// How each title's share prices move when a company pays out, where it
   /// isn't tobymao's default of a space right for anything paid, and what its
@@ -268,6 +269,7 @@ class GameTitle {
       market: StockMarket.parse(data.market, kind: data.marketKind),
       marketRules: _marketRules[data.id] ?? const MarketRules(),
       doubleSidedTiles: _doubleSided.contains(data.id),
+      halfPay: _halfPay.contains(data.id),
       routeRules: _routeRules[data.id] ?? RouteRules.none,
       stopGroups: {
         for (final h in data.hexes)
@@ -356,12 +358,10 @@ class GameTitle {
       ? null
       : {for (final name in names) ?StationKind.values.asNameMap()[name]};
 
+  /// Every title imported by tool/import_tobymao_title.dart, which keeps
+  /// the list (lib/titles/titles.dart).
   static final List<GameTitle> all = [
-    GameTitle.fromData(title1807),
-    GameTitle.fromData(title1844),
-    GameTitle.fromData(title1854),
-    GameTitle.fromData(title1880),
-    GameTitle.fromData(title1889),
+    for (final data in importedTitles) GameTitle.fromData(data),
   ];
 
   static GameTitle? byId(String id) {

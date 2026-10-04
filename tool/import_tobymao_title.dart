@@ -2,19 +2,44 @@
 // (https://github.com/tobymao/18xx, MIT licensed), the engine behind
 // 18xx.games.
 //
-//   dart run tool/import_tobymao_title.dart 1844
+//   dart run tool/import_tobymao_title.dart 1880
+//   dart run tool/import_tobymao_title.dart 18Chesapeake
 //
-// fetches lib/engine/game/g_1844/{map,tiles,meta,entities}.rb and the shared
-// lib/engine/config/tile.rb, and writes lib/titles/title_1844.dart. The Ruby
-// files are plain constant hashes, so a small reader for Ruby literals is
-// enough; nothing is executed.
+// finds the title's folder under lib/engine/game (g_1880, g_18_chesapeake),
+// fetches its map.rb, tiles.rb, meta.rb, entities.rb, game.rb, trains.rb,
+// phases.rb, market.rb, step/dividend.rb and step/route.rb, and the shared
+// lib/engine/config/tile.rb, and writes lib/titles/title_1880.dart; then
+// rewrites lib/titles/titles.dart, the list GameTitle.all is built from. A
+// title that is a variant of another (`class Game < G18Chesapeake::Game`)
+// takes whatever it doesn't define itself from that one. The Ruby files are
+// plain constant hashes, so a small reader for Ruby literals is enough;
+// nothing is executed.
 //
-// Pass `--from <dir>` to read map.rb, tiles.rb, meta.rb, entities.rb and
-// tile.rb from a local directory instead of fetching them.
+// It ends with a report of what the data doesn't carry -- rules in the
+// game's code, tile code the app doesn't read, things to check against the
+// physical game -- each with the code to change: see
+// docs/importing-a-title.md.
+//
+// Options:
+//   --from <dir>  read the files from a local clone of tobymao/18xx, or from
+//                 a folder holding one title's files (and tile.rb) as before,
+//                 rather than fetching them
+//   --out <dir>   write the title file into <dir> instead, leaving lib/titles
+//                 alone: to see what importing again would change
+//   --dry-run     write nothing; print the report
+//   --list        list the titles tobymao has
+//   --registry    only rewrite lib/titles/titles.dart
 import 'dart:convert';
 import 'dart:io';
 
-const _base = 'https://raw.githubusercontent.com/tobymao/18xx/master/lib/engine';
+const _usage = '''
+usage: dart run tool/import_tobymao_title.dart <title> [--from <dir>] [--out <dir>] [--dry-run]
+       dart run tool/import_tobymao_title.dart --list
+       dart run tool/import_tobymao_title.dart --registry
+
+<title> as 18xx.games names it (1880, 18Chesapeake, 1822MX) or as its folder
+in tobymao/18xx is named (g_18_chesapeake); case, spaces and underscores
+don't matter.''';
 
 /// Where the physical boards and tiles print the cities of hexes and tiles
 /// whose data gives no places for them, by hex or tile id. tobymao spreads
@@ -62,53 +87,162 @@ String _withCityLocs(String dsl, List<String> locs) {
   ].join(';');
 }
 
+/// The constants the import reads, wherever a title's files define them.
+const _read = {
+  'HEXES', 'TILES', 'LOCATION_NAMES', 'LAYOUT', 'CORPORATIONS', 'MINORS',
+  'TRAINS', 'PHASES', 'MARKET', 'COLUMN_MARKET', 'LOCAL_NAMES',
+  'LOCAL_COORDINATES', 'LOCAL_CITIES', 'TUNNEL_HEXES', 'TUNNEL_TILES',
+  'MOUNTAIN_HEXES', 'MOUNTAIN_TILES',
+};
+
+/// The files of a title's folder that hold data, or rules the report looks
+/// for.
+const _files = [
+  'map.rb',
+  'tiles.rb',
+  'meta.rb',
+  'entities.rb',
+  'game.rb',
+  'trains.rb',
+  'phases.rb',
+  'market.rb',
+  'step/dividend.rb',
+  'step/route.rb',
+];
+
 Future<void> main(List<String> args) async {
-  if (args.isEmpty) {
-    stderr.writeln('usage: dart run tool/import_tobymao_title.dart <title> '
-        '[--from <dir>]');
+  String? option(String name) {
+    final i = args.indexOf(name);
+    return i >= 0 && i + 1 < args.length ? args[i + 1] : null;
+  }
+
+  final fromDir = option('--from');
+  final outDir = option('--out');
+  final dryRun = args.contains('--dry-run');
+  final positional = [
+    for (int i = 0; i < args.length; i++)
+      if (!args[i].startsWith('--') &&
+          (i == 0 || (args[i - 1] != '--from' && args[i - 1] != '--out')))
+        args[i],
+  ];
+  if (args.contains('--registry')) {
+    _writeRegistry();
+    return;
+  }
+  final upstream = fromDir == null
+      ? _GitHub()
+      : Directory('$fromDir/lib/engine/game').existsSync()
+          ? _Clone('$fromDir/lib/engine')
+          : _Flat(fromDir);
+  if (args.contains('--list')) {
+    final folders = await _titleFolders(upstream);
+    if (folders == null) {
+      stderr.writeln('Could not list the titles${upstream.why}');
+      exit(1);
+    }
+    stdout.writeln(folders.map((f) => f.substring(2)).join('\n'));
+    return;
+  }
+  if (positional.isEmpty) {
+    stderr.writeln(_usage);
     exit(64);
   }
-  final title = args.first;
-  final fromIndex = args.indexOf('--from');
-  final fromDir = fromIndex >= 0 && fromIndex + 1 < args.length
-      ? args[fromIndex + 1]
-      : null;
+  final asked = positional.first;
 
-  Future<String?> load(String name, String url) async {
-    if (fromDir != null) {
-      final file = File('$fromDir/$name');
-      return file.existsSync() ? file.readAsString() : null;
+  // The title's folder, then the folders of the titles it's a variant of.
+  final folder = await _folderFor(upstream, asked);
+  if (folder == null) exit(1);
+  final chain = <_Source>[];
+  for (String? next = folder; next != null && chain.length < 4;) {
+    final source = await _Source.load(upstream, next);
+    if (source.files.isEmpty) {
+      stderr.writeln('Nothing found for $asked in $next${upstream.why}');
+      if (chain.isEmpty) exit(1);
+      break;
     }
-    return _fetch(url);
+    chain.add(source);
+    final parent = source.parent;
+    next = parent == null || !upstream.hasParents
+        ? null
+        : await _folderFor(upstream, parent);
   }
+  final own = chain.first;
 
-  final gameDir = '$_base/game/g_$title';
-  final mapSource = await load('map.rb', '$gameDir/map.rb');
-  if (mapSource == null) {
-    stderr.writeln('No map.rb found for $title');
-    exit(1);
-  }
-  final tilesSource = await load('tiles.rb', '$gameDir/tiles.rb');
-  final metaSource = await load('meta.rb', '$gameDir/meta.rb');
-  final entitiesSource = await load('entities.rb', '$gameDir/entities.rb');
-  // Trains and phases are constants in the game's code, or for some titles
-  // (1854) files of their own.
-  final gameSource = await load('game.rb', '$gameDir/game.rb');
-  final trainsSource = await load('trains.rb', '$gameDir/trains.rb');
-  final phasesSource = await load('phases.rb', '$gameDir/phases.rb');
-  // The stock market: in the game's code, or a file of its own (1807).
-  final marketSource = await load('market.rb', '$gameDir/market.rb');
-  final standardSource = await load('tile.rb', '$_base/config/tile.rb');
+  // The title as 18xx.games knows it: G1880's id is 1880.
+  final module = own.module ?? asked;
+  final title = module;
+  final stem = folder.substring(2);
+
+  final standardSource = await upstream.read('config/tile.rb');
   if (standardSource == null) {
-    stderr.writeln('Could not load the standard tile list (config/tile.rb)');
+    stderr.writeln('Could not load the standard tile list (config/tile.rb)'
+        '${upstream.why}');
     exit(1);
   }
 
-  final map = RubyConstants.parse(mapSource);
-  final game = RubyConstants({
-    for (final source in [gameSource, trainsSource, phasesSource])
-      if (source != null) ...RubyConstants.parse(source).values,
-  });
+  // Every constant the title's files define, as Ruby finds them: the
+  // title's game code before the modules it includes, and the title before
+  // the one it's a variant of.
+  final merged = <String, Object?>{};
+  final metaMerged = <String, Object?>{};
+  final unread = <String, String>{};
+  for (final source in chain.reversed) {
+    for (final name in [
+      'market.rb',
+      'trains.rb',
+      'phases.rb',
+      'entities.rb',
+      'map.rb',
+      'tiles.rb',
+      'game.rb',
+    ]) {
+      final text = source.files[name];
+      if (text == null) continue;
+      final parsed = RubyConstants.parse(text);
+      merged.addAll(parsed.values);
+      parsed.unread.forEach((constant, why) {
+        if (_read.contains(constant)) unread['$constant in ${source.folder}/$name'] = why;
+      });
+    }
+    final metaText = source.files['meta.rb'];
+    if (metaText != null) metaMerged.addAll(RubyConstants.parse(metaText).values);
+  }
+  final all = RubyConstants(merged);
+  final meta = RubyConstants(metaMerged);
+  // The files the title takes from the one it's a variant of.
+  final inherited = <String, List<String>>{
+    for (final source in chain.skip(1))
+      source.folder: [
+        for (final name in _files)
+          if (source.files.containsKey(name) &&
+              !chain
+                  .takeWhile((s) => s != source)
+                  .any((s) => s.files.containsKey(name)))
+            name,
+      ],
+  }..removeWhere((_, names) => names.isEmpty);
+  final gameSources = [
+    for (final source in chain) ?source.files['game.rb'],
+  ];
+  final gameCode = [
+    for (final source in chain)
+      if (source.files['game.rb'] case final text?) (source.folder, text),
+  ];
+  final dividendSource = [
+    for (final source in chain) ?source.files['step/dividend.rb'],
+  ].firstOrNull;
+  final dividendFolder = [
+    for (final source in chain)
+      if (source.files.containsKey('step/dividend.rb')) source.folder,
+  ].firstOrNull;
+  final routeStep = [
+    for (final source in chain)
+      if (source.files['step/route.rb'] case final text?) (source.folder, text),
+  ].firstOrNull;
+
+  final report = _Report();
+  final trainNotes = <String>[];
+
   // The trains, each variant (1844's 2H) a train of its own that keeps
   // whatever of its parent's it doesn't change.
   final trainEntries = <String>[];
@@ -167,6 +301,11 @@ Future<void> main(List<String> args) async {
       if (!kinds.containsAll(const ['city', 'town', 'offboard'])) {
         visits = kinds.toList()..sort();
       }
+      final strange = kinds.difference(const {'city', 'town', 'offboard'});
+      if (strange.isNotEmpty) {
+        trainNotes.add('$name counts stops the app has no kind for '
+            '(${strange.join(', ')}): TrainData and train_routes.dart');
+      }
     } else {
       reach = (distance as num?)?.toInt() ?? 0;
     }
@@ -186,9 +325,22 @@ Future<void> main(List<String> args) async {
         "${rusts == null ? '' : ', rustsOn: ${_dartString('$rusts')}'}"
         "${parent == null ? '' : ", base: ${_dartString('${parent['name']}')}"}"
         "${merged['num'] is num ? ', count: ${merged['num']}' : ''}),");
+    // How the app will run it, where that isn't plain "so many stops".
+    final how = [
+      if (pays != null) 'an express, paid for its best $pays stops',
+      if (pays == null && reach >= 99) 'runs any distance',
+      if (reach == 0) 'runs nowhere (distance 0)',
+      if (freeTowns) 'towns free',
+      if (townAllowance > 0) 'up to $townAllowance towns free',
+      if (!townsPay) 'towns pay nothing',
+      if (visits != null) 'runs to ${visits.join('/')} only',
+      if (paidAt != null) 'paid at ${paidAt.join('/')} only',
+      if (multiplier != 1) 'takings x$multiplier',
+    ];
+    if (how.isNotEmpty) trainNotes.add('$name: ${how.join('; ')}');
   }
 
-  final trains = game['TRAINS'];
+  final trains = all['TRAINS'];
   if (trains is List) {
     for (final train in trains.whereType<Map>()) {
       addTrain(train);
@@ -198,7 +350,7 @@ Future<void> main(List<String> args) async {
     }
   }
   final phaseEntries = <String>[];
-  final phases = game['PHASES'];
+  final phases = all['PHASES'];
   if (phases is List) {
     for (final phase in phases.whereType<Map>()) {
       final limit = phase['train_limit'];
@@ -213,14 +365,9 @@ Future<void> main(List<String> args) async {
           "${tiles is List ? ', tiles: [${tiles.map((t) => _dartString('$t')).join(', ')}]' : ''}),");
     }
   }
-  final tiles = tilesSource == null ? map : RubyConstants.parse(tilesSource);
   final standard = RubyConstants.parse(standardSource);
-  final meta = metaSource == null ? RubyConstants({}) : RubyConstants.parse(metaSource);
-  final entities = entitiesSource == null
-      ? RubyConstants({})
-      : RubyConstants.parse(entitiesSource);
 
-  final layout = map['LAYOUT'];
+  final layout = all['LAYOUT'];
   if (layout != 'pointy' && layout != 'flat') {
     stderr.writeln('$title uses a $layout layout; only pointy-top and '
         'flat-top maps are supported.');
@@ -238,11 +385,14 @@ Future<void> main(List<String> args) async {
   }
 
   final tileEntries = <String>[];
+  // Every piece of tile code imported, for the report: hexes by id, tiles
+  // as `tile <id>`.
+  final codes = <String, String>{};
   // A tile printed exactly like one already listed is the same tile under
   // another name for a variant (1889's beginner game lists 6 again as Beg6,
   // and so on). Two identical drawings would always tie in recognition.
   final seen = <(String, String), String>{};
-  final manifest = tiles['TILES'];
+  final manifest = all['TILES'];
   if (manifest is! Map) {
     stderr.writeln('No TILES manifest found for $title');
     exit(1);
@@ -266,6 +416,9 @@ Future<void> main(List<String> args) async {
       final standardTile = standardTiles['$id'];
       if (standardTile == null) {
         stderr.writeln('warning: tile $id is not in config/tile.rb; skipped');
+        report.add(_Section.tiles,
+            'tile $id is not in config/tile.rb, so it was left out: give it '
+            'its code in the title\'s TILES (or fix the id) and import again');
         return;
       }
       (color, code) = standardTile;
@@ -278,6 +431,7 @@ Future<void> main(List<String> args) async {
       return;
     }
     seen[(color, code)] = '$id';
+    codes['tile $id'] = code;
     // Tiles marked hidden are laid by the game itself rather than by a
     // player -- 1844's Gotthard tunnel opening, say -- but they do appear on
     // the board, so they are imported and marked.
@@ -285,9 +439,9 @@ Future<void> main(List<String> args) async {
         "count: $count${hidden ? ', laidByGame: true' : ''}),");
   });
 
-  final names = (map['LOCATION_NAMES'] as Map?) ?? {};
+  final names = (all['LOCATION_NAMES'] as Map?) ?? {};
   final hexEntries = <String>[];
-  final hexes = map['HEXES'];
+  final hexes = all['HEXES'];
   if (hexes is! Map) {
     stderr.writeln('No HEXES found for $title');
     exit(1);
@@ -301,6 +455,7 @@ Future<void> main(List<String> args) async {
         var dsl = code == 'blank' ? '' : '$code';
         final locs = _printedCityLocs[title]?[id];
         if (locs != null) dsl = _withCityLocs(dsl, locs);
+        codes['$id'] = dsl;
         hexEntries.add("    MapHexData('$id', '$color', ${_dartString(dsl)}$nameArg),");
       }
     });
@@ -309,16 +464,27 @@ Future<void> main(List<String> args) async {
   // The companies whose station tokens go on the board, with their token
   // colours and home cities, for recognising tokens in photos.
   final companyEntries = <String>[];
+  final kinds = <String, int>{};
+  final homeless = <String>[];
   void addCompany(Map company) {
     final sym = company['sym'];
     if (sym == null) return;
     var home = company['coordinates'];
-    if (home is List) home = home.isEmpty ? null : home.first;
+    if (home is List) {
+      if (home.length > 1) {
+        report.add(_Section.companies,
+            '$sym has ${home.length} homes (${home.join(', ')}); only the '
+            'first is imported (CompanyData.home)');
+      }
+      home = home.isEmpty ? null : home.first;
+    }
     final city = (company['city'] as num?)?.toInt();
     final text = company['text_color'] as String?;
     final kind = company['type'] as String?;
     final tokens = company['tokens'];
     final shares = company['shares'];
+    kinds.update(kind ?? 'major', (n) => n + 1, ifAbsent: () => 1);
+    if (home == null) homeless.add('$sym');
     companyEntries.add("    CompanyData('$sym', "
         "${_dartString('${company['name'] ?? sym}')}, "
         "${_dartString('${company['color'] ?? 'white'}')}"
@@ -331,8 +497,8 @@ Future<void> main(List<String> args) async {
   }
 
   for (final (list, minors) in [
-    (entities['CORPORATIONS'], false),
-    (entities['MINORS'], true),
+    (all['CORPORATIONS'], false),
+    (all['MINORS'], true),
   ]) {
     if (list is! List) continue;
     for (final company in list) {
@@ -346,10 +512,10 @@ Future<void> main(List<String> args) async {
   }
   // 1854 builds its local railways in code from three parallel lists rather
   // than writing them out; the lists themselves are plain data.
-  final localNames = entities['LOCAL_NAMES'];
-  final localHomes = entities['LOCAL_COORDINATES'];
-  final localCities = entities['LOCAL_CITIES'];
-  if (entities['MINORS'] is! List &&
+  final localNames = all['LOCAL_NAMES'];
+  final localHomes = all['LOCAL_COORDINATES'];
+  final localCities = all['LOCAL_CITIES'];
+  if (all['MINORS'] is! List &&
       localNames is List &&
       localHomes is List &&
       localNames.length == localHomes.length) {
@@ -363,29 +529,24 @@ Future<void> main(List<String> args) async {
         'type': 'minor',
       });
     }
+    unread.removeWhere((where, _) => where.startsWith('MINORS '));
   }
 
   // 1844's tunnels: the hexes a tunnel company may tunnel through, and the
   // tiles whose narrow track shows which ways a tunnel can run.
-  final tunnelHexes = entities['TUNNEL_HEXES'];
-  final tunnelTiles = entities['TUNNEL_TILES'];
+  final tunnelHexes = all['TUNNEL_HEXES'];
+  final tunnelTiles = all['TUNNEL_TILES'];
   // And its mountain railways: the mountains a revenue plate can be assigned
   // to, and the plates.
-  final mountainHexes = entities['MOUNTAIN_HEXES'];
-  final mountainTiles = entities['MOUNTAIN_TILES'];
+  final mountainHexes = all['MOUNTAIN_HEXES'];
+  final mountainTiles = all['MOUNTAIN_TILES'];
   String words(Object? list) =>
       list is List ? list.map((w) => "'$w'").join(', ') : '';
 
   // The stock market's cells, row by row, as tobymao writes them -- a price
   // and letters for what the cell does (`100p`, a par price; `''`, no cell).
-  final marketConstants = marketSource == null
-      ? RubyConstants({})
-      : RubyConstants.parse(marketSource);
   final marketRows = [
-    for (final row in (game['MARKET'] ??
-            marketConstants['MARKET'] ??
-            marketConstants['COLUMN_MARKET']) as List? ??
-        const [])
+    for (final row in (all['MARKET'] ?? all['COLUMN_MARKET']) as List? ?? const [])
       [for (final cell in row as List) '$cell'],
   ];
   _marketFixes[title]?.forEach((at, fix) {
@@ -396,12 +557,15 @@ Future<void> main(List<String> args) async {
       marketRows[r][c] = fix.$2;
     } else {
       stderr.writeln('warning: market fix $at for $title no longer applies');
+      report.add(_Section.market,
+          'the fix for cell $at in _marketFixes no longer applies: tobymao '
+          'may have corrected it; take it out');
     }
   });
   // How a price moves on it: along a row, with a row's end leading up (a
   // grid, as 1830's); on a hex market, diagonally (1854); or along a single
   // row (1807).
-  final marketKind = gameSource != null && gameSource.contains('hex_market: true')
+  final marketKind = gameSources.any((s) => s.contains('hex_market: true'))
       ? 'hex'
       : marketRows.length == 1
           ? 'row'
@@ -409,6 +573,7 @@ Future<void> main(List<String> args) async {
 
   final location = meta['GAME_LOCATION'] as String?;
   final designer = meta['GAME_DESIGNER'] as String?;
+  final name = (meta['GAME_TITLE'] as String?) ?? title;
   final out = StringBuffer()
     ..writeln('// GENERATED by tool/import_tobymao_title.dart from tobymao/18xx')
     ..writeln('// (https://github.com/tobymao/18xx, MIT licensed). Do not edit by')
@@ -418,7 +583,7 @@ Future<void> main(List<String> args) async {
     ..writeln()
     ..writeln('const TitleData title$title = TitleData(')
     ..writeln("  id: '$title',")
-    ..writeln("  name: '$title',")
+    ..writeln('  name: ${_dartString(name)},')
     ..writeln('  location: ${location == null ? 'null' : _dartString(location)},')
     ..writeln('  designer: ${designer == null ? 'null' : _dartString(designer)},')
     ..writeln('  hexes: [')
@@ -455,24 +620,648 @@ Future<void> main(List<String> args) async {
     ..write(marketKind == 'grid' ? '' : "  marketKind: '$marketKind',\n")
     ..writeln(');');
 
-  final path = 'lib/titles/title_$title.dart';
-  File(path).writeAsStringSync(out.toString());
-  stdout.writeln('Wrote $path: ${hexEntries.length} hexes, '
-      '${tileEntries.length} tiles, ${companyEntries.length} companies.');
+  // What the data doesn't carry.
+  final stage = '${meta['DEV_STAGE'] ?? 'unknown'}';
+  report.add(_Section.about,
+      '$name (${own.folder})${location == null ? '' : ', $location'}'
+      '${designer == null ? '' : ', by $designer'}');
+  report.add(_Section.about,
+      '${layout == 'flat' ? 'flat' : 'pointy'}-topped map: '
+      '${hexEntries.length} hexes, ${tileEntries.length} tiles, '
+      '${companyEntries.length} companies, ${trainEntries.length} trains, '
+      '${phaseEntries.length} phases, ${marketRows.isEmpty ? 'no' : marketKind} '
+      'market');
+  if (stage != 'production') {
+    report.add(_Section.about,
+        '18xx.games has it at the `$stage` stage: its data may be unfinished '
+        'or wrong');
+  }
+  unread.forEach((where, why) => report.add(_Section.about,
+      '$where isn\'t a literal this tool can read ($why): what it holds is '
+      'missing from the import -- teach RubyConstants its form, or write the '
+      'missing data by hand'));
+  inherited.forEach((from, files) => report.add(_Section.about,
+      'a variant of ${from.substring(2)}: takes ${files.join(', ')} from it, and whatever else its own files leave out'));
+  _checkTileCode(codes, report);
+  _checkCityPlaces(codes, report);
+  _checkMarket(marketRows, report);
+  for (final note in trainNotes) {
+    report.add(_Section.trains, note);
+  }
+  _checkGameCode(
+    gameCode: gameCode,
+    dividend: dividendSource,
+    dividendFolder: dividendFolder,
+    routeStep: routeStep,
+    folder: own.folder,
+    steps: own.steps,
+    trains: trains is List ? trains : const [],
+    minors: kinds['minor'] ?? 0,
+    report: report,
+  );
+  if (homeless.isNotEmpty) {
+    report.add(_Section.companies,
+        'no home on the map, starting wherever their players put them: '
+        '${homeless.join(', ')}');
+  }
+  report.add(_Section.companies,
+      'kinds: ${kinds.entries.map((e) => '${e.value} ${e.key}').join(', ')}'
+      '${kinds.containsKey('minor') ? ' (minors hold no place on the market, and pay their owner as MarketRules.minorPayout says)' : ''}');
+  final privates = all['COMPANIES'];
+  if (privates is List) {
+    for (final company in privates.whereType<Map>()) {
+      for (final ability in (company['abilities'] as List? ?? const []).whereType<Map>()) {
+        final hexes = ability['hexes'], tiles = ability['tiles'];
+        if ((ability['type'] == 'tile_lay' || ability['type'] == 'teleport') &&
+            hexes is List &&
+            hexes.isNotEmpty &&
+            tiles is List &&
+            tiles.isNotEmpty) {
+          report.add(_Section.companies,
+              '${company['sym']} (${company['name']}) lays ${tiles.join('/')} '
+              'on ${hexes.join(', ')}: where no one else may lay those tiles, '
+              'list them in _tilesOnlyOn');
+        }
+      }
+    }
+  }
+  final handled = _handKept(title);
+  if (handled.isNotEmpty) {
+    report.add(_Section.about,
+        'lib/models/game_title.dart already keeps rules for it in '
+        '${handled.join(', ')}');
+  }
+
+  final path = outDir != null
+      ? '$outDir/title_$stem.dart'
+      : 'lib/titles/title_$stem.dart';
+  if (!dryRun) {
+    File(path)
+      ..parent.createSync(recursive: true)
+      ..writeAsStringSync(out.toString());
+    stdout.writeln('Wrote $path: ${hexEntries.length} hexes, '
+        '${tileEntries.length} tiles, ${companyEntries.length} companies.');
+    if (outDir == null) _writeRegistry();
+  }
+  stdout.write(report);
+  stdout.writeln('\nThen check it against your copy of the game, and run '
+      'flutter test test/every_title_test.dart\nand flutter analyze: see '
+      'docs/importing-a-title.md.');
 }
 
-Future<String?> _fetch(String url) async {
-  final client = HttpClient();
-  try {
-    final request = await client.getUrl(Uri.parse(url));
-    final response = await request.close();
-    if (response.statusCode != 200) {
-      await response.drain<void>();
-      return null;
+/// Rewrites lib/titles/titles.dart: every title in lib/titles, which
+/// GameTitle.all is built from.
+void _writeRegistry() {
+  final files = [
+    for (final entity in Directory('lib/titles').listSync())
+      if (entity is File) entity.uri.pathSegments.last,
+  ].where((f) => f.startsWith('title_') && f.endsWith('.dart') && f != 'title_data.dart').toList()
+    ..sort();
+  final titles = [
+    for (final file in files)
+      if (RegExp(r'const TitleData (\w+) =')
+              .firstMatch(File('lib/titles/$file').readAsStringSync())
+              ?.group(1)
+          case final constant?)
+        (file, constant),
+  ];
+  final out = StringBuffer()
+    ..writeln('// GENERATED by tool/import_tobymao_title.dart: the titles in this')
+    ..writeln('// folder, for GameTitle.all. Importing a title rewrites it, as does')
+    ..writeln('// `dart run tool/import_tobymao_title.dart --registry`.')
+    ..writeln()
+    ..writeAll(titles.map((t) => "import '${t.$1}';\n"))
+    ..writeln("import 'title_data.dart';")
+    ..writeln()
+    ..writeln('const List<TitleData> importedTitles = [')
+    ..writeAll(titles.map((t) => '  ${t.$2},\n'))
+    ..writeln('];');
+  File('lib/titles/titles.dart').writeAsStringSync(out.toString());
+  stdout.writeln('Wrote lib/titles/titles.dart: '
+      '${titles.map((t) => t.$2.substring(5)).join(', ')}.');
+}
+
+/// The rules lib/models/game_title.dart keeps by hand that name [id]: the
+/// maps and sets it keeps them in.
+List<String> _handKept(String id) {
+  final file = File('lib/models/game_title.dart');
+  if (!file.existsSync()) return const [];
+  final source = file.readAsStringSync();
+  return [
+    for (final match in RegExp(r'static (?:const|final) [^=]*\b(_\w+) = \{')
+        .allMatches(source))
+      if (_braced(source, match.end - 1).contains("'$id'")) match.group(1)!,
+  ];
+}
+
+/// The text from the brace at [open] to the one that closes it.
+String _braced(String source, int open) {
+  var depth = 0;
+  for (int i = open; i < source.length; i++) {
+    if (source[i] == '{') depth++;
+    if (source[i] == '}' && --depth == 0) return source.substring(open, i + 1);
+  }
+  return source.substring(open);
+}
+
+/// The parts of tobymao's tile code (`lib/engine/tile.rb`) that
+/// TileDefinition.parseDsl doesn't read, or reads only partly, with where
+/// they appear and what that means for the app.
+void _checkTileCode(Map<String, String> codes, _Report report) {
+  final found = <String, List<String>>{};
+  void note(String feature, String where) =>
+      found.putIfAbsent(feature, () => []).add(where);
+  for (final MapEntry(key: where, value: code) in codes.entries) {
+    for (final raw in code.split(';')) {
+      final part = raw.trim();
+      if (part.isEmpty) continue;
+      final eq = part.indexOf('=');
+      final key = eq < 0 ? part : part.substring(0, eq);
+      final params = <String, String>{
+        if (eq >= 0)
+          for (final kv in part.substring(eq + 1).split(','))
+            if (kv.indexOf(':') case final colon when colon > 0)
+              kv.substring(0, colon): kv.substring(colon + 1),
+      };
+      switch (key) {
+        case 'junction' || 'halt' || 'pass':
+          note(key, where);
+        case 'city' || 'town' || 'offboard':
+          for (final attr in const ['visit_cost', 'route', 'boom', 'to_city']) {
+            if (params.containsKey(attr)) note('$key $attr', where);
+          }
+        case 'path':
+          for (final attr in const ['lanes', 'a_lane', 'b_lane', 'ignore']) {
+            if (params.containsKey(attr)) note('path $attr', where);
+          }
+          final track = params['track'];
+          if (track != null && !const {'broad', 'narrow', 'future'}.contains(track)) {
+            note('path track:$track', where);
+          }
+        case 'stub' || 'partition' || 'stripes' || 'frame':
+          note(key, where);
+        case 'label' || 'border' || 'icon' || 'upgrade' || 'future_label':
+          break;
+        default:
+          note('$key (not in tobymao\'s tile.rb either)', where);
+      }
     }
-    return await response.transform(utf8.decoder).join();
-  } finally {
-    client.close();
+  }
+  String meaning(String feature) {
+    final first = feature.split(' ').first;
+    if (const {'junction', 'halt', 'pass'}.contains(first)) {
+      return 'a node that paths name by number (`_1`) as they do stops; the '
+          'app doesn\'t count it, so track to the stops after it goes astray: '
+          'TileDefinition.parseDsl must count it (lib/models/tile_definition.dart)';
+    }
+    if (feature.endsWith('visit_cost')) {
+      return 'a stop that doesn\'t count towards a train\'s distance: '
+          'train_routes.dart counts every stop';
+    }
+    if (feature.endsWith(' route')) {
+      return 'a stop routes may not use as tobymao says: train_routes.dart '
+          'doesn\'t know';
+    }
+    if (feature.endsWith('boom') || feature.endsWith('to_city')) {
+      return 'a stop that changes as the game goes on: not modelled';
+    }
+    if (feature.contains('lane')) {
+      return 'parallel lanes of track, read as one path: '
+          'TileDefinition.parseDsl and train_routes.dart';
+    }
+    if (feature.endsWith('ignore')) {
+      return 'track drawn but not for routes: read as track';
+    }
+    if (feature.startsWith('path track:')) {
+      return 'a kind of track read as standard gauge: TileSegment has '
+          'narrow and future only';
+    }
+    if (const {'stub', 'partition', 'stripes', 'frame'}.contains(first)) {
+      return 'printing the app doesn\'t draw, so recognition compares the '
+          'photo with a drawing that lacks it (tile_renderer.dart)';
+    }
+    return 'unknown: read tobymao\'s lib/engine/tile.rb';
+  }
+
+  found.forEach((feature, places) {
+    final shown = places.take(8).join(', ');
+    report.add(_Section.tiles,
+        '$feature in ${places.length == 1 ? '' : '${places.length}: '}$shown'
+        '${places.length > 8 ? ', ...' : ''} -- ${meaning(feature)}');
+  });
+}
+
+/// Hexes and tiles with two or more cities that tobymao places by its own
+/// rule (no `loc:`), which the print may not follow.
+void _checkCityPlaces(Map<String, String> codes, _Report report) {
+  final unplaced = [
+    for (final MapEntry(key: where, value: code) in codes.entries)
+      if (code.split(';').where((p) => p.startsWith('city=')).toList()
+          case final cities
+          when cities.length > 1 && cities.any((c) => !c.contains('loc:')))
+        where,
+  ];
+  if (unplaced.isEmpty) return;
+  report.add(_Section.tiles,
+      '${unplaced.length} hexes and tiles have two or more cities placed by '
+      'tobymao\'s rule rather than the data: ${unplaced.join(', ')} -- check '
+      'each against the print; where a city sits elsewhere, give its place '
+      'in _printedCityLocs (this tool) and import again');
+}
+
+/// The stock market: its letters, and cells that look mistyped.
+void _checkMarket(List<List<String>> rows, _Report report) {
+  if (rows.isEmpty) {
+    report.add(_Section.market,
+        'no stock market found (MARKET): the end of the game can\'t be worked '
+        'out from share values');
+    return;
+  }
+  final letters = <String>{};
+  for (int r = 0; r < rows.length; r++) {
+    int? last;
+    for (int c = 0; c < rows[r].length; c++) {
+      final code = rows[r][c];
+      final price = int.tryParse(RegExp(r'^\d+').stringMatch(code) ?? '');
+      if (price == null) continue;
+      letters.addAll(code.substring('$price'.length).split('').where((l) => l.trim().isNotEmpty));
+      if (last != null && price < last) {
+        report.add(_Section.market,
+            'cell $r:$c is $code after ${rows[r][c - 1]}, in a row that '
+            'should rise: if it\'s mistyped, add the fix to _marketFixes '
+            '(this tool)');
+      }
+      last = price;
+    }
+  }
+  report.add(_Section.market,
+      '${rows.length} row${rows.length == 1 ? '' : 's'} of up to '
+      '${rows.map((r) => r.length).reduce((a, b) => a > b ? a : b)} cells; '
+      'letters ${letters.isEmpty ? 'none' : (letters.toList()..sort()).join(' ')}'
+      ' -- the app moves prices by the cells alone, except for letters given '
+      'in MarketRules.barred (1844\'s t); the market reader tells the zones '
+      'apart by them');
+}
+
+/// Rules in the title's game code that the app keeps by hand, if at all.
+void _checkGameCode({
+  required List<(String, String)> gameCode,
+  required String? dividend,
+  required String? dividendFolder,
+  required (String, String)? routeStep,
+  required String folder,
+  required List<String>? steps,
+  required List<Object?> trains,
+  required int minors,
+  required _Report report,
+}) {
+  // Each method the game code defines, and the folder whose game.rb
+  // defines it first: the title's own, or one it's a variant of.
+  final methods = <String, String>{};
+  for (final (from, source) in gameCode) {
+    for (final m in RegExp(r'^\s*def\s+(?:self\.)?([a-z_]\w*[?!]?)', multiLine: true)
+        .allMatches(source)) {
+      methods.putIfAbsent(m.group(1)!, () => from);
+    }
+  }
+  List<String> defined(Set<String> names) => [
+        for (final name in names)
+          if (methods[name] case final from?) from == folder ? name : '$name ($from)',
+      ];
+
+  final routes = defined(const {
+    'revenue_for', 'revenue_str', 'revenue_stops', 'routes_revenue',
+    'check_distance', 'check_other', 'check_connected',
+    'check_overlap', 'check_route_token', 'compute_stops', 'route_distance',
+    'stop_type', 'express_train?',
+  });
+  if (routes.isNotEmpty) {
+    report.add(_Section.code,
+        'routes: ${routes.join(', ')} -- what a route pays or where it may go '
+        'differs from the data (bonuses, costs, stops that count otherwise): '
+        'read them, then add what matters to _routeRules (game_title.dart) or '
+        'to train_routes.dart');
+  }
+  // Earnings beyond the routes: 1880's stock-market bonus, added to the run
+  // in its route step.
+  final extra = [
+    ...defined(const {'extra_revenue', 'stock_market_bonus'}),
+    if (routeStep != null && routeStep.$2.contains('extra_revenue'))
+      'extra_revenue in ${routeStep.$1}/step/route.rb',
+  ];
+  if (extra.isNotEmpty) {
+    report.add(_Section.code,
+        'earnings beyond the routes: ${extra.join(', ')} -- a company earns '
+        'more than its trains\' runs (a bonus): add it where the app works out '
+        'what a company earns (EndGame, the route panel)');
+  }
+  if (methods.containsKey('hex_train?') ||
+      trains.whereType<Map>().any((t) => '${t['name']}'.endsWith('H'))) {
+    report.add(_Section.code,
+        'trains measured in hexes (hex_train?, or names ending in H): list '
+        'them in _hexTrains (game_title.dart)');
+  }
+  final upgrades = defined(const {
+    'upgrades_to?', 'upgrades_to_correct_label?', 'upgrades_to_correct_city_town?',
+    'upgrades_to_correct_color?', 'all_potential_upgrades', 'legal_tile_rotation?',
+  });
+  if (upgrades.isNotEmpty) {
+    report.add(_Section.code,
+        'tile upgrades: ${upgrades.join(', ')} -- which tile may replace which '
+        'differs from the usual rule: where a printed hex takes tiles it '
+        'otherwise couldn\'t, add it to _specialUpgrades (game_title.dart)');
+  }
+  final market = defined(const {
+    'init_stock_market', 'sold_out_increase?', 'share_price_change',
+    'change_share_price', 'price_movement_chart',
+  });
+  if (market.isNotEmpty) {
+    report.add(_Section.code,
+        'stock market: ${market.join(', ')} -- prices may move by rules of the '
+        'game\'s own: check MarketRules in _marketRules (game_title.dart), or '
+        'stock_market.dart');
+  }
+  final ending = defined(const {
+    'player_value', 'end_game!', 'init_loans', 'take_loan', 'calculate_interest',
+    'loans_due_interest',
+  });
+  if (ending.isNotEmpty) {
+    report.add(_Section.code,
+        'the end of the game: ${ending.join(', ')} -- players may be worth more '
+        'or less than cash and shares (loans, bonuses): the end-of-game table '
+        'counts cash and shares only');
+  }
+  if (dividend != null) {
+    final where = '$dividendFolder/step/dividend.rb';
+    if (RegExp(r'def\s+(share_price_change|change_share_price)\b').hasMatch(dividend)) {
+      report.add(_Section.code,
+          'payouts: $where moves share prices its own way: read '
+          'share_price_change, then set MarketRules.payoutMoves and '
+          'withholdMoves in _marketRules (game_title.dart)');
+    }
+    if (RegExp(r'\bHalfPay\b').hasMatch(dividend) ||
+        RegExp(r'DIVIDEND_TYPES[^\n]*\bhalf\b').hasMatch(dividend)) {
+      report.add(_Section.code,
+          'payouts: a company may pay half ($where): add the title to '
+          '_halfPay (game_title.dart)');
+    }
+    if (dividend.contains('MinorHalfPay')) {
+      report.add(_Section.code,
+          'minors pay their owners half ($where): '
+          'MarketRules(minorPayout: 0.5) in _marketRules');
+    } else if (dividend.contains('MinorWithold')) {
+      report.add(_Section.code,
+          'minors keep what they earn ($where): '
+          'MarketRules(minorPayout: 0) in _marketRules');
+    } else if (minors > 0) {
+      report.add(_Section.code,
+          '$minors minors: they pay their owners everything unless '
+          '_marketRules says otherwise -- check the rules');
+    }
+  } else if (minors > 0) {
+    report.add(_Section.code,
+        '$minors minors: they pay their owners everything unless _marketRules '
+        'says otherwise -- check the rules');
+  }
+  if (steps != null) {
+    const ordinary = {
+      'dividend.rb', 'buy_sell_par_shares.rb', 'buy_train.rb', 'track.rb',
+      'token.rb', 'route.rb', 'waterfall_auction.rb', 'buy_company.rb',
+      'special_track.rb', 'special_token.rb', 'bankrupt.rb', 'discard_train.rb',
+      'home_token.rb', 'track_and_token.rb', 'selection_auction.rb',
+    };
+    final unusual = steps.where((s) => !ordinary.contains(s)).toList();
+    if (unusual.isNotEmpty) {
+      report.add(_Section.code,
+          'steps of its own beyond the usual: ${unusual.join(', ')} in '
+          '$folder/step -- mostly turn order and buying, which '
+          'the app doesn\'t follow; skim them for anything about routes, '
+          'payouts or share values');
+    }
+  }
+}
+
+/// The parts of the report, in order.
+enum _Section {
+  about('The title'),
+  tiles('Tiles and hexes'),
+  trains('Trains, as the app will run them'),
+  market('Stock market'),
+  code('Rules in the game\'s code (game.rb, step/), which the app keeps by hand'),
+  companies('Companies');
+
+  final String heading;
+  const _Section(this.heading);
+}
+
+/// What an import found that the app may not handle by itself.
+class _Report {
+  final _lines = <_Section, List<String>>{};
+
+  void add(_Section section, String line) =>
+      _lines.putIfAbsent(section, () => []).add(line);
+
+  @override
+  String toString() {
+    final out = StringBuffer();
+    for (final section in _Section.values) {
+      final lines = _lines[section];
+      if (lines == null) continue;
+      out.writeln('\n${section.heading}:');
+      for (final line in lines) {
+        out.writeln('  - $line');
+      }
+    }
+    return out.toString();
+  }
+}
+
+/// One of tobymao's title folders: the files of [_files] it has.
+class _Source {
+  final String folder;
+  final Map<String, String> files;
+
+  /// The files in its `step` folder, where they could be listed.
+  final List<String>? steps;
+
+  _Source(this.folder, this.files, this.steps);
+
+  static Future<_Source> load(_Upstream upstream, String folder) async {
+    final files = <String, String>{};
+    for (final name in _files) {
+      final text = await upstream.read('game/$folder/$name');
+      if (text != null) files[name] = text;
+    }
+    return _Source(folder, files, await upstream.list('game/$folder/step'));
+  }
+
+  /// Its module's name without the G: 1880 for G1880.
+  String? get module =>
+      RegExp(r'module\s+G([0-9A-Z]\w*)').firstMatch(files['meta.rb'] ?? files['game.rb'] ?? '')?.group(1);
+
+  /// The title it's a variant of, by module name, if any.
+  String? get parent => RegExp(r'class\s+Game\s*<\s*G([0-9A-Z]\w*)::Game\b')
+      .firstMatch(files['game.rb'] ?? '')
+      ?.group(1);
+}
+
+/// tobymao's title folders (`g_1880`), or null if they can't be listed.
+Future<List<String>?> _titleFolders(_Upstream upstream) =>
+    upstream._folders ??= upstream.list('game').then((names) => names == null
+        ? null
+        : (names.where((n) => n.startsWith('g_') && !n.contains('.')).toList()..sort()));
+
+/// The folder of the title called [name], or null (having said why).
+Future<String?> _folderFor(_Upstream upstream, String name) async {
+  String key(String s) => s
+      .toLowerCase()
+      .replaceFirst(RegExp(r'^g_'), '')
+      .replaceAll(RegExp(r'[^a-z0-9]'), '');
+  final folders = await _titleFolders(upstream);
+  if (folders == null) {
+    final guess = 'g_${_snakeCase(name)}';
+    if (upstream is! _Flat) {
+      stderr.writeln('note: could not list the titles${upstream.why}; trying '
+          '$guess');
+    }
+    return guess;
+  }
+  final wanted = key(name);
+  for (final folder in folders) {
+    if (key(folder) == wanted) return folder;
+  }
+  final near = [
+    for (final folder in folders)
+      if (key(folder).contains(wanted) ||
+          (wanted.length >= 4 && key(folder).startsWith(wanted.substring(0, 4))))
+        folder.substring(2),
+  ];
+  stderr.writeln('tobymao/18xx has no title $name.'
+      '${near.isEmpty ? '' : ' Perhaps: ${near.join(', ')}'}'
+      '\nSee them all with --list.');
+  return null;
+}
+
+/// [name] as tobymao names a folder, as near as can be guessed:
+/// 18Chesapeake as 18_chesapeake.
+String _snakeCase(String name) => name
+    .replaceFirst(RegExp(r'^[gG]_'), '')
+    .replaceAllMapped(RegExp(r'(?<=[0-9])(?=[A-Za-z])|(?<=[a-z])(?=[A-Z0-9])'), (_) => '_')
+    .replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_')
+    .toLowerCase();
+
+/// Where tobymao/18xx's files come from.
+abstract class _Upstream {
+  /// The file at [path] under lib/engine (`game/g_1880/map.rb`), or null.
+  Future<String?> read(String path);
+
+  /// The names in the folder at [path] under lib/engine, or null if it
+  /// can't be listed.
+  Future<List<String>?> list(String path);
+
+  /// Whether a title's variants can be followed to the titles they're
+  /// variants of.
+  bool get hasParents => true;
+
+  /// Why the last thing asked for couldn't be had, as a clause.
+  String get why => '';
+
+  /// The title folders, once listed (see [_titleFolders]).
+  Future<List<String>?>? _folders;
+}
+
+/// tobymao/18xx's master branch on GitHub.
+class _GitHub extends _Upstream {
+  static const _raw = 'https://raw.githubusercontent.com/tobymao/18xx/master/lib/engine';
+  static const _api = 'https://api.github.com/repos/tobymao/18xx/contents/lib/engine';
+  int? _status;
+
+  @override
+  Future<String?> read(String path) => _get('$_raw/$path');
+
+  @override
+  Future<List<String>?> list(String path) async {
+    final body = await _get('$_api/$path');
+    final entries = body == null ? null : jsonDecode(body);
+    return entries is List
+        ? [for (final e in entries) if (e is Map) '${e['name']}']
+        : null;
+  }
+
+  @override
+  String get why => switch (_status) {
+        null || 200 => '',
+        403 || 429 => ' (GitHub is limiting requests: try again in an hour, '
+            'or use --from with a clone of tobymao/18xx)',
+        404 => '',
+        final status => ' (GitHub answered $status)',
+      };
+
+  Future<String?> _get(String url) async {
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(Uri.parse(url));
+      final response = await request.close();
+      _status = response.statusCode;
+      if (response.statusCode != 200) {
+        await response.drain<void>();
+        return null;
+      }
+      return await response.transform(utf8.decoder).join();
+    } on SocketException catch (e) {
+      stderr.writeln('Could not reach GitHub: ${e.message}');
+      return null;
+    } finally {
+      client.close();
+    }
+  }
+}
+
+/// A local clone of tobymao/18xx: [root] is its lib/engine.
+class _Clone extends _Upstream {
+  final String root;
+  _Clone(this.root);
+
+  @override
+  Future<String?> read(String path) async {
+    final file = File('$root/$path');
+    return file.existsSync() ? file.readAsString() : null;
+  }
+
+  @override
+  Future<List<String>?> list(String path) async {
+    final dir = Directory('$root/$path');
+    return dir.existsSync()
+        ? [for (final e in dir.listSync()) e.uri.pathSegments.lastWhere((s) => s.isNotEmpty)]
+        : null;
+  }
+}
+
+/// A folder holding one title's files -- map.rb, entities.rb and so on, a
+/// step folder if wanted -- and config/tile.rb's tile.rb.
+class _Flat extends _Upstream {
+  final String dir;
+  _Flat(this.dir);
+
+  @override
+  bool get hasParents => false;
+
+  @override
+  Future<String?> read(String path) async {
+    final local = path == 'config/tile.rb'
+        ? 'tile.rb'
+        : path.split('/').skip(2).join('/');
+    final file = File('$dir/$local');
+    return file.existsSync() ? file.readAsString() : null;
+  }
+
+  @override
+  Future<List<String>?> list(String path) async {
+    if (!path.endsWith('/step')) return null;
+    final steps = Directory('$dir/step');
+    return steps.existsSync()
+        ? [for (final e in steps.listSync()) e.uri.pathSegments.last]
+        : null;
   }
 }
 
@@ -489,13 +1278,19 @@ String _dartString(String s) {
 /// strings, numbers, symbols, booleans and nil.
 class RubyConstants {
   final Map<String, Object?> values;
-  RubyConstants(this.values);
+
+  /// The constants assigned something other than a literal, or a literal
+  /// this reader doesn't follow, with why.
+  final Map<String, String> unread;
+
+  RubyConstants(this.values, [this.unread = const {}]);
 
   Object? operator [](String name) => values[name];
 
   static RubyConstants parse(String source) {
     final tokens = _Tokenizer(source).tokenize();
     final values = <String, Object?>{};
+    final unread = <String, String>{};
     for (int i = 0; i + 2 < tokens.length; i++) {
       final t = tokens[i];
       if (t.kind == _T.ident &&
@@ -506,12 +1301,14 @@ class RubyConstants {
         try {
           values[t.text] = parser.value();
           i = parser.pos - 1;
-        } on FormatException {
-          // Not a literal (a method call or expression): not data we need.
+        } on FormatException catch (e) {
+          // Not a literal (a method call or expression): not data we need,
+          // unless it's one of the constants the import reads.
+          unread[t.text] = e.message;
         }
       }
     }
-    return RubyConstants(values);
+    return RubyConstants(values, unread);
   }
 }
 
@@ -572,6 +1369,10 @@ class _Tokenizer {
           i++;
         }
         out.add(_Token(_T.number, s.substring(start, i).replaceAll('_', '')));
+      } else if (c == ':' && i + 1 < s.length && (s[i + 1] == "'" || s[i + 1] == '"')) {
+        // A quoted symbol: `color: :'#FF0000'` (1846's).
+        i++;
+        out.add(_Token(_T.symbol, _quoted(s[i])));
       } else if (c == ':' && i + 1 < s.length && RegExp(r'[a-zA-Z_]').hasMatch(s[i + 1])) {
         final start = ++i;
         while (i < s.length && RegExp(r'[a-zA-Z0-9_?!]').hasMatch(s[i])) {
