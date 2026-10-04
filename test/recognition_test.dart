@@ -1,18 +1,19 @@
 import 'dart:math' as math;
 
-import 'package:eighteen_xx_calculator/geometry/homography.dart';
-import 'package:eighteen_xx_calculator/models/map_layout.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/models/tile_rules.dart';
-import 'package:eighteen_xx_calculator/processing/board_reader.dart';
-import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
-import 'package:eighteen_xx_calculator/processing/hex_patch.dart';
-import 'package:eighteen_xx_calculator/processing/mountain_detector.dart';
-import 'package:eighteen_xx_calculator/processing/tile_classifier.dart';
-import 'package:eighteen_xx_calculator/processing/tile_renderer.dart';
-import 'package:eighteen_xx_calculator/processing/gray_image.dart';
+import 'package:eighteen_scanner/geometry/homography.dart';
+import 'package:eighteen_scanner/models/map_layout.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/models/tile_rules.dart';
+import 'package:eighteen_scanner/processing/board_reader.dart';
+import 'package:eighteen_scanner/processing/grid_detector.dart';
+import 'package:eighteen_scanner/processing/hex_patch.dart';
+import 'package:eighteen_scanner/processing/mountain_detector.dart';
+import 'package:eighteen_scanner/processing/tile_classifier.dart';
+import 'package:eighteen_scanner/processing/tile_renderer.dart';
+import 'package:eighteen_scanner/processing/gray_image.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 
@@ -161,6 +162,82 @@ void main() {
   });
 
   group('reading a whole board', () {
+    test("printing that looks like track reads as bare map, compared with "
+        "the board photographed empty in another game", () async {
+      // A hex printed in strokes that cross its sides, as 1889's
+      // mountains are: two curves, read as a tile in a game joined
+      // part-way, with nothing to say what the hex looks like bare.
+      final g1889 = GameTitle.byId('1889')!;
+      final e6 = g1889.map.byId('E6')!;
+      final board = await drawBoard(g1889.map, drawn: {
+        e6.coord: TileDefinition.parseDsl(
+            'map:E6', TileColor.plain, 'path=a:0,b:2;path=a:3,b:5'),
+      });
+      final h = boardToDrawn(g1889.map, 26);
+      Future<TileReading> read(BareBoard bare) async => (await BoardReader(
+                  g1889)
+              .read(
+            photo: board,
+            boardToImage: h,
+            hexes: [e6.coord],
+            context: [for (final hex in g1889.map.hexes) hex.coord],
+            session: GameSession.start(
+                title: g1889, name: 'test', startedEmpty: false),
+            bareBoard: bare,
+          ))
+          .single
+          .reading;
+      expect((await read(const {})).option.isPrinted, isFalse);
+      final empty =
+          HexPatch.fromPhoto(RgbImage.fromImage(board), h, e6.coord);
+      final reading =
+          await read({'E6': (empty.encodeDarkness(), empty.chroma)});
+      expect(reading.option.isPrinted, isTrue);
+      expect(reading.isReliable, isTrue);
+    });
+
+    test("no more of a tile is read than the game has: 1889's one port",
+        () async {
+      final g1889 = GameTitle.byId('1889')!;
+      final port = g1889.tiles['437']!;
+      // The port drawn on two of the four towns it can go on.
+      final g10 = g1889.map.byId('G10')!, i12 = g1889.map.byId('I12')!;
+      final board = await drawBoard(g1889.map, drawn: {
+        g10.coord: port,
+        i12.coord: port.rotated(1),
+      });
+      Future<Map<String, HexReading>> read(
+              GameSession session, List<MapHex> hexes) async =>
+          {
+            for (final r in await BoardReader(g1889).read(
+              photo: board,
+              boardToImage: boardToDrawn(g1889.map, 26),
+              hexes: [for (final h in hexes) h.coord],
+              context: [for (final h in g1889.map.hexes) h.coord],
+              session: session,
+            ))
+              r.hex.id: r,
+          };
+      GameSession fresh() =>
+          GameSession.start(title: g1889, name: 'test', startedEmpty: true);
+
+      final both = await read(fresh(), [g10, i12]);
+      expect([
+        for (final r in both.values)
+          if (r.tile?.tileId == '437') r.hex.id,
+      ], hasLength(1));
+      // The other is taken for 58, the same track, and left to be checked.
+      final other = both.values.firstWhere((r) => r.tile?.tileId != '437');
+      expect(other.tile?.tileId, '58');
+      expect(other.reading.isReliable, isFalse);
+
+      // With the port set on G10 by hand, I12 can't be it.
+      final set = fresh()..setManually(g10, const PlacedTile('437'));
+      final i12Read = (await read(set, [i12]))['I12']!;
+      expect(i12Read.tile?.tileId, '58');
+      expect(i12Read.reading.isReliable, isFalse);
+    });
+
     test('tiles laid on a photographed board are found', () async {
       // Three tiles on an otherwise untouched 1844 board, well inside the
       // map so a photo taken at an angle still has them in frame. Each is

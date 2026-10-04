@@ -1,10 +1,11 @@
 import 'dart:math' as math;
+import 'dart:ui';
 
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/processing/hex_patch.dart';
-import 'package:eighteen_xx_calculator/processing/tile_renderer.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/processing/hex_patch.dart';
+import 'package:eighteen_scanner/processing/tile_renderer.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 final title = GameTitle.byId('1844')!;
@@ -88,6 +89,35 @@ void main() {
       }
     });
 
+    test("1889's tile 5 has its city out in the corner between its sides",
+        () {
+      // Photographed at J11: the city half a radius out towards the corner
+      // its two tracks share, the revenue in the middle.
+      final g1889 = GameTitle.byId('1889')!;
+      final city = stop(g1889.tiles['5']!, 0);
+      final corner = HexGeometry.vertex(Offset.zero, 1, 1);
+      expect(city.distance, closeTo(0.5, 0.01));
+      expect((city / city.distance - corner).distance, lessThan(0.01));
+    });
+
+    test("1889's cities of two or three have smaller circles, closer", () {
+      // 448 and 465 photographed: white discs about a quarter of the hex
+      // across, touching.
+      final g1889 = GameTitle.byId('1889')!;
+      final two = g1889.tiles['448']!;
+      final station = two.stations.firstWhere((s) => s.slots == 2);
+      expect(TileRenderer.slotRadiusFor(station), 0.34);
+      expect(TileRenderer.slotRadiusFor(station, style: g1889.tileStyle),
+          closeTo(0.27, 0.001));
+      final circles = TileRenderer.slotPositions(
+          two, station.index, Offset.zero, 1,
+          style: g1889.tileStyle);
+      expect((circles[0] - circles[1]).distance, closeTo(0.54, 0.01));
+      // A single circle is the same size as 1844's.
+      final one = g1889.tiles['57']!.stations.single;
+      expect(TileRenderer.slotRadiusFor(one, style: g1889.tileStyle), 0.33);
+    });
+
     test('the printed OO hexes are laid out as the board prints them', () {
       // Romont & Fribourg one above the other; Winterthur & Frauenfeld on a
       // line rising to the right.
@@ -154,6 +184,80 @@ void main() {
       expect(dark(Offset.zero), greaterThan(0.8));
       final between = HexGeometry.vertex(Offset.zero, 1, 0);
       expect(dark(between * 0.17), lessThan(0.1));
+    });
+  });
+
+  group('the path a track is drawn along, which routes follow too', () {
+    // The point a share of the way along [path].
+    Offset along(Path path, double share) {
+      final metric = path.computeMetrics().single;
+      return metric.getTangentForOffset(metric.length * share)!.position;
+    }
+
+    Path track(TileDefinition def, int segment, {bool reversed = false}) =>
+        TileRenderer.trackPath(def, def.segments[segment], Offset.zero, 1,
+            reversed: reversed);
+
+    test('a gentle curve runs round the next hex, not through the middle', () {
+      // Tile 8: sides 0 and 2, round the hex across side 1, passing a
+      // quarter of a radius from the middle.
+      final path = track(title.tiles['8']!, 0);
+      expect((along(path, 0) - side(0)).distance, lessThan(1e-6));
+      expect((along(path, 1) - side(2)).distance, lessThan(1e-6));
+      final nextHex = HexGeometry.edgeNormal(1) * math.sqrt(3);
+      for (final share in [0.25, 0.5, 0.75]) {
+        expect((along(path, share) - nextHex).distance, closeTo(1.5, 1e-3));
+      }
+      expect(along(path, 0.5).distance, closeTo(math.sqrt(3) - 1.5, 1e-3));
+    });
+
+    test('the other way, it runs back along the same curve', () {
+      final def = title.tiles['8']!;
+      final forward = track(def, 0), back = track(def, 0, reversed: true);
+      for (final share in [0.0, 0.3, 0.5, 1.0]) {
+        expect((along(back, share) - along(forward, 1 - share)).distance,
+            lessThan(1e-3));
+      }
+    });
+
+    test('to a town on a curve, it follows the curve to the town', () {
+      // Tile 58: a town halfway along the curve tile 8 draws.
+      final def = title.tiles['58']!;
+      final town = stop(def, 0);
+      final nextHex = HexGeometry.edgeNormal(1) * math.sqrt(3);
+      final toTown = track(def, 0), fromTown = track(def, 1);
+      expect((along(toTown, 0) - side(0)).distance, lessThan(1e-6));
+      expect((along(toTown, 1) - town).distance, lessThan(1e-6));
+      expect((along(fromTown, 0) - town).distance, lessThan(1e-6));
+      expect((along(fromTown, 1) - side(2)).distance, lessThan(1e-6));
+      for (final path in [toTown, fromTown]) {
+        expect((along(path, 0.5) - nextHex).distance, closeTo(1.5, 1e-3));
+      }
+    });
+
+    test("to a city on an OO tile's curve, it follows the curve", () {
+      // Tile 67 as laid at Fribourg: its second city on the gentle curve
+      // round the hex across side 0 (see above).
+      final def = title.tiles['67']!.rotated(3);
+      final city = stop(def, 1);
+      final nextHex = HexGeometry.edgeNormal(0) * math.sqrt(3);
+      for (int i = 0; i < def.segments.length; i++) {
+        final ends = [def.segments[i].a, def.segments[i].b];
+        if (!ends.contains(const StationEndpoint(1))) continue;
+        final path = track(def, i);
+        final cityEnd = ends.first == const StationEndpoint(1) ? 0.0 : 1.0;
+        expect((along(path, cityEnd) - city).distance, lessThan(1e-6));
+        for (final share in [0.0, 0.5, 1.0]) {
+          expect((along(path, share) - nextHex).distance, closeTo(1.5, 1e-3));
+        }
+      }
+    });
+
+    test('to a city in the middle, it runs straight', () {
+      final path = track(title.tiles['57']!, 0);
+      expect((along(path, 0) - side(0)).distance, lessThan(1e-6));
+      expect(along(path, 1).distance, lessThan(1e-6));
+      expect((along(path, 0.5) - side(0) / 2).distance, lessThan(1e-6));
     });
   });
 }

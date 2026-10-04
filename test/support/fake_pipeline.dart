@@ -1,13 +1,14 @@
 import 'dart:typed_data';
 
-import 'package:eighteen_xx_calculator/geometry/homography.dart';
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/map_layout.dart';
-import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
-import 'package:eighteen_xx_calculator/processing/guide_follower.dart';
-import 'package:eighteen_xx_calculator/processing/play_area_reader.dart';
-import 'package:eighteen_xx_calculator/services/photo_pipeline.dart';
+import 'package:eighteen_scanner/geometry/homography.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/map_layout.dart';
+import 'package:eighteen_scanner/processing/grid_detector.dart';
+import 'package:eighteen_scanner/processing/guide_follower.dart';
+import 'package:eighteen_scanner/processing/market_reader.dart';
+import 'package:eighteen_scanner/processing/play_area_reader.dart';
+import 'package:eighteen_scanner/services/photo_pipeline.dart';
 import 'package:image/image.dart' as img;
 
 /// Stands in for the real photo work so screens can be tested without
@@ -95,6 +96,15 @@ class FakePhotoPipeline implements PhotoPipeline {
 
   /// What reading a player's area should find.
   PlayAreaReading playArea = const PlayAreaReading();
+
+  /// What reading a photo of the stock market should find.
+  MarketReading market = const MarketReading();
+
+  @override
+  Future<MarketReading> readMarket(GameTitle title, img.Image photo) async {
+    if (failure != null) throw failure!;
+    return market;
+  }
 
   @override
   Future<PlayAreaReading> readPlayArea(GameTitle title, img.Image photo) async {

@@ -30,12 +30,19 @@ class TileStyle {
   /// than white: the textured side of 1889's double-sided tiles.
   final bool shadedStops;
 
-  const TileStyle({this.townDots = false, this.shadedStops = false});
+  /// The radius of each circle of a city of two or three, as a share of the
+  /// hex's: 1889 prints them smaller and closer than 1844 (see
+  /// `TileRenderer.slotRadiusFor`). Null for 1844's.
+  final double? multiSlotRadius;
+
+  const TileStyle(
+      {this.townDots = false, this.shadedStops = false, this.multiSlotRadius});
 
   static const TileStyle plain = TileStyle();
 
   /// This style, with its stops in a shade of the tile.
-  TileStyle get shaded => TileStyle(townDots: townDots, shadedStops: true);
+  TileStyle get shaded => TileStyle(
+      townDots: townDots, shadedStops: true, multiSlotRadius: multiSlotRadius);
 }
 
 /// The colours a laid tile can have, in upgrade order.

@@ -1,8 +1,8 @@
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/models/tile_seed_data.dart';
-import 'package:eighteen_xx_calculator/processing/route_finder.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/models/tile_seed_data.dart';
+import 'package:eighteen_scanner/processing/route_finder.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Tiles 57 and 9 run between edges 0 and 3 -- the south-west and north-east

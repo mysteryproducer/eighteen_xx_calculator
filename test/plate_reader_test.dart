@@ -1,10 +1,10 @@
-import 'package:eighteen_xx_calculator/geometry/homography.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/processing/board_reader.dart';
-import 'package:eighteen_xx_calculator/processing/mountain_detector.dart';
-import 'package:eighteen_xx_calculator/processing/plate_reader.dart';
-import 'package:eighteen_xx_calculator/processing/revenue_ocr.dart';
-import 'package:eighteen_xx_calculator/processing/gray_image.dart';
+import 'package:eighteen_scanner/geometry/homography.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/processing/board_reader.dart';
+import 'package:eighteen_scanner/processing/mountain_detector.dart';
+import 'package:eighteen_scanner/processing/plate_reader.dart';
+import 'package:eighteen_scanner/processing/revenue_ocr.dart';
+import 'package:eighteen_scanner/processing/gray_image.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 

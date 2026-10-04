@@ -3,20 +3,20 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' show Color, Offset;
 
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/tile_rules.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/models/map_layout.dart';
-import 'package:eighteen_xx_calculator/processing/board_reader.dart';
-import 'package:eighteen_xx_calculator/processing/hex_patch.dart';
-import 'package:eighteen_xx_calculator/processing/mountain_detector.dart';
-import 'package:eighteen_xx_calculator/processing/tile_classifier.dart';
-import 'package:eighteen_xx_calculator/processing/token_detector.dart';
-import 'package:eighteen_xx_calculator/processing/tunnel_detector.dart';
-import 'package:eighteen_xx_calculator/services/session_store.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/tile_rules.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/models/map_layout.dart';
+import 'package:eighteen_scanner/processing/board_reader.dart';
+import 'package:eighteen_scanner/processing/hex_patch.dart';
+import 'package:eighteen_scanner/processing/mountain_detector.dart';
+import 'package:eighteen_scanner/processing/tile_classifier.dart';
+import 'package:eighteen_scanner/processing/token_detector.dart';
+import 'package:eighteen_scanner/processing/tunnel_detector.dart';
+import 'package:eighteen_scanner/services/session_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 final title = GameTitle.byId('1844')!;
@@ -572,6 +572,21 @@ void main() {
     });
     tearDown(() async => dir.delete(recursive: true));
 
+    test("a title's bare board is kept for its next game", () async {
+      expect(await store.bareBoard('1889'), isEmpty);
+      await store.saveBareBoard('1889', {
+        'E6': ('AAEC', const Offset(0.01, 0.12)),
+        'H11': ('AwQF', const Offset(-0.02, 0.1)),
+      });
+      final board = await store.bareBoard('1889');
+      expect(board.keys, unorderedEquals(['E6', 'H11']));
+      expect(board['E6']!.$1, 'AAEC');
+      expect(board['E6']!.$2.dy, closeTo(0.12, 1e-9));
+      expect(await store.bareBoard('1844'), isEmpty);
+      // Not taken for a game.
+      expect(await store.list(), isEmpty);
+    });
+
     test('a session survives being saved and read back', () async {
       final session = newGame();
       session.phase = TileColor.green;
@@ -757,5 +772,43 @@ void main() {
     test('nothing doubtful means no photos', () {
       expect(planCloseUps(title.map, {}), isEmpty);
     });
+  });
+  test('how hexes look bare is gathered from games already played', () {
+    final older = GameSession.start(title: title, name: 'a', startedEmpty: true);
+    final newer = GameSession.start(title: title, name: 'b', startedEmpty: true);
+    final c12 = title.map.byId('C12')!, f13 = title.map.byId('F13')!;
+    final d13 = title.map.byId('D13')!;
+    older.recordReading(c12,
+        tile: null, confidence: 0.9, source: HexSource.overview,
+        reference: 'old', referenceChroma: const Offset(0.1, 0));
+    older.recordReading(f13,
+        tile: null, confidence: 0.9, source: HexSource.overview,
+        reference: 'f13', referenceChroma: Offset.zero);
+    newer.recordReading(c12,
+        tile: null, confidence: 0.9, source: HexSource.overview,
+        reference: 'new', referenceChroma: Offset.zero);
+    // A tile's look isn't the hex's bare look.
+    newer.recordReading(d13,
+        tile: const PlacedTile('9'), confidence: 0.9,
+        source: HexSource.overview, reference: 'track');
+    final bare = GameSession.bareLooks([newer, older]);
+    expect(bare.keys, unorderedEquals(['C12', 'F13']));
+    expect(bare['C12']!.$1, 'new');
+  });
+
+  test('a tile on more hexes than the game has is said to be', () {
+    final g1889 = GameTitle.byId('1889')!;
+    final session =
+        GameSession.start(title: g1889, name: 'test', startedEmpty: true);
+    final g10 = g1889.map.byId('G10')!, i12 = g1889.map.byId('I12')!;
+    session.setManually(g10, const PlacedTile('437'));
+    expect(session.overSupply(g1889, g10), isNull);
+    // The tile editor offering the port on I12 as well.
+    expect(session.overSupply(g1889, i12, '437'),
+        'The game has 1 of tile 437, and it is also on G10.');
+    expect(session.overSupply(g1889, i12, '58'), isNull);
+    session.setManually(i12, const PlacedTile('437', rotation: 1));
+    expect(session.overSupply(g1889, g10), contains('I12'));
+    expect(session.overSupply(g1889, i12), contains('G10'));
   });
 }

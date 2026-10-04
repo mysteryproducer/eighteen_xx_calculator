@@ -65,7 +65,7 @@ const TitleData title1889 = TitleData(
   ],
   tiles: [
     TileData('3', 'yellow', 'town=revenue:10;path=a:0,b:_0;path=a:_0,b:1', count: 2),
-    TileData('5', 'yellow', 'city=revenue:20;path=a:0,b:_0;path=a:1,b:_0', count: 2),
+    TileData('5', 'yellow', 'city=revenue:20,loc:0.5;path=a:0,b:_0;path=a:1,b:_0', count: 2),
     TileData('6', 'yellow', 'city=revenue:20;path=a:0,b:_0;path=a:2,b:_0', count: 2),
     TileData('7', 'yellow', 'path=a:0,b:1', count: 2),
     TileData('8', 'yellow', 'path=a:0,b:2', count: 5),
@@ -135,4 +135,17 @@ const TitleData title1889 = TitleData(
   tunnelTiles: [],
   mountainHexes: [],
   mountainTiles: [],
+  market: [
+    ['75', '80', '90', '100p', '110', '125', '140', '155', '175', '200', '225', '255', '285', '315', '350'],
+    ['70', '75', '80', '90p', '100', '110', '125', '140', '155', '175', '200', '225', '255', '285', '315'],
+    ['65', '70', '75', '80p', '90', '100', '110', '125', '140', '155', '175', '200'],
+    ['60', '65', '70', '75p', '80', '90', '100', '110', '125', '140'],
+    ['55', '60', '65', '70p', '75', '80', '90', '100'],
+    ['50y', '55', '60', '65p', '70', '75', '80'],
+    ['45y', '50y', '55', '60', '65', '70'],
+    ['40y', '45y', '50y', '55', '60'],
+    ['30o', '40y', '45y', '50y'],
+    ['20o', '30o', '40y', '45y'],
+    ['10o', '20o', '30o', '40y'],
+  ],
 );

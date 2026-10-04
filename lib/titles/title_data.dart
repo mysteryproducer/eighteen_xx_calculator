@@ -30,6 +30,15 @@ class TitleData {
   final List<String> mountainHexes;
   final List<String> mountainTiles;
 
+  /// The stock market, row by row, each cell as tobymao writes it: a price
+  /// and letters for what the cell does (`100p`, a par price), or `''` for
+  /// none.
+  final List<List<String>> market;
+
+  /// How a price moves on [market]: `grid` (along a row, a row's end leading
+  /// up), `hex` (diagonally off a row's ends) or `row` (along one row).
+  final String marketKind;
+
   const TitleData({
     required this.id,
     required this.name,
@@ -45,6 +54,8 @@ class TitleData {
     this.tunnelTiles = const [],
     this.mountainHexes = const [],
     this.mountainTiles = const [],
+    this.market = const [],
+    this.marketKind = 'grid',
   });
 }
 
@@ -60,12 +71,12 @@ class MapHexData {
 }
 
 /// One tile design in the title's manifest, and how many copies come in the
-/// box.
+/// box: null for as many as are wanted (1807's plain track).
 class TileData {
   final String id;
   final String color;
   final String code;
-  final int count;
+  final int? count;
 
   /// True for tiles the game lays by itself rather than a player choosing
   /// them: 1844's Gotthard tunnel tiles, which appear when the line opens.
@@ -127,14 +138,40 @@ class TrainData {
   /// How many there are.
   final int count;
 
-  /// Whether towns are left out of [distance] and all paid for: 1854's
-  /// "+" trains, which run to so many cities and any number of towns.
+  /// Whether towns are left out of [distance]: 1854's "+" trains, which
+  /// run to so many cities and any number of towns, and 1807's trains.
   final bool freeTowns;
+
+  /// How many towns it runs to besides [distance] without their counting:
+  /// 1880's "2+2" runs to two stops and two more towns. 0 for none, and
+  /// [freeTowns] for any number.
+  final int townAllowance;
+
+  /// Whether towns pay it: 1807's trains run through any number of towns
+  /// for nothing.
+  final bool townsPay;
+
+  /// The kinds of stop it may run to (`city`, `town`, `offboard`): 1807's
+  /// goods trains, cities alone. Null for any.
+  final List<String>? visits;
+
+  /// The kinds of stop that pay it: 1807's 5+5E, off-board areas alone.
+  /// Null for every kind.
+  final List<String>? paidAt;
+
+  /// What its route's takings are multiplied by: 1807's "+" trains double
+  /// them.
+  final int multiplier;
 
   const TrainData(this.name,
       {required this.distance,
       this.pays,
       this.freeTowns = false,
+      this.townAllowance = 0,
+      this.townsPay = true,
+      this.visits,
+      this.paidAt,
+      this.multiplier = 1,
       this.price = 0,
       this.rustsOn,
       String? base,

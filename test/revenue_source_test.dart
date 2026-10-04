@@ -1,12 +1,12 @@
 import 'dart:math' as math;
 
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/tile_seed_data.dart';
-import 'package:eighteen_xx_calculator/processing/revenue_ocr.dart';
-import 'package:eighteen_xx_calculator/processing/revenue_resolver.dart';
-import 'package:eighteen_xx_calculator/models/tile_rules.dart';
-import 'package:eighteen_xx_calculator/processing/tile_classifier.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/tile_seed_data.dart';
+import 'package:eighteen_scanner/processing/revenue_ocr.dart';
+import 'package:eighteen_scanner/processing/revenue_resolver.dart';
+import 'package:eighteen_scanner/models/tile_rules.dart';
+import 'package:eighteen_scanner/processing/tile_classifier.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;

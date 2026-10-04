@@ -1,11 +1,11 @@
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/map_layout.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/models/tile_rules.dart';
-import 'package:eighteen_xx_calculator/processing/train_routes.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/map_layout.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/models/tile_rules.dart';
+import 'package:eighteen_scanner/processing/train_routes.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Sides of a pointy-topped hex: west and east, along a row.
@@ -33,6 +33,23 @@ const trains = [
       name: '2E', base: '2E', distance: 99, pays: 2, kind: TrainKind.express),
   TrainType(name: '1+', base: '1+', distance: 1, freeTowns: true),
   TrainType(name: '2+', base: '2+', distance: 2, freeTowns: true),
+  // 1880's: two stops and two more towns.
+  TrainType(name: '2+2', base: '2+2', distance: 2, townAllowance: 2),
+  // 1807's: towns passed for nothing; its goods trains, cities alone; its
+  // "+" trains doubled; its 5+5E, paid at off-board areas alone, doubled.
+  TrainType(
+      name: '2t', base: '2t', distance: 2, freeTowns: true, townsPay: false),
+  TrainType(
+      name: '2G', base: '2G', distance: 2, visits: {StationKind.city}),
+  TrainType(name: '2x', base: '2x', distance: 2, multiplier: 2),
+  TrainType(
+      name: '5+5E',
+      base: '5+5E',
+      distance: 99,
+      pays: 5,
+      kind: TrainKind.express,
+      paidAt: {StationKind.offboard},
+      multiplier: 2),
 ];
 
 /// A title of the [hexes] given, by coordinate and printing (with its
@@ -82,6 +99,76 @@ StationNode at(BoardGraph graph, int col, [int row = 0]) =>
 List<int> columns(TrainRun run) => [for (final s in run.stops) s.hex.col];
 
 void main() {
+  group("other titles' trains", () {
+    test("1880's 2+2 runs to two stops and two towns more", () {
+      final (title, graph) = board(row([
+        city(20, westEnd: true),
+        town(10),
+        town(10),
+        city(30),
+        town(10),
+        city(40, eastEnd: true),
+      ]));
+      at(graph, 0).tokens = ['A'];
+      final run = TrainRouter(title, graph, 'A').best(['2+2']).runs.single;
+      // A third town would count, and there is no room for it.
+      expect(columns(run), [0, 1, 2, 3]);
+      expect(run.revenue, 70);
+    });
+
+    test("1807's trains pass towns, and towns pay them nothing", () {
+      final (title, graph) = board(row([
+        city(20, westEnd: true),
+        town(10),
+        town(10),
+        city(30, eastEnd: true),
+      ]));
+      at(graph, 0).tokens = ['A'];
+      final run = TrainRouter(title, graph, 'A').best(['2t']).runs.single;
+      expect(columns(run), [0, 1, 2, 3]);
+      expect(run.revenue, 50);
+    });
+
+    test("1807's goods trains stop at cities alone", () {
+      final (title, graph) = board(row([
+        city(20, westEnd: true),
+        town(10),
+        city(30, eastEnd: true),
+      ]));
+      at(graph, 0).tokens = ['A'];
+      expect(TrainRouter(title, graph, 'A').best(['2']).revenue, 30);
+      // Not through the town, the only way on.
+      expect(TrainRouter(title, graph, 'A').best(['2G']).revenue, 0);
+    });
+
+    test("1807's doubling trains double their takings", () {
+      final (title, graph) =
+          board(row([city(20, westEnd: true), city(30, eastEnd: true)]));
+      at(graph, 0).tokens = ['A'];
+      expect(TrainRouter(title, graph, 'A').best(['2']).revenue, 50);
+      expect(TrainRouter(title, graph, 'A').best(['2x']).revenue, 100);
+    });
+
+    test("1807's 5+5E is paid at off-board areas alone, doubled", () {
+      final (title, graph) = board(
+        row([
+          'offboard=revenue:30;path=a:$east,b:_0',
+          city(20),
+          town(10),
+          city(40),
+          'offboard=revenue:50;path=a:$west,b:_0',
+        ], colours: {
+          0: TileColor.red,
+          4: TileColor.red,
+        }),
+      );
+      at(graph, 1).tokens = ['A'];
+      final run = TrainRouter(title, graph, 'A').best(['5+5E']).runs.single;
+      expect(columns(run), unorderedEquals([0, 1, 2, 3, 4]));
+      expect(run.revenue, (30 + 50) * 2);
+    });
+  });
+
   group('trains together', () {
     test('two trains share a city but not track', () {
       final (title, graph) = board(row([

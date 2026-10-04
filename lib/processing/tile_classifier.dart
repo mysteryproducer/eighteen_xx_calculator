@@ -198,12 +198,19 @@ class TileClassifier {
       // of track beside a city reads weaker than a long run, in the drawing
       // as in a photo.
       final exits = exitsOf(option);
+      // The first option was there when the hex looked like [reference],
+      // so the printing that ran off its sides then -- 1889's mountains,
+      // drawn in strokes that cross them -- is to be expected of it still.
+      double before(int e) =>
+          i == 0 && reference != null ? reference.exits[e].clamp(0.0, 1.0) : 0;
       double exitMiss = 0;
       for (int e = 0; e < 6; e++) {
         final measured = patch.exits[e].clamp(0.0, 1.0);
-        final expected = drawing == null
-            ? exits[e] ?? 0.0
-            : math.min(exits[e] ?? 0.0, drawing.exits[e]);
+        final expected = math.max(
+            drawing == null
+                ? exits[e] ?? 0.0
+                : math.min(exits[e] ?? 0.0, drawing.exits[e]),
+            before(e));
         final miss = measured - expected;
         exitMiss += miss * miss;
       }
@@ -213,7 +220,7 @@ class TileClassifier {
       double linkMiss = 0;
       if (crossings != null) {
         for (int e = 0; e < 6; e++) {
-          final miss = crossings[e] - (exits[e] ?? 0.0);
+          final miss = crossings[e] - math.max(exits[e] ?? 0.0, before(e));
           if (miss > 0) linkMiss += miss * miss;
         }
       }

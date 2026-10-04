@@ -1,7 +1,7 @@
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/models/tile_seed_data.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/models/tile_seed_data.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Tile 57 is a city with track out of edges 0 and 3, which are the

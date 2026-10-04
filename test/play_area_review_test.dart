@@ -1,8 +1,8 @@
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/processing/play_area_reader.dart';
-import 'package:eighteen_xx_calculator/screens/play_area_review.dart';
-import 'package:eighteen_xx_calculator/screens/players_screen.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/processing/play_area_reader.dart';
+import 'package:eighteen_scanner/screens/play_area_review.dart';
+import 'package:eighteen_scanner/screens/players_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -135,6 +135,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(session.players, ['Ann']);
 
+    await tester.tap(find.byTooltip('Change Ann'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Add a certificate'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Company'));
@@ -144,7 +146,15 @@ void main() {
     await tester.tap(find.text('50%'));
     await tester.pumpAndSettle();
     expect(session.percentHeld('Ann', 'GB'), 50);
-    expect(find.text('= 50%'), findsOneWidget);
+    expect(
+        tester
+            .widget<TextField>(find.descendant(
+                of: find.byKey(const ValueKey('held-Ann-GB')),
+                matching: find.byType(TextField)))
+            .controller!
+            .text,
+        // The director's certificate: two shares of 25%.
+        '2');
     expect(saves, 2);
   });
 }

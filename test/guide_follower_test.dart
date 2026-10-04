@@ -1,10 +1,10 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:eighteen_xx_calculator/geometry/homography.dart';
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/processing/guide_follower.dart';
-import 'package:eighteen_xx_calculator/screens/capture.dart';
+import 'package:eighteen_scanner/geometry/homography.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/processing/guide_follower.dart';
+import 'package:eighteen_scanner/screens/capture.dart';
 import 'package:flutter/material.dart' show Offset, Size;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;

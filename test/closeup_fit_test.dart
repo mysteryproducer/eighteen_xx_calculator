@@ -16,14 +16,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' show Size;
 
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/processing/board_reader.dart';
-import 'package:eighteen_xx_calculator/processing/gray_image.dart';
-import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
-import 'package:eighteen_xx_calculator/processing/plate_reader.dart';
-import 'package:eighteen_xx_calculator/screens/capture.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/processing/board_reader.dart';
+import 'package:eighteen_scanner/processing/gray_image.dart';
+import 'package:eighteen_scanner/processing/grid_detector.dart';
+import 'package:eighteen_scanner/processing/plate_reader.dart';
+import 'package:eighteen_scanner/screens/capture.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 

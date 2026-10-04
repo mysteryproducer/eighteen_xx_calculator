@@ -12,6 +12,7 @@ import '../models/game_title.dart';
 import '../models/map_layout.dart';
 import '../processing/grid_detector.dart';
 import '../processing/guide_follower.dart' as follower;
+import '../processing/market_reader.dart';
 import '../processing/play_area_reader.dart';
 import '../processing/revenue_ocr.dart';
 
@@ -150,6 +151,36 @@ class PhotoPipeline {
           'read: ${lines.map((l) => '"${l.text}" '
               '(${l.left.toStringAsFixed(3)}, ${l.top.toStringAsFixed(3)}, '
               '${l.right.toStringAsFixed(3)}, ${l.bottom.toStringAsFixed(3)})').join(', ')}');
+    }
+    return reading;
+  }
+
+  /// Reads a photo of the stock market (see [MarketReader]): turned a
+  /// quarter each way as well where it was taken sideways, keeping
+  /// whichever finds more.
+  Future<MarketReading> readMarket(GameTitle title, img.Image photo) async {
+    Future<List<RecognizedWord>> linesOf(img.Image image) async =>
+        RevenueOcr.recognizeLines(await Isolate.run(() {
+          final longest = math.max(image.width, image.height);
+          final sized = longest <= 2400
+              ? image
+              : img.copyResize(image,
+                  width: image.width * 2400 ~/ longest,
+                  interpolation: img.Interpolation.average);
+          return img.encodeJpg(sized, quality: 92);
+        }));
+    int found(MarketReading reading) =>
+        10 * reading.prices.length +
+        reading.rows.fold(0, (total, row) => total + row.length);
+    final lines = await linesOf(photo);
+    var reading = MarketReader(title).read(lines, photo);
+    if (_sideways(lines, photo)) {
+      for (final turn in [90, 270]) {
+        final turned = await Isolate.run(() => img.copyRotate(photo, angle: turn));
+        final turnedReading =
+            MarketReader(title).read(await linesOf(turned), turned);
+        if (found(turnedReading) > found(reading)) reading = turnedReading;
+      }
     }
     return reading;
   }

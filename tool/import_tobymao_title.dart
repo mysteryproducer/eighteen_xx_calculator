@@ -33,6 +33,22 @@ const _printedCityLocs = <String, Map<String, List<String>>>{
     // 2 October); the other is in the corner by side 2, as tobymao has it.
     '66': ['4.5'],
   },
+  '1889': {
+    // Tile 5: the city sits out in the corner between its two sides, half a
+    // radius from the middle, the revenue in the middle (J11, photographed
+    // in both 3 October sessions).
+    '5': ['0.5'],
+  },
+};
+
+/// Cells of tobymao's stock markets that are plainly mistyped -- a price far
+/// below the cells either side of it, in a row that only rises -- by title,
+/// then `row:column`: the cell as tobymao has it, and as it should be.
+const _marketFixes = <String, Map<String, (String, String)>>{
+  // ... 210S 230S 50S 275S 300e
+  '1854': {'0:16': ('50S', '250S')},
+  // ... 490 540 500 660 720
+  '1807': {'0:28': ('500', '600')},
 };
 
 /// [dsl] with each `city=` that has no `loc:` given the next of [locs].
@@ -80,6 +96,8 @@ Future<void> main(List<String> args) async {
   final gameSource = await load('game.rb', '$gameDir/game.rb');
   final trainsSource = await load('trains.rb', '$gameDir/trains.rb');
   final phasesSource = await load('phases.rb', '$gameDir/phases.rb');
+  // The stock market: in the game's code, or a file of its own (1807).
+  final marketSource = await load('market.rb', '$gameDir/market.rb');
   final standardSource = await load('tile.rb', '$_base/config/tile.rb');
   if (standardSource == null) {
     stderr.writeln('Could not load the standard tile list (config/tile.rb)');
@@ -101,28 +119,69 @@ Future<void> main(List<String> args) async {
     int reach;
     int? pays;
     var freeTowns = false;
+    var townAllowance = 0;
+    var townsPay = true;
+    List<String>? visits;
+    List<String>? paidAt;
     if (distance is List && distance.isNotEmpty && distance.first is Map) {
       // Parts by the kinds of stop they count: the one with cities says how
-      // far the train runs; one for towns alone that visits any number of
-      // them (1854's "+" trains) leaves towns out of the count.
+      // far the train runs -- unless it pays nothing, when the part that
+      // pays does (1807's 5+5E, paid at off-board areas). One for towns
+      // alone leaves them out of the count: all of them where it visits
+      // any number (1854's "+" trains, 1807's), the first few otherwise
+      // (1880's "2+2"); and they pay what it pays (nothing, in 1807).
       final parts = distance.whereType<Map>().toList();
-      final main = parts.firstWhere(
-          (p) => (p['nodes'] as List? ?? const []).contains('city'),
+      List<String> nodesOf(Map p) =>
+          [for (final n in p['nodes'] as List? ?? const []) '$n'];
+      int visitOf(Map p) => (p['visit'] as num?)?.toInt() ?? 99;
+      int payOf(Map p) => (p['pay'] as num?)?.toInt() ?? visitOf(p);
+      final main = parts.firstWhere((p) => nodesOf(p).contains('city'),
           orElse: () => parts.first);
-      reach = (main['visit'] as num?)?.toInt() ?? 99;
-      final paid = (main['pay'] as num?)?.toInt() ?? reach;
-      if (paid < reach) pays = paid;
-      freeTowns = parts.any((p) =>
-          !identical(p, main) &&
-          (p['nodes'] as List? ?? const []).every((n) => n == 'town') &&
-          ((p['visit'] as num?)?.toInt() ?? 0) >= 99);
+      final paying = payOf(main) > 0
+          ? main
+          : parts.firstWhere((p) => payOf(p) > 0, orElse: () => main);
+      if (identical(paying, main)) {
+        reach = visitOf(main);
+        if (payOf(main) < reach) pays = payOf(main);
+      } else {
+        reach = parts.map(visitOf).reduce((a, b) => a > b ? a : b);
+        pays = payOf(paying);
+        paidAt = nodesOf(paying);
+      }
+      final towns = parts
+          .where((p) =>
+              !identical(p, main) &&
+              !identical(p, paying) &&
+              nodesOf(p).every((n) => n == 'town'))
+          .firstOrNull;
+      if (towns != null) {
+        if (visitOf(towns) >= 99) {
+          freeTowns = true;
+        } else {
+          townAllowance = visitOf(towns);
+        }
+        townsPay = payOf(towns) > 0;
+      }
+      // The stops it may run to: those some part of it takes.
+      final kinds = {for (final p in parts) ...nodesOf(p)};
+      if (!kinds.containsAll(const ['city', 'town', 'offboard'])) {
+        visits = kinds.toList()..sort();
+      }
     } else {
       reach = (distance as num?)?.toInt() ?? 0;
     }
+    final multiplier = (merged['multiplier'] as num?)?.toInt() ?? 1;
+    String names(List<String> list) =>
+        '[${list.map(_dartString).join(', ')}]';
     final rusts = merged['rusts_on'];
     trainEntries.add("    TrainData(${_dartString(name)}, distance: $reach"
         "${pays == null ? '' : ', pays: $pays'}"
         "${freeTowns ? ', freeTowns: true' : ''}"
+        "${townAllowance > 0 ? ', townAllowance: $townAllowance' : ''}"
+        "${townsPay ? '' : ', townsPay: false'}"
+        "${visits == null ? '' : ', visits: ${names(visits)}'}"
+        "${paidAt == null ? '' : ', paidAt: ${names(paidAt)}'}"
+        "${multiplier == 1 ? '' : ', multiplier: $multiplier'}"
         "${merged['price'] == null ? '' : ', price: ${merged['price']}'}"
         "${rusts == null ? '' : ', rustsOn: ${_dartString('$rusts')}'}"
         "${parent == null ? '' : ", base: ${_dartString('${parent['name']}')}"}"
@@ -191,16 +250,19 @@ Future<void> main(List<String> args) async {
   manifest.forEach((id, spec) {
     String color;
     String code;
-    int count;
+    // How many come with the game; none for `'unlimited'` (1807's plain
+    // track).
+    int? countOf(Object? value) => value is num ? value.toInt() : null;
+    int? count;
     bool hidden = false;
     if (spec is Map) {
-      count = (spec['count'] as num?)?.toInt() ?? 1;
+      count = spec.containsKey('count') ? countOf(spec['count']) : 1;
       hidden = spec['hidden'] == true;
       final standardTile = standardTiles['$id'];
       color = (spec['color'] as String?) ?? standardTile?.$1 ?? 'yellow';
       code = (spec['code'] as String?) ?? standardTile?.$2 ?? '';
     } else {
-      count = (spec as num).toInt();
+      count = countOf(spec);
       final standardTile = standardTiles['$id'];
       if (standardTile == null) {
         stderr.writeln('warning: tile $id is not in config/tile.rb; skipped');
@@ -268,10 +330,18 @@ Future<void> main(List<String> args) async {
         "${shares is List && shares.isNotEmpty ? ', shares: [${shares.join(', ')}]' : ''}),");
   }
 
-  for (final list in [entities['CORPORATIONS'], entities['MINORS']]) {
+  for (final (list, minors) in [
+    (entities['CORPORATIONS'], false),
+    (entities['MINORS'], true),
+  ]) {
     if (list is! List) continue;
     for (final company in list) {
-      if (company is Map) addCompany(company);
+      if (company is! Map) continue;
+      // A minor that doesn't say what it is is a minor (1880's foreign
+      // investors): what it pays its owner goes by that.
+      addCompany(minors && company['type'] == null
+          ? {...company, 'type': 'minor'}
+          : company);
     }
   }
   // 1854 builds its local railways in code from three parallel lists rather
@@ -305,6 +375,37 @@ Future<void> main(List<String> args) async {
   final mountainTiles = entities['MOUNTAIN_TILES'];
   String words(Object? list) =>
       list is List ? list.map((w) => "'$w'").join(', ') : '';
+
+  // The stock market's cells, row by row, as tobymao writes them -- a price
+  // and letters for what the cell does (`100p`, a par price; `''`, no cell).
+  final marketConstants = marketSource == null
+      ? RubyConstants({})
+      : RubyConstants.parse(marketSource);
+  final marketRows = [
+    for (final row in (game['MARKET'] ??
+            marketConstants['MARKET'] ??
+            marketConstants['COLUMN_MARKET']) as List? ??
+        const [])
+      [for (final cell in row as List) '$cell'],
+  ];
+  _marketFixes[title]?.forEach((at, fix) {
+    final [r, c] = at.split(':').map(int.parse).toList();
+    if (r < marketRows.length &&
+        c < marketRows[r].length &&
+        marketRows[r][c] == fix.$1) {
+      marketRows[r][c] = fix.$2;
+    } else {
+      stderr.writeln('warning: market fix $at for $title no longer applies');
+    }
+  });
+  // How a price moves on it: along a row, with a row's end leading up (a
+  // grid, as 1830's); on a hex market, diagonally (1854); or along a single
+  // row (1807).
+  final marketKind = gameSource != null && gameSource.contains('hex_market: true')
+      ? 'hex'
+      : marketRows.length == 1
+          ? 'row'
+          : 'grid';
 
   final location = meta['GAME_LOCATION'] as String?;
   final designer = meta['GAME_DESIGNER'] as String?;
@@ -348,6 +449,10 @@ Future<void> main(List<String> args) async {
     ..writeln(mountainTiles is List
         ? '  mountainTiles: [${words(mountainTiles)}],'
         : '  mountainTiles: [],')
+    ..writeln('  market: [')
+    ..writeAll(marketRows.map((row) => '    [${words(row)}],\n'))
+    ..writeln('  ],')
+    ..write(marketKind == 'grid' ? '' : "  marketKind: '$marketKind',\n")
     ..writeln(');');
 
   final path = 'lib/titles/title_$title.dart';
@@ -525,12 +630,23 @@ class _Parser {
   bool _isPunct(String p) => pos < t.length && t[pos].kind == _T.punct && t[pos].text == p;
 
   Object? value() {
-    final v = _atom();
-    // Trailing `.freeze` and similar method calls on a literal.
-    while (_isPunct('.') && pos + 1 < t.length && t[pos + 1].kind == _T.ident) {
-      pos += 2;
+    var v = _atom();
+    while (true) {
+      // Trailing `.freeze` and similar method calls on a literal.
+      if (_isPunct('.') && pos + 1 < t.length && t[pos + 1].kind == _T.ident) {
+        pos += 2;
+        continue;
+      }
+      // Arrays joined: `[''] + %w[54y 57y]` (1854's stock market).
+      if (_isPunct('+') && v is List) {
+        pos++;
+        final next = _atom();
+        if (next is! List) throw const FormatException('expected an array');
+        v = [...v, ...next];
+        continue;
+      }
+      return v;
     }
-    return v;
   }
 
   Object? _atom() {

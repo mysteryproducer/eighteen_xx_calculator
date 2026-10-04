@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -56,6 +57,17 @@ class BoardMapGeometry {
 
   Offset centreOf(HexCoord hex) => toScreen(hex.boardCenter);
 
+  /// How wide a hex is from side to side across the drawn map, in its
+  /// pixels: flat-to-flat for a pointy-topped map, corner to corner for one
+  /// turned to look flat-topped.
+  double get hexWidth {
+    final xs = [
+      for (int k = 0; k < 6; k++)
+        _turned(HexGeometry.vertex(Offset.zero, 1, k), turn).dx,
+    ];
+    return (xs.reduce(math.max) - xs.reduce(math.min)) * boardMapScale;
+  }
+
   /// Where a station sits on the drawn map.
   Offset stationPosition(TileDefinition content, StationNode station) =>
       toScreen(TileRenderer.stationPosition(
@@ -63,6 +75,55 @@ class BoardMapGeometry {
 
   /// The map hex under [screen], if any.
   MapHex? hexAt(Offset screen) => map.at(HexCoord.nearestTo(toBoard(screen)));
+
+  /// The way a route goes along [edge], on the drawn map: along the track
+  /// as each tile draws it (see `TileRenderer.trackPath`), round its curves
+  /// and through its towns, from one stop to the other. [content] is what
+  /// the route graph was built from; null where the two don't agree.
+  Path? routePath(Map<HexCoord, TileDefinition> content, TrackEdge edge) {
+    final path = Path();
+    var hex = edge.from.hex;
+    TileEndpoint at = StationEndpoint(edge.from.stationIndex);
+    for (final id in edge.segments) {
+      final piece = BoardGraph.tileSegmentOf(id);
+      if (piece == null) {
+        // Across a hex side, onto the next tile's track.
+        if (at is! EdgeEndpoint) return null;
+        hex = Board.neighborOf(hex, at.edge);
+        at = EdgeEndpoint(HexGeometry.oppositeEdge(at.edge));
+        continue;
+      }
+      final (onHex, index) = piece;
+      final def = content[onHex];
+      if (onHex != hex || def == null || index >= def.segments.length) {
+        return null;
+      }
+      final segment = def.segments[index];
+      if (segment.a != at && segment.b != at) return null;
+      final reversed = segment.a != at;
+      path.extendWithPath(
+          TileRenderer.trackPath(def, segment, hex.boardCenter, 1,
+              reversed: reversed),
+          Offset.zero);
+      at = reversed ? segment.a : segment.b;
+    }
+    if (hex != edge.to.hex || at != StationEndpoint(edge.to.stationIndex)) {
+      return null;
+    }
+    return path.transform(_boardToScreen);
+  }
+
+  /// [toScreen] as a matrix, for a path worked out on the board.
+  Float64List get _boardToScreen {
+    final c = math.cos(turn) * boardMapScale;
+    final s = math.sin(turn) * boardMapScale;
+    return Float64List.fromList([
+      c, s, 0, 0, //
+      -s, c, 0, 0,
+      0, 0, 1, 0,
+      -bounds.left * boardMapScale, -bounds.top * boardMapScale, 0, 1,
+    ]);
+  }
 }
 
 /// Draws the board as the session understands it: the printed map, the
@@ -83,6 +144,20 @@ class BoardMapPainter extends CustomPainter {
 
   /// Hexes the user has picked out to photograph.
   final Set<HexCoord> selected;
+
+  /// How many screen pixels a pixel of the drawn map takes up, as the board
+  /// is fitted and zoomed: place names are drawn [nameSize] high on screen
+  /// whatever the zoom, and only once there is room for them. 0 leaves them
+  /// out.
+  final double labelScale;
+
+  /// How high a place's name is on screen, in pixels.
+  static const double nameSize = 11;
+
+  /// How far a place's name may run on into the hexes either side of its
+  /// own, as a share of a hex: names wait for the zoom that gives them that
+  /// room.
+  static const double nameOverrun = 0.5;
 
   /// Tokens that can't legally be where they are, by circle (see
   /// `GameSession.tokenProblems`): ringed in red.
@@ -116,6 +191,7 @@ class BoardMapPainter extends CustomPainter {
     this.misfits = const {},
     this.selected = const {},
     this.tokenProblems = const {},
+    this.labelScale = 0,
   });
 
   @override
@@ -185,9 +261,59 @@ class BoardMapPainter extends CustomPainter {
       }
     }
 
+    for (final (name, at) in _names()) {
+      name(halo: true).paint(canvas, at);
+      name().paint(canvas, at);
+    }
     _paintRoute(canvas, content);
     _paintStations(canvas, content);
   }
+
+  /// The places the board prints, each to go under its hex, as many as
+  /// there is room for at [labelScale]: a name may run on into the hexes
+  /// either side of its own by [nameOverrun], but no further, so the names
+  /// come out as the board is zoomed in rather than crowding it zoomed out.
+  List<(TextPainter Function({bool halo}), Offset)> _names() {
+    if (labelScale <= 0) return const [];
+    final room = (1 + 2 * nameOverrun) * geometry.hexWidth;
+    final names = <(TextPainter Function({bool halo}), Offset)>[];
+    for (final hex in title.map.hexes) {
+      final name = hex.name;
+      if (name == null) continue;
+      TextPainter text({bool halo = false}) => TextPainter(
+            text: TextSpan(
+              text: name,
+              style: TextStyle(
+                fontSize: nameSize / labelScale,
+                fontWeight: FontWeight.w600,
+                color: halo ? null : const Color(0xDD000000),
+                foreground: halo
+                    ? (Paint()
+                      ..style = PaintingStyle.stroke
+                      ..strokeWidth = 3 / labelScale
+                      ..strokeJoin = StrokeJoin.round
+                      ..color = Colors.white.withValues(alpha: 0.85))
+                    : null,
+              ),
+            ),
+            textDirection: TextDirection.ltr,
+          )..layout();
+      final width = text().width;
+      if (width > room) continue;
+      names.add((
+        text,
+        geometry.centreOf(hex.coord) +
+            Offset(-width / 2, boardMapScale * 0.55),
+      ));
+    }
+    return names;
+  }
+
+  /// The names [paint] draws, for tests.
+  @visibleForTesting
+  List<String> get namesShown => [
+        for (final (name, _) in _names()) name().text!.toPlainText(),
+      ];
 
   void _paintRoute(Canvas canvas, Map<HexCoord, TileDefinition> content) {
     for (int i = 0; i < routes.length; i++) {
@@ -205,21 +331,30 @@ class BoardMapPainter extends CustomPainter {
       ..strokeWidth = 6
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
-    Offset at(StationNode s) => geometry.stationPosition(content[s.hex]!, s);
     for (final edge in active.track) {
-      final points = <Offset>[
-        at(edge.from),
-        for (final hex in edge.hexPath.skip(1).take(
-            edge.hexPath.length > 2 ? edge.hexPath.length - 2 : 0))
-          geometry.centreOf(hex),
-        at(edge.to),
-      ];
-      final path = Path()..moveTo(points.first.dx, points.first.dy);
-      for (final p in points.skip(1)) {
-        path.lineTo(p.dx, p.dy);
-      }
-      canvas.drawPath(path, paint);
+      canvas.drawPath(
+          geometry.routePath(content, edge) ?? _straight(content, edge), paint);
     }
+  }
+
+  /// A route along [edge] drawn straight from hex to hex, where its track
+  /// can't be followed (see [BoardMapGeometry.routePath]).
+  Path _straight(Map<HexCoord, TileDefinition> content, TrackEdge edge) {
+    Offset at(StationNode s) => content[s.hex] == null
+        ? geometry.centreOf(s.hex)
+        : geometry.stationPosition(content[s.hex]!, s);
+    final points = <Offset>[
+      at(edge.from),
+      for (final hex in edge.hexPath.skip(1).take(
+          edge.hexPath.length > 2 ? edge.hexPath.length - 2 : 0))
+        geometry.centreOf(hex),
+      at(edge.to),
+    ];
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final p in points.skip(1)) {
+      path.lineTo(p.dx, p.dy);
+    }
+    return path;
   }
 
   void _paintStations(Canvas canvas, Map<HexCoord, TileDefinition> content) {
@@ -253,8 +388,11 @@ class BoardMapPainter extends CustomPainter {
       if (station.kind == StationKind.city) {
         // Each token in its own circle, where the tile prints the circle.
         final circles = TileRenderer.slotPositions(
-            def, station.stationIndex, station.hex.boardCenter, 1);
-        final size = TileRenderer.slotRadiusFor(printed) * boardMapScale;
+            def, station.stationIndex, station.hex.boardCenter, 1,
+            style: title.tileStyle);
+        final size =
+            TileRenderer.slotRadiusFor(printed, style: title.tileStyle) *
+                boardMapScale;
         for (int slot = 0; slot < circles.length; slot++) {
           final at = geometry.toScreen(circles[slot]);
           final id = GameSession.slotId(station.id, slot);

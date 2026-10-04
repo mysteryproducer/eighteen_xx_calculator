@@ -1,14 +1,14 @@
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
-import 'package:eighteen_xx_calculator/geometry/homography.dart';
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/map_layout.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
-import 'package:eighteen_xx_calculator/processing/tile_renderer.dart';
+import 'package:eighteen_scanner/geometry/homography.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/map_layout.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/processing/grid_detector.dart';
+import 'package:eighteen_scanner/processing/tile_renderer.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 

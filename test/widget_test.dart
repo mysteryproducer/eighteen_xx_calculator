@@ -1,13 +1,13 @@
-import 'package:eighteen_xx_calculator/main.dart';
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/screens/session_board.dart';
-import 'package:eighteen_xx_calculator/screens/session_list.dart';
-import 'package:eighteen_xx_calculator/widgets/board_map.dart';
-import 'package:eighteen_xx_calculator/widgets/tile_choices.dart';
+import 'package:eighteen_scanner/main.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/screens/session_board.dart';
+import 'package:eighteen_scanner/screens/session_list.dart';
+import 'package:eighteen_scanner/widgets/board_map.dart';
+import 'package:eighteen_scanner/widgets/tile_choices.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -189,6 +189,35 @@ void main() {
       // Neighbours share one photo, so three hexes here are two photos.
       expect(find.textContaining('2 photos'), findsOneWidget);
       expect(find.text('Choose'), findsOneWidget);
+    });
+
+    testWidgets('the board names its places as it is zoomed in',
+        (tester) async {
+      await openSession(tester);
+      BoardMapPainter painter() => tester
+          .widgetList<CustomPaint>(find.byType(CustomPaint))
+          .map((p) => p.painter)
+          .whereType<BoardMapPainter>()
+          .single;
+      expect(painter().labelScale, greaterThan(0));
+      final fitted = painter().namesShown.toSet();
+      tester
+          .widget<InteractiveViewer>(find.byType(InteractiveViewer))
+          .transformationController!
+          .value = Matrix4.diagonal3Values(4, 4, 1);
+      await tester.pumpAndSettle();
+      final zoomed = painter().namesShown.toSet();
+      expect(zoomed.length, greaterThan(fitted.length));
+      expect(zoomed.containsAll(fitted), isTrue);
+      expect(zoomed, contains('Bern'));
+    });
+
+    testWidgets('the strip of hexes to look at again can be put away',
+        (tester) async {
+      await openSession(tester, setUp: doubtfulHexes);
+      await tester.tap(find.byTooltip('Hide'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('need a closer look'), findsNothing);
     });
 
     testWidgets('choosing starts with nothing selected', (tester) async {
@@ -692,7 +721,8 @@ void main() {
       expect(find.textContaining('C12 - C14 pays 30'), findsOneWidget);
       expect(find.textContaining('nowhere left to run'), findsOneWidget);
       expect(find.text('SCB earns 30.'), findsOneWidget);
-      expect(find.text('Ann 15 (50%)   Bob 7 (25%)'), findsOneWidget);
+      // Bob's 25% of 30 is 7.5: rounded up, as tobymao pays it.
+      expect(find.text('Ann 15 (50%)   Bob 8 (25%)'), findsOneWidget);
     });
 
     testWidgets("a company's trains and tokens are set from the route panel",

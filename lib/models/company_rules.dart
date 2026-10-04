@@ -173,11 +173,14 @@ class CompanyRules {
 
   /// What is wrong with [player] holding certificates of [percents] in
   /// [company]: a size the company doesn't print, more of one than it has,
-  /// or more than all of it with what the other players hold.
+  /// or more than all of it with what the other players hold. Sizes go
+  /// unchecked where a share of it isn't what the title's certificates say
+  /// (see `GameSession.shareStakes`): this copy of the game prints others.
   List<String> certificateProblems(GameSession session, Company company,
       String? player, List<int> percents) {
     final problems = <String>[];
-    if (company.shares.isNotEmpty) {
+    if (company.shares.isNotEmpty &&
+        session.shareStake(company) == company.shareUnit) {
       final printed = <int, int>{};
       for (final s in company.shares) {
         printed[s] = (printed[s] ?? 0) + 1;
@@ -208,10 +211,12 @@ class CompanyRules {
   }
 
   /// What a player is paid when [company] pays out [revenue]: their share of
-  /// it, rounded down. Half of it with [half], where the title allows that.
+  /// it, rounded up, as tobymao pays each holder. Half of it with [half],
+  /// where the title allows that.
   int dividend(GameSession session, String player, String company,
       int revenue, {bool half = false}) {
     final paid = half ? revenue ~/ 2 : revenue;
-    return paid * session.percentHeld(player, company) ~/ 100;
+    final percent = session.percentHeld(player, company);
+    return paid <= 0 || percent <= 0 ? 0 : (paid * percent + 99) ~/ 100;
   }
 }

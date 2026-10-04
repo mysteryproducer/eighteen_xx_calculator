@@ -2,16 +2,16 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/screens/session_board.dart';
-import 'package:eighteen_xx_calculator/services/training_log.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/screens/session_board.dart';
+import 'package:eighteen_scanner/services/training_log.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:eighteen_xx_calculator/widgets/board_map.dart';
-import 'package:eighteen_xx_calculator/widgets/tile_choices.dart';
+import 'package:eighteen_scanner/widgets/board_map.dart';
+import 'package:eighteen_scanner/widgets/tile_choices.dart';
 
 import 'support/fake_store.dart';
 import 'support/fake_training_log.dart';

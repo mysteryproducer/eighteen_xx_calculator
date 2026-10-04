@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:eighteen_xx_calculator/models/board.dart';
+import 'package:eighteen_scanner/models/board.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

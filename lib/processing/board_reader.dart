@@ -296,7 +296,11 @@ class BoardReader {
 
   /// Reads [hexes] from [photo], where [boardToImage] places the map.
   /// [context] is every map hex fully in the photo, used as the colour
-  /// reference; it should include [hexes].
+  /// reference; it should include [hexes]. [bareBoard] is how the board
+  /// looks bare, from any game of this title photographed empty: a hex the
+  /// game thinks bare, or knows nothing of, is compared with it, so
+  /// printing that looks like track -- 1889's mountains -- reads as the
+  /// bare map it is.
   Future<List<HexReading>> read({
     required img.Image photo,
     required Homography boardToImage,
@@ -304,6 +308,7 @@ class BoardReader {
     required Iterable<HexCoord> context,
     required GameSession session,
     Map<HexCoord, double> glarePrior = const {},
+    BareBoard bareBoard = const {},
   }) async {
     final rgb = RgbImage.fromImage(photo);
     final inView = {...context, ...hexes}.where(title.map.contains).toSet();
@@ -387,9 +392,13 @@ class BoardReader {
           // actually seen; on one it has never read, a tile is no less likely
           // than bare map.
           stepPenalty: state.basisKnown ? 1.0 : 0.25,
-          reference: state.reference == null
-              ? null
-              : HexPatch.decode(state.reference!, state.referenceChroma ?? Offset.zero),
+          reference: switch ((state.reference, bareBoard[hex.id])) {
+            (final seen?, _) =>
+              HexPatch.decode(seen, state.referenceChroma ?? Offset.zero),
+            (null, final bare?) when state.basis == null =>
+              HexPatch.decode(bare.$1, bare.$2),
+            _ => null,
+          },
           // Glare washes colour out before it hides track.
           colourWeight: 1 - 0.75 * washedOut,
           crossings: crossings[c],
@@ -450,7 +459,81 @@ class BoardReader {
       colours = colours.withCentroids(moved);
       results = readAll(colours);
     }
-    return _openLinesTogether(results);
+    return _withinSupply(
+      _openLinesTogether(results),
+      session,
+      (r, option) => (r.glare > 0.5)
+          ? const {}
+          : _tokens(rgb, boardToImage, r.hex, option),
+    );
+  }
+
+  /// No more of a tile is read than the game comes with
+  /// ([GameTitle.tileCounts]): 1889 has one port tile (437), drawn so like
+  /// tile 58 that one photo read two of its four towns as the port. A tile
+  /// the user has set on a hex this photo doesn't read is taken as there.
+  /// Where this photo's readings would still take more than are left,
+  /// those the tile fits by the widest margin keep it, and the rest take
+  /// their next choice, to be checked: they looked like the tile.
+  List<HexReading> _withinSupply(
+    List<HexReading> results,
+    GameSession session,
+    Map<String, TokenDetection> Function(HexReading, TileOption) tokensFor,
+  ) {
+    final read = {for (final r in results) r.hex.coord};
+    final left = Map.of(title.tileCounts);
+    for (final hex in title.map.hexes) {
+      if (read.contains(hex.coord) ||
+          session.stateOf(hex).source != HexSource.manual) {
+        continue;
+      }
+      final id = session.tileAt(hex)?.tileId;
+      if (id != null && left.containsKey(id)) left[id] = left[id]! - 1;
+    }
+    final byTile = <String, List<HexReading>>{};
+    for (final r in results) {
+      final id = r.reading.option.tileId;
+      if (id != null && left.containsKey(id)) {
+        byTile.putIfAbsent(id, () => []).add(r);
+      }
+    }
+    // How far a reading's tile leads the best of its other tiles.
+    double lead(HexReading r, String id) {
+      double? mine, other;
+      for (final (o, score) in r.reading.ranked) {
+        if (o.tileId == id) {
+          mine ??= score;
+        } else {
+          other ??= score;
+        }
+      }
+      return mine == null || other == null ? double.infinity : mine - other;
+    }
+
+    final decided = <HexCoord, HexReading>{};
+    byTile.forEach((id, readings) {
+      final spare = math.max(0, left[id]!);
+      if (readings.length <= spare) return;
+      readings.sort((a, b) => lead(b, id).compareTo(lead(a, id)));
+      for (final r in readings.skip(spare)) {
+        final others = [
+          for (final e in r.reading.ranked)
+            if (e.$1.tileId != id) e,
+        ];
+        if (others.isEmpty) continue;
+        final option = others.first.$1;
+        decided[r.hex.coord] = HexReading(
+          hex: r.hex,
+          reading: TileReading(option: option, confidence: 0, ranked: others),
+          patch: r.patch,
+          picture: r.picture,
+          tokens: tokensFor(r, option),
+          isUpgrade: _isUpgrade(session.stateOf(r.hex).basis, option),
+          glare: r.glare,
+        );
+      }
+    });
+    return [for (final r in results) decided[r.hex.coord] ?? r];
   }
 
   /// How sure a reading of this photo has to be for its tile's colour to
@@ -884,7 +967,7 @@ class BoardReader {
       // its row that matched the photo best.
       final circles = TileRenderer.slotPositions(
           content, station.index, centre, 1,
-          extraTurn: slotTurn);
+          extraTurn: slotTurn, style: title.tileStyle);
       for (int slot = 0; slot < circles.length; slot++) {
         result[GameSession.slotId(
             '${hex.coord.row}_${hex.coord.col}_${station.index}', slot)] =
@@ -892,7 +975,8 @@ class BoardReader {
           photo: photo,
           boardToImage: boardToImage,
           slot: circles[slot],
-          slotRadius: TileRenderer.slotRadiusFor(station),
+          slotRadius:
+              TileRenderer.slotRadiusFor(station, style: title.tileStyle),
           white: white,
           onTile: !option.isPrinted,
           home: home,

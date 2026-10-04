@@ -34,7 +34,21 @@ token is taken as down, since 1889 prints each company's logo in its home
 city; 1889's charters and fanned certificates are read, from a photo taken
 sideways too; the align screen names the hexes to drag, as this board prints
 no grid; and a tile or train of a later colour offers the next phase (see
-each section).
+each section). The twelfth pass came from a second 1889 session: routes are
+drawn along the track as the tiles draw it; the board names its places once
+zoomed in far enough; no more of a tile is read than the game has (a photo had
+found two port towns); how a title's board looks bare is remembered from game
+to game, which keeps 1889's mountains, and the board's fold, from reading as
+track; Iyo Railroad's charter is found, and keyboard keys beside a charter
+aren't taken for trains or token places; the strip of hexes to look at again
+can be put away; and 1880 and 1807 are imported, with the rules of their
+trains. The thirteenth pass measured 1889's tokens on the pictures its two
+sessions saved: its cities of two or three print smaller circles, and its
+tile 5 prints its city in a corner, which together take the detector from 7
+of 16 right to 12 (see Station tokens). And it adds the end of the game: end
+game OR sets, the last operating rounds run by themselves over each title's
+stock market, and what every player is worth, holdings typed in shares of
+each company's size (see The end of the game).
 
 ## Context
 
@@ -153,7 +167,11 @@ token costs and tobymao's default shares (a 20% director's and eight 10%), the
 trains (D, unlimited, runs any distance) and the phases with their train
 limits. Its private companies change money and when tiles may be laid, not
 routes, and aren't modelled, except that the port tile (437) goes only where
-the Mitsubishi Ferry may lay it (see Reading the hexes). Where the printed pieces place cities
+the Mitsubishi Ferry may lay it (see Reading the hexes). 1880 (China) and
+1807 (Great Britain) were imported for the next games. 1807 gives some tiles
+as `'unlimited'`, which the importer had choked on: a tile's count is now
+optional, and an unlimited tile is left out of `GameTitle.tileCounts`. Their
+trains are read from tobymao's distance parts (see Trains and routes). Where the printed pieces place cities
 differently from tobymao's rule (see Reading the hexes), a small table in the
 importer gives their places.
 
@@ -444,6 +462,18 @@ four towns the app asks rather than tells. (What else tells them apart is
 where the revenue sits, 437's 30 beside the town, which no tile's drawing
 shows.)
 
+No more of a tile is read than the game comes with (`GameTitle.tileCounts`):
+the second 1889 session's whole-board photo read both G10 and I12 as the port,
+of which there is one. Tiles the user has set on hexes the photo doesn't read
+count against it; where the photo's readings would still take more than are
+left, those the tile fits by the widest margin keep it, and the rest take
+their next choice and are left to be checked, since they looked like it
+(`BoardReader._withinSupply`). A tile on more hexes than there are, from
+different photos, is outlined in red, and the editor says where else it is
+(`GameSession.overSupply`). It stops two ports being read, not the wrong town
+being taken for the port: on that photo I12 led G10 by a hair. Reading the
+30 off a close-up would settle it.
+
 Tiles are drawn the way tile art is drawn, because the drawing *is* the
 template recognition matches against: artwork that is merely recognisable to a
 person is not good enough
@@ -621,6 +651,28 @@ from, and how the hex looked when it was last sure. Sessions are saved per title
 with a small picture of each hex, which the tile editor shows next to what the
 hex was read as.
 
+**The empty board, remembered.** How a hex looked when the app was last sure
+of it decides a hard call: a hex that looks as it did is what it was. The
+board's printing is the same from one game to the next, so how each hex looks
+bare is kept for the title rather than the game (`SessionStore.bareBoard`,
+`sessions/boards/<title>.json`), from whichever game last photographed the
+empty board, and a hex a game thinks bare or knows nothing of -- one joined
+part-way -- is compared with it (`BoardReader.read`). Until a game has
+photographed the board empty, the games of it already played stand in: each
+hex as it looked when a game was last sure it was bare
+(`GameSession.bareLooks`). That holds after the
+user sets a hex back to bare by hand, which drops the hex's own picture. And
+the printing a hex showed bare is now expected of it still: printing that ran
+off its sides -- 1889's mountains, painted in strokes that cross them, and the
+board's fold, a straight line through A8, F5, F7 and I8 -- had been counted
+as track leaving the hex even where the picture matched. 1889's second session
+was joined part-way, with nothing to compare with, and its whole-board photo
+took most of the mountains for tiles 7 and 8 (sixteen were set back to bare
+over the two sessions); in the first, which photographed the empty board,
+close-ups read the same mountains as bare, 68 to 92% sure. On a synthetic
+board a hex drawn in the map's colour with two crossing curves read as a
+tile, and compared with the board photographed empty, as bare, 90% sure.
+
 Two rules keep the state honest:
 
 - A doubtful reading is shown but doesn't become the basis for the next one, so
@@ -646,7 +698,8 @@ photography, and after an operating round the player knows perfectly well which
 three hexes changed. The board has a choosing mode -- tap the hexes, see how
 many photos that comes to, take them -- reachable from the toolbar or from the
 "needs a closer look" banner. Nothing starts chosen; an "All" button takes
-everything the app is unsure of, to then toggle back off. Lining the board up with the
+everything the app is unsure of, to then toggle back off. The banner can be
+put away with its ×, until another hex needs a look. Lining the board up with the
 outline does two jobs: it frames the right hexes at a workable size, and it tells
 the app which hex is which -- which a close-up of a repeating grid can't
 otherwise say. The fit is then corrected against the printed lines, so the
@@ -660,6 +713,15 @@ last one (iStopMotion overlays at 50%; guidance for precise alignment runs
 50-60%, 30-40% where the ghost competes with the live picture). A slider under
 the preview changes it, and the setting is kept in `settings.json` beside the
 saved games ([services/app_settings.dart](../../lib/services/app_settings.dart)).
+
+The board names its places -- cities, towns, off-board areas -- each under its
+hex at a fixed size on screen, once the zoom gives it room: a name may run on
+into the hexes either side by half a hex but no further
+(`BoardMapPainter.nameOverrun`). With the whole board in a phone's window,
+1844 shows 11 of its 67 names, the short ones (Lyon, Brig, Zug); 1854 none;
+1889 13 of 25. All of 1844's are shown by six times that zoom (all but one by
+four). The board is drawn again for its names only when a pinch moves the
+zoom a quarter.
 
 ## Tunnels (1844)
 
@@ -810,13 +872,28 @@ and a home token is taken as down (below).
 
 1889's double-sided tiles print their city circles on one side in a darker
 shade of the tile, which reads as a token of that colour: Anan's (J11) was
-taken for Tosa Electric's on the first 1889 board. A circle the colour of the
-tile around it, only darker, now counts as empty unless something in its
+taken for Tosa Electric's at 19:30 on the first 1889 board, while its circle
+was empty (Tosa Electric did put a token there later). A circle the colour of
+the tile around it, only darker, now counts as empty unless something in its
 middle stands out from its ring the way a logo does
-(`TokenDetector._tileColouredCircle`). On that session's saved hex pictures
-G4, G12 and F3 now read empty; J11 and I4 couldn't be judged from them (128
-pixels, a revenue oval beside the circle), so a real 1889 session has to
-confirm it.
+(`TokenDetector._tileColouredCircle`).
+
+That was half of it. Measured on the 16 pictures of 1889 cities the two
+sessions saved with the user's corrections -- each cut with the user's own
+alignment, yellow to brown, both sides -- the detector was right on 7. The
+rest were mostly where it looked, not what it saw: this edition prints the
+circles of a city of two or three smaller and closer than 1844 -- discs a
+quarter of the hex across, touching -- so the samples ran off them onto the
+tile (Kouchi's empty circle read as Iyo's, Tosa Electric's teal as Awa's);
+and its tile 5 prints its city out in the corner between its two sides, so
+the middle of the hex was sampled, its revenue oval. With the circles' size
+a title's own (`TileStyle.multiSlotRadius`, 0.27 of the hex for 1889) and
+tile 5's city put where it is printed (the importer's table), 12 of the 16
+are right, and 10 of the 11 from close-ups. The four left are pictures cut
+a fraction of a hex off -- one close-up and three hexes of the second
+session's whole-board photo -- where the samples land on the tile beside the
+circle; finding the circles themselves, by their black rings, rather than
+where the drawing puts them, would take those.
 
 Most token errors turn out to be where the slots are looked for, not what is
 seen in them: a slot sampled a fifth of a hex off reads the tile beside it --
@@ -930,9 +1007,10 @@ checks, each in a sentence for the screens to show:
   company has, so a token missing from the board shows up;
 - **certificates**: no more of a size than the company prints, and no more
   than 100% between the players;
-- **dividends**: a player's share of the revenue, rounded down, or of half of
-  it where the title allows paying half (none of the three does: 1854's
-  minors pay half by their own rule, which isn't modelled).
+- **dividends**: a player's share of the revenue, rounded up as tobymao pays
+  each holder, or of half of it where the title allows paying half (none of
+  the five does; minors that pay their owner half, in 1854 and 1807, are the
+  end game's, see The end of the game).
 
 The session's phase follows what is seen (`CompanyRules.laterPhase`): a tile
 of a later colour on the board, or a train on a charter whose purchase
@@ -945,6 +1023,139 @@ it at once, with a note saying so.
 
 A company without trains noted still gets the old single route of so many
 stops.
+
+Routes are drawn along the track as the tiles draw it -- round a curve,
+through a town on it -- where they had gone from stop to stop through the
+middle of each hex (`BoardMapGeometry.routePath`). A route knows every piece
+of tile track it runs over (`TrackEdge.segments`), and each is drawn by the
+function that draws it on the tile (`TileRenderer.trackPath`): a run between
+two sides, the part of one up to a stop that sits on it, or a straight line
+into a stop in the middle. Where the board has changed since the route was
+found, it is drawn stop to stop as before. Every run on the saved boards in
+the data set is followed: 110 on each late 1844 board, 38 on the 1889 one.
+
+1880's and 1807's trains come from tobymao's distance parts. 1880's "2+2"
+runs to two stops and two more towns (`TrainType.townAllowance`). 1807's run
+through any number of towns, which pay them nothing (`townsPay`); its "+"
+trains double their takings (`multiplier`); its goods trains stop at cities
+alone (`visits`); and its 5+5E is paid for its best five off-board areas,
+doubled (`paidAt`). Not modelled: 1880's foreign investors and 1807's systems
+and mines, which change who runs what rather than how a train runs.
+
+## The end of the game
+
+**Players and market** (the board's More menu,
+[screens/players_screen.dart](../../lib/screens/players_screen.dart)), for
+setting a game up or keeping up with it, and **End of game**
+([screens/end_game.dart](../../lib/screens/end_game.dart)) share one table
+([widgets/holdings_table.dart](../../lib/widgets/holdings_table.dart)): a
+column per player -- name, cash, and their holding of each company in
+shares -- a row per company with its share value, what one share of it is
+(**% each**) and the players' shares between them with how much of the
+company they make (**Total**, to check against the certificates on the
+table), and at the foot what each player is worth, cash and shares at their
+share values. Share values are typed in, or read off a photo of the market
+(the camera on either screen); a company nobody holds, or a marker hidden
+under another's on the market -- they are often stacked -- is added by hand.
+
+A holding is typed in shares, where it had been a percentage, which nearly
+always took two digits. A share is the company's smallest certificate by the
+title's data -- 10% for most; 5% for 1844's SBB and 1807's systems, 20% for
+1854's majors and 1844's regionals, 25% for 1844's pre-SBB companies, a
+minor whole -- so a director's certificate of 20% is two. What a share of a
+company is can be picked (5, 10, 20, 25, 50 or 100%, or any other), each
+player keeping the shares they had (`GameSession.shareStakes`).
+Certificates photographed in a player's area set it where the title's
+certificates don't print them all, or it doesn't know them: the smallest of
+two or more (only one can be the director's), or a lone one that isn't whole
+shares as things stand (a director's alone is). And where the players hold
+more than one share over all of a company -- twelve at 10% -- and nothing
+has said what a share of it is, it is taken as the biggest of the usual sizes
+they then fit (5%), and the table says so. (The request said 20% here; more
+shares than tens could make can only be smaller ones.) Worth counts shares
+of these sizes; dividends go by the part of the company held, as before.
+A share count that no second digit could follow -- more than 60% of a
+company is rare -- is taken as typed and the field let go, which users
+liked: it had happened by accident, a warning coming or going around the
+field rebuilding it and dropping the keyboard, which also cut share values
+off at their first digit. Warnings now sit in the field's own decoration.
+A typed holding keeps the certificates behind it where they still add up,
+and otherwise keeps the biggest held, where it is more than a share (the
+director's), and makes the rest single shares; the certificate rules are
+checked as before (sizes only where a share is what the title's
+certificates say), and a certificate can still be added one at a time from
+a player's menu. Cash and share values belong to the game
+(`GameSession.cash`, `sharePrices`): they aren't tracked through it, by
+choice, only counted in when wanted.
+
+End of game adds **end game OR sets**, none by default: the last operating
+rounds, up to three, run by themselves on a board that won't change any
+more ([models/end_game.dart](../../lib/models/end_game.dart)), from the game
+as it stands. Each company pays out what its trains earn on the board (the
+train router, as for the route panel; the takings can be typed over) unless
+it is set to withhold, and its share value moves as the market says -- up,
+by default: a company whose takings aren't known still moves as a payout
+does, though what it pays its holders can't be worked out. A table shows
+each company's share value after each round; any can be typed over, and the
+rounds after follow from it; a line under the worth line says what each
+player would be worth after them. **Keep this OR set** records the set, with
+the holdings it ran on, and carries it into the game: each player's cash
+plus what it paid them, each share value where it ended -- the start for a
+stock round, and for the next set. Kept sets are listed, and can be
+forgotten.
+
+**The market.** Each title's stock market is imported from tobymao
+(`MARKET`, or 1807's `COLUMN_MARKET`), with its kind: a grid, where a price
+moves along a row and up off its end (1830's way; 1844, 1880, 1889); a hex
+market, diagonally off a row's ends (1854); or a single row (1807)
+([models/stock_market.dart](../../lib/models/stock_market.dart), as tobymao's
+`stock_movement.rb`). Two of tobymao's cells are plainly mistyped and put
+right on import: 1854's 50 between 230 and 275 (250), and 1807's 500 between
+540 and 660 (600). A share's place is found by its price, the top-most cell
+priced so; along a row the prices to the right are the same from whichever
+row, up to the row's end.
+
+**How a payout moves a price** is a table per title (`MarketRules`): for a
+payout of at least each multiple of the share price, so many spaces right --
+so games that jump two, three or four spaces for larger payouts are a list
+of entries. For these five titles it is tobymao's default -- anything paid,
+a space right; nothing, a space left -- except 1807, which runs on 1867's
+rules: a payout of at least the share price moves it a space right, a
+smaller one not at all. 1844's regional companies stop short of the cells
+marked `t`, going up instead. Each holder's dividend is rounded up, as
+tobymao pays it (the route panel's too, now). A minor pays its owner half in
+1854 and 1807; 1880's foreign investors keep what they earn (the importer
+now marks tobymao's minors as minors).
+
+**A photo of the market** gives a start for the share values
+([processing/market_reader.dart](../../lib/processing/market_reader.dart)).
+Every space prints its price near its top left, so the prices the text
+recognizer reads give the market's rows and columns: the large ones only --
+1889's prints each again small in a corner -- each joined to the next along
+to its right at about its height, so a row a little askew holds together.
+The photo's rows are laid over the title's market where most prices agree,
+each row of the photo with the market row its prices match, one each (a
+stray row of small print had put the whole market a row out); for a title
+whose market the app doesn't know, the rows read are the market. A fit of
+the market's columns and rows to where the prices were read then places
+every space, even one whose price a token hides, put right by how far off
+the fit the nearest prices read were (a webcam's lens bends a market more
+than one straight fit follows: 30 pixels at its edges). Each space is looked
+at beside and below its price, where a marker is put: a ring of samples
+unlike the paper of its zone (the spaces printed alike, by the letters after
+their prices -- yellow, orange, the par prices), the ring because a marker's
+middle is its logo, often pale; and a disc, its colour not carrying on past
+its edge as a coloured space's own does. Each company's marker is the space
+whose colour is nearest its own, a company to a space, nearest first. On the
+first photo of a market -- 1889's, from the webcam, square on -- the first
+reading found four of seven, three wrong (the orange and red zones' spaces
+were taken for Iyo's and Takamatsu-Kotohira's markers); now all six markers
+to be seen are found on the right spaces, five named right, the light blue
+one named for Tosa Kuroshio, whose colour in tobymao's data it is nearer
+than Tosa Electric's. Tosa Kuroshio's own marker, under Awa's, can't be
+seen, and is added by hand. The Nokia C32's photo of the same market the
+same day, taken sideways and read turned upright, finds all six on the right
+spaces, Tosa Electric's named right; the phone's own reading had missed it.
 
 ## A player's area
 
@@ -1052,6 +1263,28 @@ certificates. Read that way, Tosa Electric has three 2 trains, its places
 free, 40 and 40 with one token left, and certificates of 20, 10 and 10%;
 Uwajima has a 6 and a 4, one token left, and two 10% certificates
 (`test/play_area_reader_test.dart` keeps both photos' lines).
+
+The second session's charters -- Iyo Railroad twice, Tosa Electric,
+Takamatsu-Kotohira and Tosa Kuroshio, photographed on a keyboard -- needed
+four more things:
+
+- Iyo wasn't found at all: the part of its name that tells it apart, `Iyo`,
+  is three letters, and only four or more were compared, as `Awa` (1889's
+  Awa Railroad) would otherwise be found inside Kubokawa. A short one is now
+  compared whole;
+- a keyboard's keys beside the card: the 3 key was taken for a train, and the
+  0 key, read `:0:`, for a token place. The cards lie as far from the camera
+  as each other, so a figure less than half the height of the tallest isn't
+  a card's; and a charter that prints `FREE` has no `0` place besides;
+- `RUSTED BY 6` well down the card from its own 3 was counted as another 3.
+  A company now has as many of a train as its cards' figures or their small
+  print say, whichever is more; of cards fanned out only the top one's small
+  print is whole, the rest showing `RUS`, which counts where the company's
+  whole lines name only the one train -- so Tosa Electric's three 2s, one of
+  their figures hidden, still come to three;
+- where only `FREE` is read, its other place under a token, the next place
+  is two of the word's widths along: so it is on all five charters
+  photographed.
 
 ## The rest
 
@@ -1174,47 +1407,43 @@ counts as read. Records from before then can't say what was read.)
 ## Deferred
 
 - Train rules beyond those above: 1854's minors' automatic half pay and its
-  8Ox, 1889's private companies, other titles' route groupings. Unknown
-  train names run as many stops as the number they start with.
-- Money: player and company cash aren't tracked, by choice.
-- The Gotthard line's five-hex piece is drawn as five purple hexes with
-  full-width track, but the physical piece is grey with a thin line and its
-  name printed along it, so it reads as the unopened printing (five hexes
-  wrong on the 2 October photo; one tap on any of them sets all five).
-- Finding the grid by itself in a photo taken at a steep angle (see Finding
-  the grid): it needs the user's four handles, though they only have to be
-  within about half a hex now. The handles could snap by themselves when let
-  go.
+  8Ox, other titles' route groupings, 1880's foreign investors and 2R, 1807's
+  systems and mines. Unknown train names run as many stops as the number
+  they start with.
+- Money: cash isn't tracked through the game, by choice; it is counted in at
+  the end (see The end of the game).
+- **Finding the grid** where photos aren't taken from high above the board,
+  as real players' won't be (kept, 4 October): by itself in a photo taken at
+  a steep angle (see Finding the grid) -- it needs the user's four handles,
+  though they only have to be within about half a hex now; the handles
+  snapping by themselves when let go; a "found" score that tells a right
+  placement from a wrong one on a late game's board, where most outlines are
+  under tiles; and 1889, whose board prints no grid, where the fit alone
+  found 7 hexes of a whole-board photo and a hand-placed one snapped askew.
 - Telling which hex is which when the grid is found but the map placed one
   hex out (the 2 October evening photo).
-- Charters and certificates of titles other than 1844 (see A player's area),
-  and certificate stripes.
+- Charters and certificates of titles other than 1844 and 1889 (see A
+  player's area).
 - Company logos. Companies, colours and homes are imported; a token away from
   home in a colour two companies share is left for the user to name.
 - Tokens on printed cities other than the company's home; see Station tokens.
 - Maps printed in two pieces (1854's local railways may be a separate inset on
   the physical board). The detector places one connected map; if a title's map is
   in two pieces, the second would need its own placement.
-- Tile counts are imported but not used; "there are only two of tile 15 in the
-  box" would be a good extra constraint on recognition.
 - A line printed for later opening (1844's Gotthard tunnel) is drawn faintly,
   expected by recognition, and carries nothing for routes. The hex does take a
   tile, but only the one the game lays when the line opens -- the importer
   keeps those tiles, marked `laidByGame`, and the rules offer nothing else
   there.
-- Android's text recognizer answers lines only, not where words are, so a
-  plate is read there by the order of its figures, which says less.
-- 1844's OO tiles 64, 65 and 68 haven't been photographed, and 66 only at an
-  angle: they are drawn by the general rule, which 59 and 66 show isn't always
-  the print's. An upright close-up of each would let the importer's table
-  place their cities.
-- 1889's private companies, beyond where the port tile may go: they change
-  money and when tiles may be laid, not routes.
-- 1889's charters and certificates. The token places are looked for where an
-  1844 charter has them (`_ringAbove`, `_ringInside`); the first photo of an
-  1889 charter will show whether they sit the same way.
-- Icons and figures aren't drawn on the templates, so tiles printed alike
-  but for them read alike: 1889's port tile and 58.
+- **A recognizer learned from the data set** (kept, 4 October): for photos
+  at awkward angles and under glare, where the drawn templates fall short.
+  The data set (`dataset/`, see its README) is the start of one: 1,096
+  labelled hex pictures, but only about 200 different hexes-and-tiles.
+- Photos at 4:3 rather than 16:9: the board is nearer 4:3, so each hex would
+  get about a third more pixels.
+- Tokens found by the circles themselves (their black rings) rather than
+  where the drawing puts them, so a picture cut a little off still reads (see
+  Station tokens).
 - Hexes at the very edge of the map (red off-board areas, the grey mountain
   railways) are printed as part-hexes running off the board, so a close-up
   centred on one has little grid to lock onto. The planner aims at hexes that
@@ -1265,20 +1494,19 @@ counts as read. Records from before then can't say what was read.)
   game and the corrections are in the data set (`dataset/`, with what each
   photo shows), though no 1889 photo is labelled yet -- the board changed all
   through the session. Open from it:
-  - The port tile (437) and tile 58 still can't be told apart by recognition
-    (see Reading the hexes); drawing revenue where each tile prints it would
-    give the two different templates, at the cost of changing every
-    template.
-  - The darkened circles are taken for empty now (see Station tokens), which
-    wants a real 1889 board to confirm: the session's saved pictures were too
-    small to judge J11 and I4 by.
-  - Kotohira (I4) takes only an H tile, and a plain city laid there by
-    mistake was read as the H tile -- the only legal choice, so its revenue
-    was right but the board wasn't. Where an illegal tile matches far better
-    than any legal one, the reader could say so, as the tile editor does for
-    a tile that can't belong.
-  - The phase offer and the home-token default haven't been through a real
-    session yet.
+  - Tokens on 1889's cities, both sides of the tiles, are right on 12 of the
+    16 pictures the sessions saved; the four wrong are cut a fraction of a
+    hex off (see Station tokens).
+  - The phase offer worked in the user's test. The home-token default
+    hasn't been through a real session yet.
+  - The second session (Game 2, joined part-way) showed the mountains and
+    the fold read as track without an empty board to compare with -- now
+    remembered across games -- and two port towns read, now limited to the
+    one tile; which town is the port is still for the user.
+- **1880 and 1807** are imported but untested on real boards. Their special
+  rules beyond how trains run (1880's foreign investors and its 2R, 1807's
+  systems, mines and minors) aren't modelled; tobymao's 1807 lists a "Mine
+  bonus" box, which the align screen offers as a handle.
 
 - **The second phone session** (the same board): a photo turned 90 degrees
   under heavy glare (`CAP5253572290537228500`), found right first time; one
@@ -1419,8 +1647,9 @@ counts as read. Records from before then can't say what was read.)
   than be squeezed off the edge.
 - The "photograph the empty board first" step exists because of that lake hex: it
   records how every hex looks bare, which is what later photos are compared
-  against. It is worth checking how much it actually buys once there are tiles to
-  read.
+  against. On 1889 it buys a great deal -- the mountains -- and it is now kept
+  for the title, so only the first game of a title joined part-way goes
+  without it (see Sessions and close-ups).
 - `ColourModel.defaults` was measured from one warm-lit webcam photo. The reader
   replaces those values with what it measures whenever the photo has enough hexes
   of a colour it already knows, so the defaults only matter for the first photo

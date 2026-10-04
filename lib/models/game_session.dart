@@ -1,13 +1,21 @@
+import 'dart:math' as math;
 import 'dart:ui' show Offset;
 
 import 'board.dart';
 import 'board_graph.dart';
 import 'company.dart';
+import 'end_game.dart';
 import 'game_title.dart';
 import 'map_layout.dart';
 import 'tile_definition.dart';
 
 /// How the app came to believe what is on a hex.
+/// How each hex of a title's board looks bare, by hex id: its picture as
+/// the reader compares pictures (`HexPatch.encodeDarkness`), and its colour.
+/// The board is the same from game to game, so this is kept for the title
+/// rather than for one game (see `SessionStore.bareBoard`).
+typedef BareBoard = Map<String, (String, Offset)>;
+
 enum HexSource {
   /// Nothing seen yet: printed map at the start of a new game, or unknown.
   assumed,
@@ -265,10 +273,71 @@ class GameSession {
   /// its circle, which a photo can't tell from a token laid on it.
   final Set<String> homeTokensOff;
 
+  /// The end game OR sets kept so far, oldest first (see [EndGameSet]).
+  final List<EndGameSet> endGameSets;
+
+  /// Each player's cash, as they last counted it: kept for the end of the
+  /// game rather than tracked through it.
+  final Map<String, int> cash;
+
+  /// Each company's share value on the market, as last typed or read off a
+  /// photo of it.
+  final Map<String, int> sharePrices;
+
+  /// The market as a photo of it read, row by row, for a title whose market
+  /// the app doesn't know: share values step along a row, up at its end.
+  final List<List<int>> photographedMarket;
+
+  /// The percentage a share of a company is, by company id, where it isn't
+  /// the company's smallest certificate: as the user set it, as
+  /// certificates photographed showed, or as guessed from more shares held
+  /// than whole ones could make (see [shareStake]).
+  final Map<String, int> shareStakes;
+
   /// The share of [company] that [player] holds, in percent.
   int percentHeld(String player, String company) =>
       (holdings[player]?[company] ?? const <int>[])
           .fold(0, (total, share) => total + share);
+
+  /// The percentage one share of [company] is.
+  int shareStake(Company company) =>
+      shareStakes[company.id] ?? company.shareUnit;
+
+  /// Makes a share of [company] [stake]%, each player keeping as many shares
+  /// as they had: their certificates scaled with it.
+  void setShareStake(Company company, int stake) {
+    final was = shareStake(company);
+    shareStakes[company.id] = stake;
+    if (stake == was || stake <= 0) return;
+    for (final held in holdings.values) {
+      final certificates = held[company.id];
+      if (certificates == null) continue;
+      held[company.id] = [
+        for (final p in certificates) math.max(1, (p * stake / was).round()),
+      ];
+    }
+  }
+
+  /// Takes what a share of [company] is from certificates of [percents]
+  /// photographed: the smallest of them, where the title's certificates
+  /// don't print them all (or it doesn't know them). Of two or more, the
+  /// smallest is a share, as only one can be the director's; one alone
+  /// says something only where it isn't whole shares as things stand -- a
+  /// director's certificate is.
+  void stakeFromCertificates(Company company, List<int> percents) {
+    if (percents.isEmpty ||
+        (company.shares.isNotEmpty && percents.every(company.shares.contains))) {
+      return;
+    }
+    final stake = shareStake(company);
+    final smallest = percents.reduce(math.min);
+    if (smallest == stake) return;
+    if (percents.length > 1 ||
+        smallest < stake ||
+        percents.any((p) => p % stake != 0)) {
+      setShareStake(company, smallest);
+    }
+  }
 
   /// Adds a player called [name], unless there is one already.
   void addPlayer(String name) {
@@ -282,12 +351,15 @@ class GameSession {
     players[at] = to;
     final held = holdings.remove(from);
     if (held != null) holdings[to] = held;
+    final money = cash.remove(from);
+    if (money != null) cash[to] = money;
   }
 
   /// Takes player [name] out of the game, and their certificates with them.
   void removePlayer(String name) {
     players.remove(name);
     holdings.remove(name);
+    cash.remove(name);
   }
 
   /// Records that [player] holds [percents] of [company]'s certificates --
@@ -333,8 +405,18 @@ class GameSession {
     Map<String, List<String>>? companyTrains,
     Map<String, int>? charterTokens,
     Set<String>? homeTokensOff,
+    List<EndGameSet>? endGameSets,
+    Map<String, int>? cash,
+    Map<String, int>? sharePrices,
+    Map<String, int>? shareStakes,
+    List<List<int>>? photographedMarket,
   })  : players = players ?? [],
+        shareStakes = shareStakes ?? {},
+        photographedMarket = photographedMarket ?? [],
         homeTokensOff = homeTokensOff ?? {},
+        endGameSets = endGameSets ?? [],
+        cash = cash ?? {},
+        sharePrices = sharePrices ?? {},
         holdings = holdings ?? {},
         companyTrains = companyTrains ?? {},
         charterTokens = charterTokens ?? {},
@@ -444,6 +526,43 @@ class GameSession {
       if (open >= 0) city.tokens[open] = c.id;
     }
     return graph;
+  }
+
+  /// How each hex looks bare, gathered from games of a board already played
+  /// ([sessions], the latest first): as it looked when a game was last sure
+  /// it held nothing. What stands in for a photo of the empty board until
+  /// one is taken (see `SessionStore.bareBoard`).
+  static BareBoard bareLooks(Iterable<GameSession> sessions) {
+    final board = <String, (String, Offset)>{};
+    for (final session in sessions) {
+      session.hexes.forEach((id, state) {
+        if (state.basis == null && state.reference != null) {
+          board.putIfAbsent(
+              id, () => (state.reference!, state.referenceChroma ?? Offset.zero));
+        }
+      });
+    }
+    return board;
+  }
+
+  /// Why the tile on [hex] -- or tile [tileId], as the tile editor offers
+  /// it there -- is one more than the game comes with
+  /// ([GameTitle.tileCounts]), or null if it isn't. 1889 has one port tile,
+  /// and a photo had read two of its towns as the port.
+  String? overSupply(GameTitle title, MapHex hex, [String? tileId]) {
+    final id = tileId ?? tileAt(hex)?.tileId;
+    final count = id == null ? null : title.tileCounts[id];
+    if (count == null) return null;
+    final elsewhere = [
+      for (final other in title.map.hexes)
+        if (other.coord != hex.coord && tileAt(other)?.tileId == id) other.id,
+    ];
+    if (elsewhere.length < count) return null;
+    final where = elsewhere.length == 1
+        ? elsewhere.single
+        : '${elsewhere.sublist(0, elsewhere.length - 1).join(', ')} and '
+            '${elsewhere.last}';
+    return 'The game has $count of tile $id, and it is also on $where.';
   }
 
   /// Tokens that can't legally be where they are, by circle (see [slotId]),
@@ -648,6 +767,13 @@ class GameSession {
         if (companyTrains.isNotEmpty) 'companyTrains': companyTrains,
         if (charterTokens.isNotEmpty) 'charterTokens': charterTokens,
         'homeTokensOff': homeTokensOff.toList()..sort(),
+        if (endGameSets.isNotEmpty)
+          'endGameSets': [for (final set in endGameSets) set.toJson()],
+        if (cash.isNotEmpty) 'cash': cash,
+        if (sharePrices.isNotEmpty) 'sharePrices': sharePrices,
+        if (shareStakes.isNotEmpty) 'shareStakes': shareStakes,
+        if (photographedMarket.isNotEmpty)
+          'photographedMarket': photographedMarket,
       };
 
   static GameSession fromJson(Map<String, Object?> json) {
@@ -751,5 +877,25 @@ class GameSession {
           for (final e in (json['revenueOverrides'] as Map? ?? {}).entries)
             e.key as String: (e.value as num).toInt(),
         },
+        endGameSets: [
+          for (final set in json['endGameSets'] as List? ?? const [])
+            EndGameSet.fromJson((set as Map).cast<String, Object?>()),
+        ],
+        cash: {
+          for (final e in (json['cash'] as Map? ?? {}).entries)
+            e.key as String: (e.value as num).toInt(),
+        },
+        sharePrices: {
+          for (final e in (json['sharePrices'] as Map? ?? {}).entries)
+            e.key as String: (e.value as num).toInt(),
+        },
+        shareStakes: {
+          for (final e in (json['shareStakes'] as Map? ?? {}).entries)
+            e.key as String: (e.value as num).toInt(),
+        },
+        photographedMarket: [
+          for (final row in json['photographedMarket'] as List? ?? const [])
+            [for (final p in row as List) (p as num).toInt()],
+        ],
       );
 }

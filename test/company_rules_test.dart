@@ -1,9 +1,11 @@
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/company_rules.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/screens/play_area_review.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/company.dart';
+import 'package:eighteen_scanner/models/company_rules.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/screens/play_area_review.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -144,10 +146,11 @@ void main() {
           contains('that makes 125% of GB'));
     });
 
-    test('pay their share of the revenue, rounded down', () {
+    test('pay their share of the revenue, rounded up as tobymao pays it',
+        () {
       final session = newGame()..setHolding('Ann', 'GB', [50, 25]);
-      expect(rules.dividend(session, 'Ann', 'GB', 210), 157);
-      expect(rules.dividend(session, 'Ann', 'GB', 210, half: true), 78);
+      expect(rules.dividend(session, 'Ann', 'GB', 210), 158);
+      expect(rules.dividend(session, 'Ann', 'GB', 210, half: true), 79);
       expect(rules.dividend(session, 'Bob', 'GB', 210), 0);
     });
   });
@@ -163,7 +166,7 @@ void main() {
       certificates: {
         'GB': [50, 25],
       },
-    ).applyTo(session);
+    ).applyTo(session, title);
     expect(session.companyTrains['GB'], ['3H', '2H']);
     expect(session.charterTokens['GB'], 1);
     expect(session.players, ['Ann']);
@@ -171,7 +174,62 @@ void main() {
     // Without a player, certificates aren't recorded.
     const PlayAreaConfirmed(certificates: {
       'NOB': [50],
-    }).applyTo(session);
+    }).applyTo(session, title);
     expect(session.holdings.keys, ['Ann']);
+  });
+
+  test("certificates photographed say what a share is, where the game's "
+      "can't make them", () {
+    final fnm = title.companyById('FNM')!;
+    final session = newGame()
+      ..addPlayer('Ann')
+      ..setHolding('Ann', 'FNM', [10, 10, 10]);
+    // A director's certificate on its own is two shares of 10%.
+    const PlayAreaConfirmed(player: 'Bob', certificates: {
+      'FNM': [20],
+    }).applyTo(session, title);
+    expect(session.shareStake(fnm), 10);
+    // This copy prints 5% shares: Ann keeps her three, now 5% each.
+    const PlayAreaConfirmed(player: 'Bob', certificates: {
+      'FNM': [10, 5, 5],
+    }).applyTo(session, title);
+    expect(session.shareStake(fnm), 5);
+    expect(session.holdings['Ann']!['FNM'], [5, 5, 5]);
+    expect(session.holdings['Bob']!['FNM'], [10, 5, 5]);
+    // The title's sizes no longer apply; too much of the company still does.
+    expect(CompanyRules(title).certificateProblems(session, fnm, 'Bob', [5]),
+        isEmpty);
+    // The SBB prints 10% certificates beside its 5% shares: two of them
+    // are four shares.
+    final sbb = title.companyById('SBB')!;
+    const PlayAreaConfirmed(player: 'Ann', certificates: {
+      'SBB': [10, 10],
+    }).applyTo(session, title);
+    expect(session.shareStake(sbb), 5);
+  });
+
+  test("a game the app doesn't know: two certificates say what a share is",
+      () {
+    const company = Company(id: 'red', name: 'Red', color: Colors.red);
+    final unknown = GameTitle(
+      id: 'unknown',
+      name: 'Unknown',
+      description: '',
+      map: title.map,
+      tiles: const {},
+      companies: const [company],
+    );
+    final session =
+        GameSession.start(title: unknown, name: 'Test', startedEmpty: true);
+    // One alone could be a director's of 10% shares.
+    const PlayAreaConfirmed(player: 'Ann', certificates: {
+      'red': [20],
+    }).applyTo(session, unknown);
+    expect(session.shareStake(company), 10);
+    const PlayAreaConfirmed(player: 'Ann', certificates: {
+      'red': [40, 20],
+    }).applyTo(session, unknown);
+    expect(session.shareStake(company), 20);
+    expect(session.holdings['Ann']!['red'], [40, 20]);
   });
 }

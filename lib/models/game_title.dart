@@ -1,12 +1,15 @@
 import 'dart:math' as math;
 
+import '../titles/title_1807.dart';
 import '../titles/title_1844.dart';
 import '../titles/title_1854.dart';
+import '../titles/title_1880.dart';
 import '../titles/title_1889.dart';
 import '../titles/title_data.dart';
 import 'board.dart';
 import 'company.dart';
 import 'map_layout.dart';
+import 'stock_market.dart';
 import 'tile_definition.dart';
 import 'tile_seed_data.dart';
 
@@ -20,7 +23,8 @@ class GameTitle {
   /// Tiles players can lay, by id.
   final Map<String, TileDefinition> tiles;
 
-  /// How many of each tile come in the box.
+  /// How many of each tile come in the box; one there are as many of as
+  /// are wanted (1807's plain track) isn't listed.
   final Map<String, int> tileCounts;
 
   /// Tiles the game lays by itself rather than a player choosing them: the
@@ -64,7 +68,14 @@ class GameTitle {
     this.routeRules = RouteRules.none,
     this.stopGroups = const {},
     this.groupBonus = const {},
+    this.market = const StockMarket([]),
+    this.marketRules = const MarketRules(),
   });
+
+  /// The stock market, and how a payout moves a price on it (see
+  /// [_marketRules]): what the end of the game is worked out on.
+  final StockMarket market;
+  final MarketRules marketRules;
 
   /// What a route pays beyond its stops, and where it may not go: rules in
   /// tobymao's game code, kept here by hand (see [_routeRules]).
@@ -151,9 +162,28 @@ class GameTitle {
   final TileStyle tileStyle;
   final bool doubleSidedTiles;
   static const Map<String, TileStyle> _tileStyles = {
-    '1889': TileStyle(townDots: true),
+    // The circles of 1889's two- and three-city tiles: white discs about a
+    // quarter of the hex across, touching (448, 465, 15 photographed).
+    '1889': TileStyle(townDots: true, multiSlotRadius: 0.27),
   };
   static const Set<String> _doubleSided = {'1889'};
+
+  /// How each title's share prices move when a company pays out, where it
+  /// isn't tobymao's default of a space right for anything paid, and what its
+  /// minors pay their owners (from each game's code: `step/dividend.rb`).
+  static const Map<String, MarketRules> _marketRules = {
+    // 1867's rules: a payout of at least the share price moves it a space
+    // right, a smaller one not at all; a minor pays its owner half.
+    '1807': MarketRules(payoutMoves: [(1.0, 1)], minorPayout: 0.5),
+    // A regional company stops short of the cells marked `t`, going up.
+    '1844': MarketRules(barred: {
+      't': {'regional'},
+    }),
+    // A minor pays its owner half.
+    '1854': MarketRules(minorPayout: 0.5),
+    // The foreign investors keep what they earn.
+    '1880': MarketRules(minorPayout: 0),
+  };
 
   /// Whether the board is printed with flat-topped hexes. The app keeps
   /// every map pointy-topped (see [MapLayout.coordFromFlatId]); drawing
@@ -211,6 +241,11 @@ class GameTitle {
             rustsOn: t.rustsOn,
             count: t.count,
             freeTowns: t.freeTowns,
+            townAllowance: t.townAllowance,
+            townsPay: t.townsPay,
+            visits: _stopKinds(t.visits),
+            paidAt: _stopKinds(t.paidAt),
+            multiplier: t.multiplier,
             kind: t.pays != null
                 ? TrainKind.express
                 : (_hexTrains[data.id]?.call(t.name) ?? false)
@@ -230,6 +265,8 @@ class GameTitle {
       specialUpgrades: _specialUpgrades[data.id] ?? const {},
       tilesOnlyOn: _tilesOnlyOn[data.id] ?? const {},
       tileStyle: _tileStyles[data.id] ?? TileStyle.plain,
+      market: StockMarket.parse(data.market, kind: data.marketKind),
+      marketRules: _marketRules[data.id] ?? const MarketRules(),
       doubleSidedTiles: _doubleSided.contains(data.id),
       routeRules: _routeRules[data.id] ?? RouteRules.none,
       stopGroups: {
@@ -242,7 +279,7 @@ class GameTitle {
         for (final t in data.tiles)
           t.id: TileDefinition.parseDsl(t.id, tileColorFromName(t.color), t.code),
       },
-      tileCounts: {for (final t in data.tiles) t.id: t.count},
+      tileCounts: {for (final t in data.tiles) t.id: ?t.count},
       laidByGame: {
         for (final t in data.tiles)
           if (t.laidByGame) t.id,
@@ -314,9 +351,16 @@ class GameTitle {
         },
       );
 
+  /// The kinds of stop tobymao names (`city`, `town`, `offboard`).
+  static Set<StationKind>? _stopKinds(List<String>? names) => names == null
+      ? null
+      : {for (final name in names) ?StationKind.values.asNameMap()[name]};
+
   static final List<GameTitle> all = [
+    GameTitle.fromData(title1807),
     GameTitle.fromData(title1844),
     GameTitle.fromData(title1854),
+    GameTitle.fromData(title1880),
     GameTitle.fromData(title1889),
   ];
 
@@ -366,9 +410,27 @@ class TrainType {
   final int count;
   final TrainKind kind;
 
-  /// Whether towns are left out of [distance] and all paid for: 1854's "+"
-  /// trains.
+  /// Whether towns are left out of [distance]: 1854's "+" trains, 1807's.
   final bool freeTowns;
+
+  /// How many towns it runs to besides [distance] without their counting
+  /// (1880's "2+2"); [freeTowns] for any number.
+  final int townAllowance;
+
+  /// Whether towns pay it: they don't 1807's trains.
+  final bool townsPay;
+
+  /// The kinds of stop it may run to -- 1807's goods trains, cities alone
+  /// -- or null for any.
+  final Set<StationKind>? visits;
+
+  /// The kinds of stop that pay it -- 1807's 5+5E, off-board areas alone
+  /// -- or null for every kind.
+  final Set<StationKind>? paidAt;
+
+  /// What its route's takings are multiplied by: 1807's "+" trains double
+  /// them.
+  final int multiplier;
 
   const TrainType({
     required this.name,
@@ -380,6 +442,11 @@ class TrainType {
     this.count = 0,
     this.kind = TrainKind.stops,
     this.freeTowns = false,
+    this.townAllowance = 0,
+    this.townsPay = true,
+    this.visits,
+    this.paidAt,
+    this.multiplier = 1,
   });
 
   @override

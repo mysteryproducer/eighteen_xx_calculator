@@ -5,25 +5,28 @@
 //
 // DATASET_DIR holds manifest.json: the photos, which game is the truth for
 // each (with corrections to labels known to be wrong, and hexes to leave
-// out), hex centres picked by hand where the detector can't place a photo,
-// and the training logs the app keeps of the user's corrections. Writes
-// hexes/<photo>/<hex>.png -- each hex squared up, 128 pixels, as the app
-// saves them -- fits/<photo>.jpg to check each placement by eye, and
-// hexes.csv with a row per picture. Skipped when DATASET_DIR isn't set.
+// out, and the title where it isn't the manifest's), hex centres picked by
+// hand where the detector can't place a photo, saved games photographed
+// while their board stood as a truth has it (their pictures of each hex are
+// labelled by it), and the training logs the app keeps of the user's
+// corrections. Writes hexes/<photo>/<hex>.png -- each hex squared up, 128
+// pixels, as the app saves them -- fits/<photo>.jpg to check each placement
+// by eye, and hexes.csv with a row per picture. Skipped when DATASET_DIR
+// isn't set.
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:eighteen_xx_calculator/geometry/homography.dart';
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/board_graph.dart';
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
-import 'package:eighteen_xx_calculator/processing/board_reader.dart';
-import 'package:eighteen_xx_calculator/processing/gray_image.dart';
-import 'package:eighteen_xx_calculator/processing/grid_detector.dart';
-import 'package:eighteen_xx_calculator/processing/hex_patch.dart';
+import 'package:eighteen_scanner/geometry/homography.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/board_graph.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
+import 'package:eighteen_scanner/processing/board_reader.dart';
+import 'package:eighteen_scanner/processing/gray_image.dart';
+import 'package:eighteen_scanner/processing/grid_detector.dart';
+import 'package:eighteen_scanner/processing/hex_patch.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 
@@ -34,14 +37,18 @@ void main() {
     final manifest = jsonDecode(File('$root/manifest.json').readAsStringSync())
         as Map<String, Object?>;
     final title = GameTitle.byId(manifest['title'] as String)!;
-    final detector = GridDetector(title.map);
-    final reader = BoardReader(title);
+    final detectors = <String, GridDetector>{};
+    final readers = <String, BoardReader>{};
 
     // Each truth: the game as it stood, labels known to be wrong put right,
-    // and the hexes whose label can't be trusted at all.
-    final truths = <String, (GameSession, Set<String>)>{};
+    // and the hexes whose label can't be trusted at all; of the manifest's
+    // title unless it names another.
+    final truths = <String, (GameSession, Set<String>, GameTitle)>{};
     (manifest['truths'] as Map<String, Object?>).forEach((id, value) {
       final spec = value as Map<String, Object?>;
+      final title = spec['title'] == null
+          ? GameTitle.byId(manifest['title'] as String)!
+          : GameTitle.byId(spec['title'] as String)!;
       final path = spec['session'] as String?;
       final session = path == null
           ? GameSession.start(title: title, name: id, startedEmpty: true)
@@ -53,7 +60,11 @@ void main() {
         session.setManually(title.map.byId(hexId)!,
             tileId == null ? null : PlacedTile(tileId as String, rotation: rotation as int));
       });
-      truths[id] = (session, {...(spec['exclude'] as List<Object?>? ?? []).cast<String>()});
+      truths[id] = (
+        session,
+        {...(spec['exclude'] as List<Object?>? ?? []).cast<String>()},
+        title,
+      );
     });
 
     final rows = <Map<String, Object?>>[];
@@ -80,8 +91,8 @@ void main() {
       return '$tileId@$rotation';
     }
 
-    String labelOf(PlacedTile? t) =>
-        t == null ? 'printed' : looks(t.tileId, t.rotation);
+    String labelOf(PlacedTile? t, [GameTitle? of]) =>
+        t == null ? 'printed' : looks(t.tileId, t.rotation, of);
     String colourOf(String? tileId, [GameTitle? of]) =>
         tileId == null ? 'plain' : (of ?? title).tiles[tileId]?.color.name ?? '?';
 
@@ -89,7 +100,9 @@ void main() {
       final spec = value as Map<String, Object?>;
       final id = spec['id'] as String;
       final photo = img.decodeImage(File('$root/${spec['file']}').readAsBytesSync())!;
-      final (truth, excluded) = truths[spec['truth']]!;
+      final (truth, excluded, title) = truths[spec['truth']]!;
+      final detector = detectors[title.id] ??= GridDetector(title.map);
+      final reader = readers[title.id] ??= BoardReader(title);
       final rgb = RgbImage.fromImage(photo);
 
       // Where the board is: from hand-picked hex centres where given, else
@@ -105,8 +118,17 @@ void main() {
           from.add(title.map.byId(hexId)!.coord.boardCenter);
           to.add(Offset(x, y));
         }
-        h = detector.snap(photo, Homography.fit(from, to)!).boardToImage;
-        method = 'hand-picked centres, snapped';
+        // Snapped to the printed lines, unless the photo says not to: on a
+        // board printing none (1889), snapping can pull a close, steep view
+        // off.
+        final guess = Homography.fit(from, to)!;
+        if (spec['snap'] == false) {
+          h = guess;
+          method = 'hand-picked centres';
+        } else {
+          h = detector.snap(photo, guess).boardToImage;
+          method = 'hand-picked centres, snapped';
+        }
       } else {
         final fit = detector.fitBoard(photo,
             hints: BoardHints(colours: {
@@ -156,7 +178,7 @@ void main() {
         final picture = HexPatch.picture(rgb, h, r.hex.coord, pixels: 128);
         File('$root/hexes/$id/${r.hex.id}.png').writeAsBytesSync(img.encodePng(picture));
         final read = r.reading.option.placed;
-        final ok = labelOf(read) == labelOf(really);
+        final ok = labelOf(read, title) == labelOf(really, title);
         total++;
         if (ok) right++;
         rows.add({
@@ -167,14 +189,15 @@ void main() {
           'title': title.id,
           'truth': spec['truth'],
           'hex': r.hex.id,
-          'label': labelOf(really),
+          'label': labelOf(really, title),
           'tile': really?.tileId ?? 'printed',
-          'rotation': int.parse(labelOf(really).split('@').last.replaceAll('printed', '0')),
-          'colour': colourOf(really?.tileId),
+          'rotation': int.parse(
+              labelOf(really, title).split('@').last.replaceAll('printed', '0')),
+          'colour': colourOf(really?.tileId, title),
           'glare': r.glare.toStringAsFixed(2),
           'hex_px': (h.localScale(r.hex.coord.boardCenter) * math.sqrt(3)).round(),
           'facing': facing,
-          'read_as': labelOf(read),
+          'read_as': labelOf(read, title),
           'read_confidence': r.reading.confidence.toStringAsFixed(2),
           'read_right': ok,
         });
@@ -196,6 +219,91 @@ void main() {
       // ignore: avoid_print
       print('$id: $method, facing $facing degrees, ${tileHexes.length} tile hexes in view, '
           '$total kept; the app reads $right of them right with nothing to go on');
+    }
+
+    // Saved games photographed while the board stood as a truth has it: the
+    // app's own picture of each hex, cut where the app (and the user, lining
+    // the grid up by hand where it had to) placed it, labelled by the truth.
+    // A picture the device's log holds already, as a correction, is left to
+    // that.
+    for (final value in manifest['games'] as List<Object?>? ?? const []) {
+      final spec = value as Map<String, Object?>;
+      final (truth, excluded, title) = truths[spec['truth']]!;
+      final gameDir = '$root/${spec['game']}';
+      final saved = GameSession.fromJson(
+          jsonDecode(File('$gameDir/session.json').readAsStringSync())
+              as Map<String, Object?>);
+      final logged = <String, Map<String, Object?>>{};
+      final logPictures = <String>{};
+      final log = spec['log'] as String?;
+      if (log != null) {
+        for (final line in File('$root/$log/labels.jsonl').readAsLinesSync()) {
+          if (line.trim().isEmpty) continue;
+          final entry = jsonDecode(line) as Map<String, Object?>;
+          final picture = entry['picture'] as String;
+          if (!picture.startsWith('${saved.id}-')) continue;
+          // The last word on each hex: what the app had read before the user
+          // put it right.
+          logged[entry['hex'] as String] = entry;
+          final file = File('$root/$log/pictures/$picture');
+          if (file.existsSync()) {
+            logPictures.add(base64.encode(file.readAsBytesSync()));
+          }
+        }
+      }
+      final id = spec['id'] as String;
+      final folder = 'hexes/$id';
+      await Directory('$root/$folder').create(recursive: true);
+      var kept = 0, skipped = 0, right = 0;
+      for (final hex in title.map.hexes) {
+        final file = File('$gameDir/hexes/${hex.id}.png');
+        if (!file.existsSync() || excluded.contains(hex.id)) continue;
+        final bytes = file.readAsBytesSync();
+        if (logPictures.contains(base64.encode(bytes))) {
+          skipped++;
+          continue;
+        }
+        final state = saved.hexes[hex.id];
+        final really = truth.tileAt(hex);
+        // What the app read there: its reading, or where the user set the
+        // hex by hand, what it had read before.
+        String readAs = '';
+        if (state != null && state.source != HexSource.manual) {
+          readAs = labelOf(state.tile, title);
+        } else if (logged[hex.id] case final entry?) {
+          final readTile = entry['readAs'] as String?;
+          readAs = readTile == null
+              ? 'printed'
+              : looks(readTile, (entry['readAsRotation'] as num?)?.toInt() ?? 0,
+                  title);
+        }
+        File('$root/$folder/${hex.id}.png').writeAsBytesSync(bytes);
+        final label = labelOf(really, title);
+        if (readAs == label) right++;
+        rows.add({
+          'image': '$folder/${hex.id}.png',
+          'source': 'game',
+          'photo': saved.id,
+          'device': spec['device'],
+          'title': title.id,
+          'truth': spec['truth'],
+          'hex': hex.id,
+          'label': label,
+          'tile': really?.tileId ?? 'printed',
+          'rotation': int.parse(label.split('@').last.replaceAll('printed', '0')),
+          'colour': colourOf(really?.tileId, title),
+          'glare': saved.glare[hex.id]?.toStringAsFixed(2) ?? '',
+          'hex_px': '',
+          'facing': '',
+          'read_as': readAs,
+          'read_confidence': state?.confidence.toStringAsFixed(2) ?? '',
+          'read_right': readAs == '' ? '' : readAs == label,
+        });
+        kept++;
+      }
+      // ignore: avoid_print
+      print('$id: $kept pictures kept, $skipped left to the log; the app had '
+          '$right of them right');
     }
 
     // The app's own log of what the user corrected, with the pictures.

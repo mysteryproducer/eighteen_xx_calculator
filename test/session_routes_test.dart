@@ -10,9 +10,9 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:eighteen_xx_calculator/models/game_session.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/processing/train_routes.dart';
+import 'package:eighteen_scanner/models/game_session.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/processing/train_routes.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

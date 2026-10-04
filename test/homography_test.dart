@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:eighteen_xx_calculator/geometry/homography.dart';
+import 'package:eighteen_scanner/geometry/homography.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// A photo of a flat board taken from an angle: the transform the grid

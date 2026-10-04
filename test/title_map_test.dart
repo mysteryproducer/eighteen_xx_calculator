@@ -1,9 +1,9 @@
 import 'dart:math' as math;
 
-import 'package:eighteen_xx_calculator/models/board.dart';
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/models/map_layout.dart';
-import 'package:eighteen_xx_calculator/models/tile_definition.dart';
+import 'package:eighteen_scanner/models/board.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/models/map_layout.dart';
+import 'package:eighteen_scanner/models/tile_definition.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The titles whose maps are imported from tobymao/18xx.
@@ -193,6 +193,56 @@ void main() {
       expect(g1889.map.anchors.map((h) => h.id), ['A10', 'J1', 'L7', 'G14']);
       expect(g1889.map.anchors.map((h) => h.name),
           ['Sukumo', 'Sakaide & Okayama', 'Naruto & Awaji', 'Muroto']);
+    });
+
+    test("a close-up's handles are kept apart", () {
+      // Every close-up the app asks for frames its target and two rings
+      // round it. On 1889's west coast the named towns had drawn two of the
+      // four onto neighbouring hexes.
+      int touching(List<MapHex> four) {
+        var pairs = 0;
+        for (int i = 0; i < four.length; i++) {
+          for (int j = i + 1; j < four.length; j++) {
+            if (four[i].coord.distanceTo(four[j].coord) <= 1) pairs++;
+          }
+        }
+        return pairs;
+      }
+
+      for (final title in [g1889, g1844]) {
+        for (final target in title.map.hexes) {
+          final frame = MapLayout([
+            for (final c in title.map.around([target.coord], 2))
+              title.map.at(c)!,
+          ]);
+          if (frame.hexes.length < 4) continue;
+          final handles = frame.closeUpAnchors;
+          expect(handles.toSet(), hasLength(4));
+          // The fewest pairs side by side any four of the frame could have.
+          var fewest = 6;
+          final h = frame.hexes;
+          for (var a = 0; a < h.length && fewest > 0; a++) {
+            for (var b = a + 1; b < h.length; b++) {
+              for (var c = b + 1; c < h.length; c++) {
+                for (var d = c + 1; d < h.length; d++) {
+                  final t = touching([h[a], h[b], h[c], h[d]]);
+                  if (t < fewest) fewest = t;
+                }
+              }
+            }
+          }
+          expect(touching(handles), fewest,
+              reason: '${title.id} close-up of ${target.id}: '
+                  '${handles.map((h) => h.id).join(' ')}');
+        }
+      }
+      // At the coast four can't all be kept apart: Sukumo's frame (A10) has
+      // seven hexes, and any four of them hold two pairs side by side.
+      final sukumo = MapLayout([
+        for (final c in g1889.map.around([g1889.map.byId('A10')!.coord], 2))
+          g1889.map.at(c)!,
+      ]);
+      expect(touching(sukumo.closeUpAnchors), 2);
     });
 
     test('anchors are spread to the corners of the map', () {

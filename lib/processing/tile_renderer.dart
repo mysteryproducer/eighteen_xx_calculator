@@ -76,11 +76,11 @@ class TileRenderer {
       }
     }
     final at = <int, Offset>{};
-    final riding = <int, (int, int, Offset)>{};
+    final riding = <int, _Ride>{};
     void ride(TileStation stop, int a, int b, double t) {
       final (point, along) = _alongRun(a, b, t);
       at[stop.index] = point;
-      riding[stop.index] = (a, b, along);
+      riding[stop.index] = _Ride(a, b, t, along);
     }
 
     for (final stop in def.stations) {
@@ -217,27 +217,16 @@ class TileRenderer {
   /// side [b], in a hex of circumradius 1 centred on the origin, and the way
   /// the track runs there.
   static (Offset, Offset) _alongRun(int a, int b, double t) {
-    final from = HexGeometry.edgeMidpoint(Offset.zero, 1, a);
-    final to = HexGeometry.edgeMidpoint(Offset.zero, 1, b);
-    final centre = _arcCentre(Offset.zero, 1, a, b);
-    if (centre == null) {
-      final d = to - from;
+    final arc = _arcOf(Offset.zero, 1, a, b);
+    if (arc == null) {
+      final from = HexGeometry.edgeMidpoint(Offset.zero, 1, a);
+      final d = HexGeometry.edgeMidpoint(Offset.zero, 1, b) - from;
       return (from + d * t, d / d.distance);
     }
-    final r = (from - centre).distance;
-    final start = math.atan2(from.dy - centre.dy, from.dx - centre.dx);
-    final end = math.atan2(to.dy - centre.dy, to.dx - centre.dx);
-    var sweep = end - start;
-    while (sweep <= -math.pi) {
-      sweep += 2 * math.pi;
-    }
-    while (sweep > math.pi) {
-      sweep -= 2 * math.pi;
-    }
-    final angle = start + sweep * t;
+    final angle = arc.start + arc.sweep * t;
     final out = Offset(math.cos(angle), math.sin(angle));
-    final along = Offset(-out.dy, out.dx) * (sweep < 0 ? -1.0 : 1.0);
-    return (centre + out * r, along);
+    final along = Offset(-out.dy, out.dx) * (arc.sweep < 0 ? -1.0 : 1.0);
+    return (arc.centre + out * arc.radius, along);
   }
 
   /// How far from the middle a stop that shares the hex sits on its run.
@@ -310,18 +299,8 @@ class TileRenderer {
       );
     }
 
-    Offset positionOf(TileEndpoint e) => switch (e) {
-          EdgeEndpoint(:final edge) => HexGeometry.edgeMidpoint(center, radius, edge),
-          StationEndpoint(:final stationIndex) =>
-            stationPosition(def, stationIndex, center, radius),
-        };
-
-    // Track. A run between two sides is a circular arc that meets each side
-    // square on, which is how tiles are actually drawn: a tight turn hugs the
-    // corner the two sides share and never approaches the middle of the hex.
-    // Bending everything through the centre instead -- which this used to do
-    // -- makes every curve too wide, and a photographed curve then matches no
-    // template well.
+    // Track, along the paths [trackPath] gives, which routes are drawn along
+    // too.
     final trackPaint = Paint()
       ..color = trackColor
       ..style = PaintingStyle.stroke
@@ -351,19 +330,9 @@ class TileRenderer {
         runs[rider.stationIndex] = paint;
         continue;
       }
-      if (seg.narrow) {
-        if (seg.a case EdgeEndpoint(edge: final a)) {
-          if (seg.b case EdgeEndpoint(edge: final b)) {
-            tunnels.add(_runPath(center, radius, a, b));
-            continue;
-          }
-        }
-      }
-      if (seg.a case EdgeEndpoint(edge: final a)) {
-        if (seg.b case EdgeEndpoint(edge: final b)) {
-          _paintRun(canvas, center, radius, a, b, paint);
-          continue;
-        }
+      if (seg.narrow && seg.a is EdgeEndpoint && seg.b is EdgeEndpoint) {
+        tunnels.add(trackPath(def, seg, center, radius));
+        continue;
       }
       // Track into a place a route can only end at -- an off-board area,
       // or one of 1844's mountain railways -- just points into the hex, as
@@ -372,19 +341,18 @@ class TileRenderer {
       final side = [seg.a, seg.b].whereType<EdgeEndpoint>().firstOrNull;
       final end = [seg.a, seg.b].whereType<StationEndpoint>().firstOrNull;
       if (side != null && end != null && _endsRoutes(def, end.stationIndex)) {
-        _paintSpur(canvas, center, radius, side.edge, positionOf(end),
-            paint.strokeWidth, paint.color);
+        _paintSpur(canvas, center, radius, side.edge,
+            _positionOf(def, end, center, radius), paint.strokeWidth,
+            paint.color);
         continue;
       }
-      final path = Path()
-        ..moveTo(positionOf(seg.a).dx, positionOf(seg.a).dy)
-        ..lineTo(positionOf(seg.b).dx, positionOf(seg.b).dy);
-      canvas.drawPath(path, paint);
+      canvas.drawPath(trackPath(def, seg, center, radius), paint);
     }
 
     runs.forEach((stop, paint) {
-      final (a, b, _) = layout.riding[stop]!;
-      _paintRun(canvas, center, radius, a, b, paint);
+      final ride = layout.riding[stop]!;
+      canvas.drawPath(
+          _runPart(center, radius, ride.a, ride.b, 0, 1), paint);
     });
 
     for (final tunnel in tunnels) {
@@ -414,8 +382,8 @@ class TileRenderer {
       final pos = stationPosition(def, station.index, center, radius);
       switch (station.kind) {
         case StationKind.city:
-          _paintCity(
-              canvas, def, station, pos, center, size, radius, slotTurn, fill);
+          _paintCity(canvas, def, station, pos, center, size, radius,
+              slotTurn, fill, style);
         case StationKind.town:
           _paintTown(canvas, def, station, pos, center, size, radius,
               style: style, fill: fill);
@@ -439,9 +407,13 @@ class TileRenderer {
   /// four fifths of the way to the sides it points at (close-ups of I6's 15,
   /// Geneva and a 611); three round the middle are smaller. (tobymao draws
   /// them at a quarter, which made every city tile a poor match for its
-  /// photo.)
-  static double slotRadiusFor(TileStation station) => switch (station.slots) {
+  /// photo.) A title's [style] can print the circles of a city of several
+  /// smaller (see `TileStyle.multiSlotRadius`).
+  static double slotRadiusFor(TileStation station,
+          {TileStyle style = TileStyle.plain}) =>
+      switch (station.slots) {
         <= 1 => 0.33,
+        _ when style.multiSlotRadius != null => style.multiSlotRadius!,
         2 => 0.34,
         _ => 0.36,
       };
@@ -471,6 +443,7 @@ class TileRenderer {
     Offset center,
     double radius, {
     int extraTurn = 0,
+    TileStyle style = TileStyle.plain,
   }) {
     final station = def.stations.firstWhere((s) => s.index == stationIndex,
         orElse: () => def.stations.first);
@@ -487,7 +460,7 @@ class TileRenderer {
       final outward = (pos - center) / (pos - center).distance;
       row = Offset(-outward.dy, outward.dx);
     }
-    final r = radius * slotRadiusFor(station);
+    final r = radius * slotRadiusFor(station, style: style);
     if (slots == 2) return [pos - row * r, pos + row * r];
     // Three or more: round the middle, starting across the row. 1844's
     // three-slot city (909) has them just apart, centred over two fifths of
@@ -514,10 +487,11 @@ class TileRenderer {
     double radius,
     int slotTurn,
     Color fill,
+    TileStyle style,
   ) {
-    final ringRadius = radius * slotRadiusFor(station);
-    final slots =
-        slotPositions(def, station.index, center, radius, extraTurn: slotTurn);
+    final ringRadius = radius * slotRadiusFor(station, style: style);
+    final slots = slotPositions(def, station.index, center, radius,
+        extraTurn: slotTurn, style: style);
     if (slots.length == 3) {
       // The space between three is white too.
       canvas.drawPath(
@@ -618,7 +592,7 @@ class TileRenderer {
     }
     // Across the track: perpendicular to the way the track runs through.
     final towards = HexGeometry.edgeMidpoint(center, radius, sides.first) - pos;
-    final along = _layoutOf(def).riding[station.index]?.$3 ??
+    final along = _layoutOf(def).riding[station.index]?.along ??
         (towards.distance < 0.01
             ? const Offset(1, 0)
             : towards / towards.distance);
@@ -686,30 +660,89 @@ class TileRenderer {
   static const double _townRing = 0.04;
   static const double _townBar = 0.22;
 
-  /// Draws track from the middle of side [a] to the middle of side [b] as
-  /// tile art does: straight across for opposite sides, otherwise the
-  /// circular arc that leaves both sides at right angles.
-  static void _paintRun(
-    Canvas canvas,
+  /// One of [def]'s tracks, [segment], as it is drawn, in a hex of
+  /// circumradius [radius] centred on [center]: from its end
+  /// [TileSegment.a] to [TileSegment.b], or the other way when [reversed].
+  /// Between two sides it is the run from one to the other (see [_arcOf]);
+  /// between a side and a stop that sits on such a run -- a town on a
+  /// curve, a city on an OO tile -- it is that part of the run; anything
+  /// else is straight, as track into a city in the middle is printed. Tiles
+  /// are drawn along it, and so are routes, so a route follows the track.
+  static Path trackPath(
+    TileDefinition def,
+    TileSegment segment,
     Offset center,
-    double radius,
-    int a,
-    int b,
-    Paint paint,
-  ) =>
-      canvas.drawPath(_runPath(center, radius, a, b), paint);
+    double radius, {
+    bool reversed = false,
+  }) {
+    final (from, to) =
+        reversed ? (segment.b, segment.a) : (segment.a, segment.b);
+    if ((from, to)
+        case (EdgeEndpoint(edge: final a), EdgeEndpoint(edge: final b))) {
+      return _runPart(center, radius, a, b, 0, 1);
+    }
+    final side = [from, to].whereType<EdgeEndpoint>().firstOrNull;
+    final stop = [from, to].whereType<StationEndpoint>().firstOrNull;
+    final ride = stop == null ? null : _layoutOf(def).riding[stop.stationIndex];
+    if (side != null &&
+        ride != null &&
+        (side.edge == ride.a || side.edge == ride.b)) {
+      final atSide = side.edge == ride.a ? 0.0 : 1.0;
+      return from == side
+          ? _runPart(center, radius, ride.a, ride.b, atSide, ride.t)
+          : _runPart(center, radius, ride.a, ride.b, ride.t, atSide);
+    }
+    final start = _positionOf(def, from, center, radius);
+    final end = _positionOf(def, to, center, radius);
+    return Path()
+      ..moveTo(start.dx, start.dy)
+      ..lineTo(end.dx, end.dy);
+  }
 
-  /// The path [_paintRun] draws.
-  static Path _runPath(Offset center, double radius, int a, int b) {
+  /// Where end [end] of one of [def]'s tracks is: the middle of a side, or
+  /// a stop.
+  static Offset _positionOf(
+          TileDefinition def, TileEndpoint end, Offset center, double radius) =>
+      switch (end) {
+        EdgeEndpoint(:final edge) =>
+          HexGeometry.edgeMidpoint(center, radius, edge),
+        StationEndpoint(:final stationIndex) =>
+          stationPosition(def, stationIndex, center, radius),
+      };
+
+  /// The run from side [a] to side [b] (see [_arcOf]) between fractions
+  /// [from] and [to] of the way along it, 0 at [a] and 1 at [b]; backwards
+  /// when [to] is the smaller.
+  static Path _runPart(Offset center, double radius, int a, int b,
+      double from, double to) {
+    final arc = _arcOf(center, radius, a, b);
+    if (arc == null) {
+      final start = HexGeometry.edgeMidpoint(center, radius, a);
+      final end = HexGeometry.edgeMidpoint(center, radius, b);
+      final p = Offset.lerp(start, end, from)!, q = Offset.lerp(start, end, to)!;
+      return Path()
+        ..moveTo(p.dx, p.dy)
+        ..lineTo(q.dx, q.dy);
+    }
+    return Path()
+      ..arcTo(Rect.fromCircle(center: arc.centre, radius: arc.radius),
+          arc.start + arc.sweep * from, arc.sweep * (to - from), true);
+  }
+
+  /// The circular arc that track from the middle of side [a] to the middle
+  /// of side [b] follows, as tile art draws it, leaving both sides at right
+  /// angles: its centre and radius, the angle at [a], and how far it turns
+  /// to [b], the short way round. Null for opposite sides, straight across.
+  /// A tight turn hugs the corner the two sides share and never comes near
+  /// the middle of the hex; bending track through the middle instead --
+  /// which this used to do -- makes every curve too wide, and a
+  /// photographed curve then matches no template well.
+  static ({Offset centre, double radius, double start, double sweep})? _arcOf(
+      Offset center, double radius, int a, int b) {
+    final centre = _arcCentre(center, radius, a, b);
+    if (centre == null) return null;
     final from = HexGeometry.edgeMidpoint(center, radius, a);
     final to = HexGeometry.edgeMidpoint(center, radius, b);
-    final centre = _arcCentre(center, radius, a, b);
-    if (centre == null) {
-      return Path()
-        ..moveTo(from.dx, from.dy)
-        ..lineTo(to.dx, to.dy);
-    }
-    final r = (from - centre).distance;
     final start = math.atan2(from.dy - centre.dy, from.dx - centre.dx);
     final end = math.atan2(to.dy - centre.dy, to.dx - centre.dx);
     var sweep = end - start;
@@ -720,16 +753,20 @@ class TileRenderer {
     while (sweep > math.pi) {
       sweep -= 2 * math.pi;
     }
-    return Path()
-      ..addArc(Rect.fromCircle(center: centre, radius: r), start, sweep);
+    return (
+      centre: centre,
+      radius: (from - centre).distance,
+      start: start,
+      sweep: sweep,
+    );
   }
 
-  /// Points along the run [_paintRun] draws from side [a] to side [b] of a
-  /// hex of circumradius [radius] centred on [center], [count] + 1 of them
-  /// evenly spaced from one side to the other.
+  /// Points along the run of track from side [a] to side [b] of a hex of
+  /// circumradius [radius] centred on [center], as tiles draw it, [count] +
+  /// 1 of them evenly spaced from one side to the other.
   static List<Offset> runPoints(
       Offset center, double radius, int a, int b, int count) {
-    final metric = _runPath(center, radius, a, b).computeMetrics().first;
+    final metric = _runPart(center, radius, a, b, 0, 1).computeMetrics().first;
     return [
       for (int i = 0; i <= count; i++)
         metric.getTangentForOffset(metric.length * i / count)!.position,
@@ -811,11 +848,21 @@ class TilePainter extends CustomPainter {
 }
 
 /// Where a tile's stops sit, in a hex of circumradius 1 centred on the
-/// origin, and which of them sit on a run of track from side to side: by
-/// stop, the run's two sides and the way it goes where the stop is.
+/// origin, and which of them sit on a run of track from side to side.
 class _StopLayout {
   final Map<int, Offset> at;
-  final Map<int, (int, int, Offset)> riding;
+  final Map<int, _Ride> riding;
 
   const _StopLayout(this.at, this.riding);
+}
+
+/// A stop sitting on the run of track from side [a] to side [b]: a fraction
+/// [t] of the way along it, where the track goes [along].
+class _Ride {
+  final int a;
+  final int b;
+  final double t;
+  final Offset along;
+
+  const _Ride(this.a, this.b, this.t, this.along);
 }

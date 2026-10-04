@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:eighteen_xx_calculator/services/training_log.dart';
+import 'package:eighteen_scanner/services/training_log.dart';
 import 'package:flutter/foundation.dart';
 
 /// A training log that keeps everything in memory and answers immediately,

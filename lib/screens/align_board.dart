@@ -125,13 +125,13 @@ class _AlignBoardState extends State<AlignBoard> {
   List<MapHex> _chooseAnchors() {
     final focus = widget.focus;
     if (focus == null || focus.length < 4) return widget.title.map.anchors;
-    // For a close-up, spread the handles over the hexes in frame.
+    // For a close-up, spread the handles over the hexes in frame, none
+    // beside another where they can be kept apart.
     final hexes = [
       for (final c in focus)
         if (widget.title.map.at(c) != null) widget.title.map.at(c)!,
     ];
-    final subMap = MapLayout(hexes);
-    return subMap.anchors;
+    return MapLayout(hexes).closeUpAnchors;
   }
 
   Future<void> _detect() async {

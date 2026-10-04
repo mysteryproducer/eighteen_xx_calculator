@@ -321,6 +321,7 @@ class TrainRouter {
     for (final home in homes) {
       if (!_canVisit(spec, home)) continue;
       final homeCounts = _counts(spec, home) ? 1 : 0;
+      final homeTowns = spec.allowed(home) ? 1 : 0;
       final arms = _armsFrom(home, spec, excluded, budget)
         ..sort((a, b) => b.best.compareTo(a.best));
       for (final a in arms) {
@@ -330,19 +331,26 @@ class TrainRouter {
       outer:
       for (int i = 0; i + 1 < arms.length; i++) {
         final a = arms[i];
-        if (a.best + arms[i + 1].best + spec.earns(home) + cap <= threshold) {
+        if ((a.best + arms[i + 1].best + spec.earns(home) + cap) *
+                spec.multiplier <=
+            threshold) {
           break;
         }
         for (int j = i + 1; j < arms.length; j++) {
           final b = arms[j];
-          if (a.best + b.best + spec.earns(home) + cap <= threshold) break;
+          if ((a.best + b.best + spec.earns(home) + cap) * spec.multiplier <=
+              threshold) {
+            break;
+          }
           if (!budget.take()) {
             _cutShort = true;
             break outer;
           }
           final fits = spec.kind == TrainKind.hexes
               ? 1 + a.hexes + b.hexes <= spec.distance
-              : homeCounts + a.counted + b.counted <= spec.distance;
+              : spec.used(homeCounts + a.counted + b.counted,
+                      homeTowns + a.towns + b.towns) <=
+                  spec.distance;
           if (!fits ||
               _overlap(a.stations, b.stations) ||
               _overlap(a.segments, b.segments)) {
@@ -371,14 +379,17 @@ class TrainRouter {
     final stations = Uint32List(_stationWords);
     final segments = Uint32List(_segmentWords);
     final homeCounts = _counts(spec, home) ? 1 : 0;
+    final homeTowns = spec.allowed(home) ? 1 : 0;
 
-    void walk(StationNode current, int counted, int hexes, bool narrow) {
+    void walk(StationNode current, int counted, int towns, int hexes,
+        bool narrow) {
       if (stops.isNotEmpty) {
         arms.add(_Arm(
           stops: List.of(stops),
           track: List.of(track),
           best: _armBest(spec, stops),
           counted: counted,
+          towns: towns,
           hexes: hexes,
           stations: Uint32List.fromList(stations),
           segments: Uint32List.fromList(segments),
@@ -408,16 +419,18 @@ class TrainRouter {
           continue;
         }
         final nowCounted = counted + (_counts(spec, next) ? 1 : 0);
+        final nowTowns = towns + (spec.allowed(next) ? 1 : 0);
         final nowHexes = hexes + edge.hexSteps;
         final within = spec.kind == TrainKind.hexes
             ? 1 + nowHexes <= spec.distance
-            : homeCounts + nowCounted <= spec.distance;
+            : spec.used(homeCounts + nowCounted, homeTowns + nowTowns) <=
+                spec.distance;
         if (!within) continue;
         _set(stations, n);
         _orInto(segments, bits);
         stops.add(next);
         track.add(edge);
-        walk(next, nowCounted, nowHexes, narrow || edge.narrow);
+        walk(next, nowCounted, nowTowns, nowHexes, narrow || edge.narrow);
         stops.removeLast();
         track.removeLast();
         _clear(stations, n);
@@ -425,7 +438,7 @@ class TrainRouter {
       }
     }
 
-    walk(home, 0, 0, false);
+    walk(home, 0, 0, 0, false);
     return arms;
   }
 
@@ -473,6 +486,10 @@ class TrainRouter {
     }
     final segments = Uint32List.fromList(a.segments);
     if (b != null) _orInto(segments, b.segments);
+    // 1807's doubling trains double the lot.
+    if (spec.multiplier != 1) {
+      bonus += (revenue + bonus) * (spec.multiplier - 1);
+    }
     return _Candidate(
       stops: stops,
       track: track,
@@ -493,6 +510,9 @@ class TrainRouter {
       ..sort((a, b) => spec.earns(b).compareTo(spec.earns(a)));
     final paid = byRevenue.sublist(0, pays);
     final rest = byRevenue.sublist(pays);
+    // A train paid at off-board areas alone (1807's 5+5E) is paid for its
+    // best few of those, and nothing else.
+    if (spec.paidAt != null) return paid;
     if (!paid.any((s) => s.holds(company))) {
       paid.removeLast();
       final tokened = rest.where((s) => s.holds(company)).firstOrNull;
@@ -575,7 +595,9 @@ class TrainRouter {
       final most = switch (spec.kind) {
         TrainKind.express => spec.pays! + reds,
         TrainKind.hexes => 2 * spec.distance,
-        TrainKind.stops => spec.freeTowns ? graph.stations.length : spec.distance,
+        TrainKind.stops => spec.freeTowns
+            ? graph.stations.length
+            : spec.distance + spec.townAllowance,
       };
       cap += rules.narrowBonus * math.min(most, graph.stations.length);
     }
@@ -597,6 +619,9 @@ class TrainRouter {
 
   /// Whether a train of [spec]'s may stop at [station] at all.
   bool _canVisit(_Spec spec, StationNode station) {
+    if (spec.visits case final kinds? when !kinds.contains(station.kind)) {
+      return false;
+    }
     if (title.routeRules.noEmptyStops && spec.earns(station) <= 0) {
       return false;
     }
@@ -606,9 +631,12 @@ class TrainRouter {
     return true;
   }
 
-  /// Whether [station] counts towards [spec]'s reach in stops.
+  /// Whether [station] counts towards [spec]'s reach in stops as it is
+  /// passed (towns within an allowance are tallied apart: see
+  /// [_Spec.allowed]).
   bool _counts(_Spec spec, StationNode station) =>
-      !(spec.freeTowns && station.kind == StationKind.town);
+      !((spec.freeTowns || spec.allowed(station)) &&
+          station.kind == StationKind.town);
 
   /// The track out of [station], richest stop first, so a search cut short
   /// has tried the likeliest routes.
@@ -644,23 +672,50 @@ class TrainRouter {
   }
 }
 
-/// How a train runs, from its title's description of it.
+/// How a train runs, from its title's description of it (see
+/// `TrainType`).
 class _Spec {
   final String name;
   final TrainKind kind;
   final int distance;
   final int? pays;
   final bool freeTowns;
+  final int townAllowance;
+  final bool townsPay;
+  final Set<StationKind>? visits;
+  final Set<StationKind>? paidAt;
+  final int multiplier;
 
   /// A D train, which some stops pay more (see `StationNode.revenueFor`).
   final bool diesel;
 
   _Spec(this.name, this.kind, this.distance,
-      {this.pays, this.freeTowns = false})
+      {this.pays,
+      this.freeTowns = false,
+      this.townAllowance = 0,
+      this.townsPay = true,
+      this.visits,
+      this.paidAt,
+      this.multiplier = 1})
       : diesel = name.toUpperCase() == 'D';
 
   /// What a stop pays this train.
-  int earns(StationNode s) => diesel ? s.revenueFor(name) : s.revenue;
+  int earns(StationNode s) {
+    if (s.kind == StationKind.town && !townsPay) return 0;
+    if (paidAt != null && !paidAt!.contains(s.kind)) return 0;
+    return diesel ? s.revenueFor(name) : s.revenue;
+  }
+
+  /// Whether [s] is a town among the few that don't count towards the
+  /// train's reach (see [townAllowance]): tallied apart, as only those
+  /// past the allowance count.
+  bool allowed(StationNode s) =>
+      townAllowance > 0 && s.kind == StationKind.town;
+
+  /// How much of its reach a train has used with [counted] stops that
+  /// count and [towns] of its allowance's kind.
+  int used(int counted, int towns) =>
+      counted + math.max(0, towns - townAllowance);
 
   /// The train called [name], or for a title that doesn't list it, a train
   /// of as many stops as the number it starts with.
@@ -668,7 +723,13 @@ class _Spec {
     final type = title.trainNamed(name);
     if (type != null) {
       return _Spec(name, type.kind, type.distance,
-          pays: type.pays, freeTowns: type.freeTowns);
+          pays: type.pays,
+          freeTowns: type.freeTowns,
+          townAllowance: type.townAllowance,
+          townsPay: type.townsPay,
+          visits: type.visits,
+          paidAt: type.paidAt,
+          multiplier: type.multiplier);
     }
     final number = int.tryParse(RegExp(r'^\d+').stringMatch(name) ?? '');
     if (number != null) {
@@ -687,6 +748,7 @@ class _Arm {
   final List<TrackEdge> track;
   final int best;
   final int counted;
+  final int towns;
   final int hexes;
   final Uint32List stations;
   final Uint32List segments;
@@ -697,6 +759,7 @@ class _Arm {
     required this.track,
     required this.best,
     required this.counted,
+    required this.towns,
     required this.hexes,
     required this.stations,
     required this.segments,

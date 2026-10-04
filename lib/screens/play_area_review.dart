@@ -8,7 +8,7 @@ import '../models/game_session.dart';
 import '../models/game_title.dart';
 import '../processing/play_area_reader.dart';
 import '../widgets/company_assets.dart';
-import 'players_screen.dart';
+import '../widgets/holdings_table.dart' show askPlayerName;
 
 /// What the user confirmed a photo of a player's area shows.
 class PlayAreaConfirmed {
@@ -33,8 +33,9 @@ class PlayAreaConfirmed {
 
   /// Records it in [session]: a company's trains and tokens replace what
   /// was noted before, and so do the player's certificates in each company
-  /// shown.
-  void applyTo(GameSession session) {
+  /// shown -- which say what a share of it is, where they can't be made of
+  /// whole shares as the game had it.
+  void applyTo(GameSession session, GameTitle title) {
     trains.forEach((company, list) {
       if (list.isEmpty) {
         session.companyTrains.remove(company);
@@ -46,8 +47,12 @@ class PlayAreaConfirmed {
     final whose = player;
     if (whose != null && certificates.isNotEmpty) {
       session.addPlayer(whose);
-      certificates.forEach((company, percents) =>
-          session.setHolding(whose, company, percents));
+      certificates.forEach((id, percents) {
+        if (title.companyById(id) case final company?) {
+          session.stakeFromCertificates(company, percents);
+        }
+        session.setHolding(whose, id, percents);
+      });
     }
   }
 }

@@ -217,7 +217,7 @@ class BoardGraph {
         final seg = def.segments[i];
         // Track printed for a line that hasn't opened yet carries nothing.
         if (seg.future) continue;
-        final id = '${hex.row},${hex.col}#$i';
+        final id = _segmentId(hex, i);
         if (seg.narrow) narrow.add(id);
         link(portFor(seg.a), portFor(seg.b), id);
       }
@@ -312,6 +312,24 @@ class BoardGraph {
     }
 
     return BoardGraph(stations: stations, adjacency: adjacency);
+  }
+
+  /// The id in [TrackEdge.segments] of segment [index] of the tile on
+  /// [hex].
+  static String _segmentId(HexCoord hex, int index) =>
+      '${hex.row},${hex.col}#$index';
+
+  /// The hex and the tile's segment, by its index among the tile's
+  /// segments, that an id in [TrackEdge.segments] names; null for a hex side
+  /// crossed.
+  static (HexCoord, int)? tileSegmentOf(String id) {
+    final hash = id.indexOf('#');
+    if (hash < 0) return null;
+    final [row, col] = id.substring(0, hash).split(',');
+    return (
+      HexCoord(int.parse(row), int.parse(col)),
+      int.parse(id.substring(hash + 1)),
+    );
   }
 
   static HexCoord _hexOfPort(String port) {

@@ -2,9 +2,9 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show Rect;
 
-import 'package:eighteen_xx_calculator/models/game_title.dart';
-import 'package:eighteen_xx_calculator/processing/play_area_reader.dart';
-import 'package:eighteen_xx_calculator/processing/revenue_ocr.dart';
+import 'package:eighteen_scanner/models/game_title.dart';
+import 'package:eighteen_scanner/processing/play_area_reader.dart';
+import 'package:eighteen_scanner/processing/revenue_ocr.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 
@@ -344,6 +344,173 @@ final urPhoto = [
   line([0.900, 0.633, 0.926, 0.649], 'shift'),
 ];
 
+/// Iyo Railroad's charter, turned upright: a 3 and a 5, its places FREE
+/// and ¥40 -- the ¥40 under its one token left, so only FREE is read -- on
+/// a keyboard (CAP_3D37EB26, turned a quarter; 1080 x 1920).
+final iyoPhoto = [
+  line([0.031, 0.142, 0.045, 0.160], 'F1'),
+  line([0.073, 0.212, 0.089, 0.240], '@'),
+  line([0.073, 0.258, 0.089, 0.292], '2'),
+  line([0.042, 0.535, 0.062, 0.576], 'A'),
+  line([0.090, 0.687, 0.108, 0.729], 'Z'),
+  line([0.045, 0.902, 0.102, 0.941], 'option'),
+  line([0.119, 0.129, 0.134, 0.147], 'F2'),
+  line([0.112, 0.370, 0.137, 0.411], 'W'),
+  line([0.138, 0.522, 0.156, 0.558], 'S'),
+  line([0.539, 0.021, 0.557, 0.044], 'K'),
+  line([0.289, 0.054, 0.304, 0.078], 'Q'),
+  line([0.201, 0.067, 0.224, 0.090], '80'),
+  line([0.269, 0.150, 0.528, 0.204], 'IYo RAILROAD'),
+  line([0.163, 0.202, 0.176, 0.227], '#'),
+  line([0.443, 0.294, 0.601, 0.339], 'Trains/Treasury'),
+  line([0.304, 0.444, 0.367, 0.570], '3'),
+  line([0.408, 0.437, 0.461, 0.553], '5'),
+  line([0.599, 0.468, 0.616, 0.496], '·'),
+  line([0.360, 0.749, 0.376, 0.780], 'R'),
+  line([0.488, 0.742, 0.588, 0.772], 'E8* C5 1 FE TRST69 IA1E'),
+  line([0.621, 0.010, 0.642, 0.034], 'DII'),
+  line([0.629, 0.059, 0.642, 0.075], 'F8'),
+  line([0.711, 0.049, 0.724, 0.065], 'F9'),
+  line([0.789, 0.036, 0.807, 0.054], 'F10'),
+  line([0.871, 0.028, 0.887, 0.041], 'F11'),
+  line([0.949, 0.018, 0.967, 0.031], 'F12'),
+  line([0.919, 0.090, 0.937, 0.121], '+'),
+  line([0.930, 0.145, 0.940, 0.160], '='),
+  line([0.733, 0.220, 0.766, 0.240], 'FREE'),
+  line([0.980, 0.220, 0.991, 0.253], '}'),
+  line([0.907, 0.282, 0.917, 0.315], '['),
+  line([0.939, 0.372, 0.949, 0.385], '11'),
+  line([0.621, 0.463, 0.677, 0.512], '450'),
+];
+
+/// The same charter a minute before, three cards on it -- 3, 3 and 5 -- and
+/// the keyboard's 3 key in view (CAP_D72F04D4).
+final iyoThreeCards = [
+  line([0.055, 0.140, 0.071, 0.158], 'F2'),
+  line([0.013, 0.233, 0.029, 0.264], '@'),
+  line([0.015, 0.284, 0.031, 0.320], '2'),
+  line([0.060, 0.406, 0.087, 0.447], 'W'),
+  line([0.000, 0.581, 0.019, 0.623], 'A'),
+  line([0.054, 0.736, 0.073, 0.775], 'Z'),
+  line([0.022, 0.943, 0.076, 0.982], 'option'),
+  line([0.141, 0.062, 0.167, 0.093], '80'),
+  line([0.147, 0.121, 0.163, 0.142], 'F3'),
+  line([0.108, 0.261, 0.124, 0.305], '3'),
+  line([0.161, 0.486, 0.214, 0.607], '3'),
+  line([0.112, 0.943, 0.124, 0.964], 'C'),
+  line([0.122, 0.941, 0.129, 0.959], '('),
+  line([0.506, 0.000, 0.525, 0.023], 'K'),
+  line([0.235, 0.044, 0.253, 0.072], 'Q'),
+  line([0.512, 0.057, 0.526, 0.078], 'F7'),
+  line([0.420, 0.072, 0.436, 0.093], 'F6'),
+  line([0.330, 0.088, 0.346, 0.109], 'F5'),
+  line([0.240, 0.106, 0.254, 0.121], 'F4'),
+  line([0.233, 0.217, 0.513, 0.284], 'IYo RAILROAD'),
+  line([0.235, 0.284, 0.331, 0.320], '#7#ü'),
+  line([0.420, 0.393, 0.578, 0.429], 'Trains/Treacn'),
+  line([0.374, 0.483, 0.437, 0.618], '3'),
+  line([0.529, 0.468, 0.584, 0.587], '5'),
+  line([0.599, 0.041, 0.619, 0.059], 'F8'),
+  line([0.692, 0.026, 0.706, 0.044], 'F9'),
+  line([0.254, 0.742, 0.364, 0.778], 'B#5500NE PE SC HR BO IEL'),
+  line([0.235, 0.750, 0.385, 0.823], 'RUSTED BY 6'),
+  line([0.477, 0.765, 0.506, 0.801], 'RU'),
+  line([0.616, 0.778, 0.717, 0.801], 'H 8* C5 1 HE 75 SC B9 100 C'),
+  line([0.778, 0.010, 0.798, 0.031], 'F10'),
+  line([0.869, 0.000, 0.887, 0.013], 'F11'),
+  line([0.833, 0.096, 0.847, 0.111], '-'),
+  line([0.920, 0.070, 0.938, 0.106], '+'),
+  line([0.926, 0.132, 0.939, 0.152], '='),
+  line([0.891, 0.233, 0.903, 0.269], '{'),
+  line([0.730, 0.307, 0.766, 0.334], 'FREE'),
+  line([0.802, 0.310, 0.826, 0.331], '·40'),
+  line([0.749, 0.481, 0.805, 0.530], '450'),
+  line([0.891, 0.545, 0.908, 0.594], '?'),
+  line([0.978, 0.220, 0.990, 0.253], '}'),
+];
+
+/// Takamatsu-Kotohira Electric Rail's charter: a D and a 3, the 3's
+/// `RUSTED BY 6` well down the card from its figure (CAP_35C8758A).
+final koPhoto = [
+  line([0.195, 0.225, 0.205, 0.238], 'F1'),
+  line([0.067, 0.235, 0.089, 0.253], 'esc'),
+  line([0.084, 0.313, 0.094, 0.326], '~'),
+  line([0.160, 0.344, 0.169, 0.367], '1'),
+  line([0.196, 0.447, 0.211, 0.475], 'Q'),
+  line([0.067, 0.491, 0.090, 0.514], 'tab'),
+  line([0.070, 0.618, 0.132, 0.646], 'caps lock'),
+  line([0.070, 0.755, 0.103, 0.780], 'shift'),
+  line([0.102, 0.827, 0.118, 0.850], 'fn'),
+  line([0.180, 0.819, 0.193, 0.837], '^'),
+  line([0.148, 0.876, 0.198, 0.904], 'control'),
+  line([0.233, 0.333, 0.246, 0.364], '2'),
+  line([0.218, 0.571, 0.233, 0.605], 'A'),
+  line([0.259, 0.700, 0.272, 0.731], 'Z'),
+  line([0.230, 0.871, 0.275, 0.899], 'option'),
+  line([0.703, 0.116, 0.724, 0.140], 'DII'),
+  line([0.776, 0.111, 0.794, 0.132], 'DD'),
+  line([0.782, 0.155, 0.795, 0.168], 'F9'),
+  line([0.336, 0.160, 0.356, 0.186], '80'),
+  line([0.413, 0.152, 0.424, 0.173], 'Q'),
+  line([0.346, 0.236, 0.623, 0.301], 'TAKAMATSU - KOTOHIRA'),
+  line([0.347, 0.294, 0.509, 0.337], 'ELECTRIC RAIL'),
+  line([0.927, 0.137, 0.942, 0.152], 'F11'),
+  line([0.853, 0.147, 0.869, 0.163], 'F10'),
+  line([0.897, 0.217, 0.908, 0.230], '-'),
+  line([0.747, 0.310, 0.776, 0.326], 'FREE'),
+  line([0.804, 0.305, 0.824, 0.326], '·40'),
+  line([0.922, 0.377, 0.933, 0.398], 'F'),
+  line([0.499, 0.393, 0.631, 0.426], 'Trains/Treasury'),
+  line([0.358, 0.481, 0.411, 0.581], 'D'),
+  line([0.440, 0.499, 0.484, 0.597], '3'),
+  line([0.616, 0.491, 0.666, 0.535], '180'),
+  line([0.940, 0.592, 0.952, 0.623], '?'),
+  line([0.515, 0.718, 0.600, 0.736], 'E5500F MI XC BE I TE'),
+  line([0.500, 0.738, 0.617, 0.769], 'RUSTED BY 6'),
+  line([0.879, 0.788, 0.923, 0.817], 'option'),
+  line([0.968, 0.204, 0.983, 0.230], '+'),
+  line([0.974, 0.251, 0.984, 0.266], '='),
+];
+
+/// Tosa Kuroshio Railroad's charter, a 5 on it, and three of Sanuki
+/// Railway's certificates; the keyboard's 0 key reads `:0:`
+/// (CAP_23127859; 1920 x 1080, read as it is).
+final kuPhoto = [
+  line([0.141, 0.331, 0.161, 0.351], 'esc'),
+  line([0.366, 0.261, 0.384, 0.282], '80'),
+  line([0.246, 0.279, 0.257, 0.300], ':0:'),
+  line([0.555, 0.274, 0.565, 0.287], 'F6'),
+  line([0.494, 0.282, 0.506, 0.295], 'F5'),
+  line([0.433, 0.292, 0.445, 0.305], 'F4'),
+  line([0.372, 0.302, 0.384, 0.313], 'F3'),
+  line([0.311, 0.310, 0.321, 0.323], 'F2'),
+  line([0.249, 0.318, 0.257, 0.331], 'F1'),
+  line([0.224, 0.382, 0.573, 0.432], 'TOSA KUROSHIO RAILROAD'),
+  line([0.225, 0.429, 0.350, 0.455], '+#<56'),
+  line([0.349, 0.504, 0.459, 0.532], 'Trains/Treasury'),
+  line([0.387, 0.574, 0.426, 0.610], '450'),
+  line([0.241, 0.584, 0.276, 0.664], '5'),
+  line([0.302, 0.778, 0.369, 0.794], 'A DA CS 1 FE 35 SE E D 51'),
+  line([0.616, 0.264, 0.625, 0.276], 'F7'),
+  line([0.600, 0.442, 0.625, 0.457], 'FREE'),
+  line([0.650, 0.318, 0.658, 0.333], '*'),
+  line([0.648, 0.354, 0.661, 0.380], '8'),
+  line([0.914, 0.217, 0.929, 0.230], 'F12'),
+  line([0.709, 0.289, 0.854, 0.328], 'SANUKI RAILWAY'),
+  line([0.760, 0.323, 0.802, 0.341], 'all t ill'),
+  line([0.693, 0.385, 0.746, 0.424], '1SHARE'),
+  line([0.924, 0.377, 0.932, 0.403], '}'),
+  line([0.831, 0.393, 0.871, 0.432], '10%'),
+  line([0.686, 0.491, 0.737, 0.540], 'TSHARE'),
+  line([0.695, 0.620, 0.744, 0.646], 'LSHARE'),
+  line([0.820, 0.537, 0.862, 0.589], '10%'),
+  line([0.830, 0.618, 0.869, 0.659], '10%'),
+  line([0.735, 0.764, 0.787, 0.791], 'command'),
+  line([0.810, 0.757, 0.843, 0.778], 'option'),
+  line([0.972, 0.310, 0.999, 0.328], 'delet'),
+  line([0.980, 0.522, 0.999, 0.540], 'ret'),
+];
+
 /// A photo the size of the GB one, plain card where the token places are,
 /// with a dark token drawn over the place above "40 Fr." and an empty ring
 /// above "0 Fr.".
@@ -538,6 +705,40 @@ void main() {
       final reading =
           PlayAreaReader(g1889).read(trUpsideDown, aspect: 1080 / 1920);
       expect(reading.upright, 0);
+    });
+
+    test('a company whose name is short: Iyo, found only whole', () {
+      final reading = PlayAreaReader(g1889).read(iyoPhoto, aspect: 1920 / 1080);
+      final charter = reading.charters.single;
+      expect(charter.company.id, 'IR');
+      expect(charter.trains, ['3', '5']);
+      // FREE alone read; the place along from it is under the token.
+      expect(charter.slots.map((s) => s.cost), [0, 40]);
+    });
+
+    test("a keyboard's keys are not trains or places", () {
+      final iyo = PlayAreaReader(g1889)
+          .read(iyoThreeCards, aspect: 1920 / 1080)
+          .charters
+          .single;
+      expect(iyo.trains, ['3', '3', '5']);
+      final ku =
+          PlayAreaReader(g1889).read(kuPhoto, aspect: 1920 / 1080);
+      expect(ku.charters.single.company.id, 'KU');
+      expect(ku.charters.single.trains, ['5']);
+      expect(ku.charters.single.slots.map((s) => s.cost), [0]);
+      expect(ku.certificates.single.company.id, 'SR');
+      expect(ku.certificates.single.percents, [10, 10, 10]);
+    });
+
+    test('a card whose figure was read is not counted again from its small '
+        'print', () {
+      final charter = PlayAreaReader(g1889)
+          .read(koPhoto, aspect: 1920 / 1080)
+          .charters
+          .single;
+      expect(charter.company.id, 'KO');
+      expect(charter.trains, ['D', '3']);
     });
 
     test("a company named a little differently is still found", () {

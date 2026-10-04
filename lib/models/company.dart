@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 /// A railway company on the board, identified by its station token colour.
@@ -33,6 +35,13 @@ class Company {
   /// The share certificates it is divided into, as percentages: the
   /// director's first.
   final List<int> shares;
+
+  /// The percentage one share of it is: its smallest certificate (a
+  /// director's of 20% is two shares of 10%). A minor that prints none is
+  /// one share, owned whole; any other company, 10%.
+  int get shareUnit => shares.isEmpty
+      ? (kind == 'minor' ? 100 : 10)
+      : shares.reduce(math.min);
 
   const Company({
     required this.id,

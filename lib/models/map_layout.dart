@@ -186,7 +186,8 @@ class MapLayout {
   /// Where the hex nearest a corner has no name, a named place a step or two
   /// from it is taken instead -- the one furthest out, so the four stay
   /// spread: a board like 1889's prints no grid references, only its towns'
-  /// names, and a bare hex among bare hexes is hard to find.
+  /// names, and a bare hex among bare hexes is hard to find. Never one
+  /// beside another.
   List<MapHex> get anchors {
     final bounds = boardBounds;
     final corners = [
@@ -214,6 +215,8 @@ class MapLayout {
         for (final h in hexes) {
           if (chosen.contains(h) || h.name == null) continue;
           if (h.coord.distanceTo(best.coord) > 2) continue;
+          // Never beside one already chosen.
+          if (chosen.any((c) => c.coord.distanceTo(h.coord) <= 1)) continue;
           final out = (h.coord.boardCenter - bounds.center).distance;
           if (out > furthest) {
             furthest = out;
@@ -225,6 +228,77 @@ class MapLayout {
       chosen.add(best);
     }
     return chosen;
+  }
+
+  /// Four of a close-up's few hexes to drag: as far apart as they go -- none
+  /// side by side where four can be found so, otherwise as few pairs as can
+  /// be -- then spread over as much of the frame as possible. Two handles
+  /// side by side hold nothing of the map's size or turn, and were very hard
+  /// to line up (a close-up in 1889's west, 4 October); a named place helps
+  /// find a hex, but in a close-up its neighbours do too, so a name counts
+  /// for only a little.
+  List<MapHex> get closeUpAnchors {
+    if (hexes.length <= 4) return List.of(hexes);
+    List<MapHex> best = hexes.take(4).toList();
+    (int, int, double)? bestScore;
+    bool better((int, int, double) a, (int, int, double) b) =>
+        a.$1 != b.$1 ? a.$1 > b.$1 : a.$2 != b.$2 ? a.$2 > b.$2 : a.$3 > b.$3;
+    final n = hexes.length;
+    for (var a = 0; a < n; a++) {
+      for (var b = a + 1; b < n; b++) {
+        for (var c = b + 1; c < n; c++) {
+          for (var d = c + 1; d < n; d++) {
+            final four = [hexes[a], hexes[b], hexes[c], hexes[d]];
+            var nearest = 1 << 30, touching = 0;
+            for (var i = 0; i < 4; i++) {
+              for (var j = i + 1; j < 4; j++) {
+                final apart = four[i].coord.distanceTo(four[j].coord);
+                if (apart < nearest) nearest = apart;
+                if (apart <= 1) touching++;
+              }
+            }
+            final named = four.where((h) => h.name != null).length;
+            final score = (
+              nearest,
+              -touching,
+              _hullArea([for (final h in four) h.coord.boardCenter]) *
+                  (1 + 0.1 * named),
+            );
+            if (bestScore == null || better(score, bestScore)) {
+              bestScore = score;
+              best = four;
+            }
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  /// The area of the smallest convex shape round [points].
+  static double _hullArea(List<Offset> points) {
+    final sorted = [...points]
+      ..sort((a, b) => a.dx != b.dx ? a.dx.compareTo(b.dx) : a.dy.compareTo(b.dy));
+    double cross(Offset o, Offset a, Offset b) =>
+        (a.dx - o.dx) * (b.dy - o.dy) - (a.dy - o.dy) * (b.dx - o.dx);
+    final hull = <Offset>[];
+    for (final pass in [sorted, sorted.reversed.toList()]) {
+      final start = hull.length;
+      for (final p in pass) {
+        while (hull.length >= start + 2 &&
+            cross(hull[hull.length - 2], hull.last, p) <= 0) {
+          hull.removeLast();
+        }
+        hull.add(p);
+      }
+      hull.removeLast();
+    }
+    var twice = 0.0;
+    for (var i = 0; i < hull.length; i++) {
+      final p = hull[i], q = hull[(i + 1) % hull.length];
+      twice += p.dx * q.dy - q.dx * p.dy;
+    }
+    return twice.abs() / 2;
   }
 
   /// The hexes of [coords] and everything within [radius] steps of them that

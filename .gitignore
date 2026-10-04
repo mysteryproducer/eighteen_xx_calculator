@@ -47,3 +47,6 @@ app.*.map.json
 # Labelled photos for measuring and training the recognizer; too big for
 # git (see test/build_dataset_test.dart).
 /dataset/
+
+# The Python environment for tool/package_dataset.py.
+/.venv/

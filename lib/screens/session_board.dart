@@ -30,6 +30,7 @@ import '../widgets/board_map.dart';
 import '../widgets/company_assets.dart';
 import '../widgets/tile_choices.dart';
 import 'align_board.dart';
+import 'end_game.dart';
 import 'capture.dart';
 import 'play_area_review.dart';
 import 'players_screen.dart';
@@ -68,6 +69,24 @@ class SessionBoard extends StatefulWidget {
 
 class _SessionBoardState extends State<SessionBoard> {
   late BoardMapGeometry _geometry;
+
+  /// The board's zoom, and the room it is shown in: between them, how big
+  /// the drawn map is on screen ([_labelScale]).
+  final TransformationController _zoom = TransformationController();
+  Size _viewport = Size.zero;
+
+  /// Screen pixels per pixel of the drawn map, in steps of a quarter, so
+  /// that the board is drawn again for its place names only when a pinch
+  /// moves it on a step (see `BoardMapPainter.labelScale`).
+  double _labelScale = 0;
+
+  /// The hexes that needed a closer look when the user put the strip
+  /// saying so away: it stays away until another hex needs one.
+  Set<HexCoord> _closerLookDismissed = {};
+
+  /// How this title's board looks bare, from whichever game of it was last
+  /// photographed empty (see `BoardReader.read`).
+  BareBoard _bareBoard = const {};
   late BoardGraph _graph;
   late BoardReader _reader;
   late TileRules _rules;
@@ -114,6 +133,16 @@ class _SessionBoardState extends State<SessionBoard> {
   void initState() {
     super.initState();
     _geometry = BoardMapGeometry(_map, turn: widget.title.displayTurn);
+    _zoom.addListener(_zoomed);
+    widget.store.bareBoard(widget.title.id).then((board) async {
+      // Until a game photographs the board empty, the games of it already
+      // played say how its hexes look bare.
+      if (board.isEmpty) {
+        board = GameSession.bareLooks(
+            await widget.store.list(titleId: widget.title.id));
+      }
+      if (mounted) _bareBoard = board;
+    });
     _reader = BoardReader(widget.title);
     _rules = TileRules(widget.title);
     // A token saved before this title had its own companies names a plain
@@ -127,12 +156,34 @@ class _SessionBoardState extends State<SessionBoard> {
     _rebuild();
   }
 
+  @override
+  void dispose() {
+    _zoom.dispose();
+    super.dispose();
+  }
+
+  /// Works out [_labelScale] afresh: the board fitted to the room it has,
+  /// then zoomed.
+  void _zoomed() {
+    final size = _geometry.size;
+    if (_viewport.isEmpty || size.isEmpty) return;
+    final fitted = math.min(
+        _viewport.width / size.width, _viewport.height / size.height);
+    final scale = fitted * _zoom.value.getMaxScaleOnAxis();
+    final step = math
+        .pow(1.25, (math.log(scale) / math.log(1.25)).round())
+        .toDouble();
+    if (step != _labelScale) setState(() => _labelScale = step);
+  }
+
   void _rebuild() {
     _graph = _session.graph(widget.title);
     _misfits = {
       for (final hex in _map.hexes)
         if (_session.tileAt(hex) case final tile?)
-          if (!_rules.fits(hex, tile)) hex.coord,
+          if (!_rules.fits(hex, tile) ||
+              _session.overSupply(widget.title, hex) != null)
+            hex.coord,
     };
     _tokenProblems = _session.tokenProblems(widget.title);
     RevenueResolver.apply(
@@ -315,7 +366,7 @@ class _SessionBoardState extends State<SessionBoard> {
       ),
     );
     if (confirmed == null || !mounted) return;
-    confirmed.applyTo(_session);
+    confirmed.applyTo(_session, widget.title);
     await _save();
     await _offerPhase();
     if (!mounted) return;
@@ -376,6 +427,13 @@ class _SessionBoardState extends State<SessionBoard> {
     for (final r in readings) {
       await widget.store.saveHexPicture(_session.id, r.hex.id, r.picture);
     }
+    // The board looks the same bare in the next game of it.
+    _bareBoard = {
+      ..._bareBoard,
+      for (final r in readings)
+        r.hex.id: (r.patch.encodeDarkness(), r.patch.chroma),
+    };
+    await widget.store.saveBareBoard(widget.title.id, _bareBoard);
     if (!mounted) return;
     setState(() {
       _busy = false;
@@ -422,6 +480,7 @@ class _SessionBoardState extends State<SessionBoard> {
               for (final e in _session.glare.entries)
                 if (_map.byId(e.key) case final hex?) hex.coord: e.value,
             },
+      bareBoard: _bareBoard,
     );
     BoardReader.apply(_session, readings, source: source);
     if (source == HexSource.overview) {
@@ -744,7 +803,8 @@ class _SessionBoardState extends State<SessionBoard> {
         _geometry.stationPosition(def, station),
         if (station.kind == StationKind.city)
           for (final circle in TileRenderer.slotPositions(
-              def, station.stationIndex, station.hex.boardCenter, 1))
+              def, station.stationIndex, station.hex.boardCenter, 1,
+              style: widget.title.tileStyle))
             _geometry.toScreen(circle),
       ];
       for (final spot in spots) {
@@ -821,7 +881,8 @@ class _SessionBoardState extends State<SessionBoard> {
         final definition = _rules.contentOf(hex, chosen);
         final problem = tileId == null
             ? null
-            : _rules.explain(hex, PlacedTile(tileId!, rotation: rotation));
+            : _rules.explain(hex, PlacedTile(tileId!, rotation: rotation)) ??
+                _session.overSupply(widget.title, hex, tileId);
         return Padding(
           padding: EdgeInsets.fromLTRB(
               16, 0, 16, MediaQuery.of(context).viewInsets.bottom + 16),
@@ -1578,6 +1639,8 @@ class _SessionBoardState extends State<SessionBoard> {
               switch (choice) {
                 case 'players':
                   _editPlayers();
+                case 'endgame':
+                  _endGame();
                 case 'calibrate':
                   _calibrateColours();
                 case 'forget':
@@ -1588,7 +1651,11 @@ class _SessionBoardState extends State<SessionBoard> {
             itemBuilder: (context) => [
               const PopupMenuItem(
                 value: 'players',
-                child: Text('Players and shares'),
+                child: Text('Players and market'),
+              ),
+              const PopupMenuItem(
+                value: 'endgame',
+                child: Text('End of game'),
               ),
               PopupMenuItem(
                 value: 'calibrate',
@@ -1628,7 +1695,7 @@ class _SessionBoardState extends State<SessionBoard> {
                 _editHex(next);
               },
             )
-          else if (doubtful.isNotEmpty)
+          else if (!_closerLookDismissed.containsAll(doubtful))
             _banner(
               '${doubtful.length} ${doubtful.length == 1 ? 'hex needs' : 'hexes need'} '
               'a closer look '
@@ -1638,50 +1705,62 @@ class _SessionBoardState extends State<SessionBoard> {
               // knows which few hexes changed, and the bar's "All" button is
               // there when the answer really is "check the lot".
               () => setState(() => _choosing = {}),
+              onClose: () =>
+                  setState(() => _closerLookDismissed = {...doubtful}),
             ),
           Expanded(
             child: Stack(
               children: [
-                InteractiveViewer(
-                  minScale: 0.8,
-                  maxScale: 8,
-                  boundaryMargin: const EdgeInsets.all(100),
-                  child: Center(
-                    // The map is laid out at its own size and scaled to fit,
-                    // so what takes taps is exactly what is drawn. Left to
-                    // the window's constraints, the map was cut down to the
-                    // window's size for hit testing while still being
-                    // painted in full, and hexes beyond the window's edge --
-                    // most of 1844 in a Mac's default window -- ignored taps
-                    // however far the board was panned or zoomed.
-                    child: FittedBox(
-                      child: GestureDetector(
-                        key: sessionBoardKey,
-                        behavior: HitTestBehavior.opaque,
-                        onTapUp: (details) => _handleTap(details.localPosition),
-                        child: CustomPaint(
-                          size: _geometry.size,
-                          painter: BoardMapPainter(
-                            title: widget.title,
-                            session: _session,
-                            graph: _graph,
-                            geometry: _geometry,
-                            routes: [
-                              if (_runs case final runs?)
-                                for (final run in runs.runs) run.route
-                              else
-                                ?_route,
-                            ],
-                            highlighted: _highlighted,
-                            misfits: _misfits,
-                            tokenProblems: _tokenProblems,
-                            selected: _choosing ?? const {},
+                LayoutBuilder(builder: (context, constraints) {
+                  if (constraints.biggest != _viewport) {
+                    _viewport = constraints.biggest;
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) _zoomed();
+                    });
+                  }
+                  return InteractiveViewer(
+                    transformationController: _zoom,
+                    minScale: 0.8,
+                    maxScale: 8,
+                    boundaryMargin: const EdgeInsets.all(100),
+                    child: Center(
+                      // The map is laid out at its own size and scaled to fit,
+                      // so what takes taps is exactly what is drawn. Left to
+                      // the window's constraints, the map was cut down to the
+                      // window's size for hit testing while still being
+                      // painted in full, and hexes beyond the window's edge --
+                      // most of 1844 in a Mac's default window -- ignored taps
+                      // however far the board was panned or zoomed.
+                      child: FittedBox(
+                        child: GestureDetector(
+                          key: sessionBoardKey,
+                          behavior: HitTestBehavior.opaque,
+                          onTapUp: (details) => _handleTap(details.localPosition),
+                          child: CustomPaint(
+                            size: _geometry.size,
+                            painter: BoardMapPainter(
+                              title: widget.title,
+                              session: _session,
+                              graph: _graph,
+                              geometry: _geometry,
+                              routes: [
+                                if (_runs case final runs?)
+                                  for (final run in runs.runs) run.route
+                                else
+                                  ?_route,
+                              ],
+                              highlighted: _highlighted,
+                              misfits: _misfits,
+                              tokenProblems: _tokenProblems,
+                              selected: _choosing ?? const {},
+                              labelScale: _labelScale,
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ),
+                  );
+                }),
                 if (_busy)
                   Container(
                     color: Colors.black54,
@@ -1710,6 +1789,7 @@ class _SessionBoardState extends State<SessionBoard> {
     String action,
     VoidCallback onPressed, {
     (String, VoidCallback)? extra,
+    VoidCallback? onClose,
   }) =>
       Material(
         color: Theme.of(context).colorScheme.secondaryContainer,
@@ -1730,6 +1810,13 @@ class _SessionBoardState extends State<SessionBoard> {
                 onPressed: _busy ? null : onPressed,
                 child: Text(action),
               ),
+              if (onClose != null)
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Hide',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onClose,
+                ),
             ],
           ),
         ),
@@ -2057,6 +2144,20 @@ class _SessionBoardState extends State<SessionBoard> {
       builder: (_) => PlayersScreen(
         title: widget.title,
         session: _session,
+        pipeline: widget.pipeline,
+        onChanged: _save,
+      ),
+    ));
+    if (mounted) setState(() {});
+  }
+
+  /// The end of the game: end game OR sets, and what every player is worth.
+  Future<void> _endGame() async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => EndGameScreen(
+        title: widget.title,
+        session: _session,
+        pipeline: widget.pipeline,
         onChanged: _save,
       ),
     ));

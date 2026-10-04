@@ -186,7 +186,7 @@ class TokenDetector {
     // way to tell apart companies printed in the same colour.
     final ranked = <(Company, double)>[
       for (final c in companies)
-        (c, _colourDistance(seen, c.color) * (c.id == home?.id ? _homeFavour : 1)),
+        (c, colourDistance(seen, c.color) * (c.id == home?.id ? _homeFavour : 1)),
     ]..sort((a, b) => a.$2.compareTo(b.$2));
     if (ranked.isEmpty) {
       return TokenDetection(present: true, confidence: confidence, color: colour);
@@ -240,9 +240,9 @@ class TokenDetector {
   ) {
     final cantTell =
         TokenDetection(present: false, confidence: 0, color: colour);
-    if (home == null || !_isColoured(home.color)) return cantTell;
-    final toHome = _colourDistance(seen, home.color);
-    final toWhite = _colourDistance(seen, const Color(0xFFFFFFFF));
+    if (home == null || !isColoured(home.color)) return cantTell;
+    final toHome = colourDistance(seen, home.color);
+    final toWhite = colourDistance(seen, const Color(0xFFFFFFFF));
     // 1 when the ring is right on the company's colour, 0 halfway to white.
     final likeHome =
         (1 - 2 * toHome / math.max(1.0, toHome + toWhite)).clamp(0.0, 1.0);
@@ -264,7 +264,7 @@ class TokenDetector {
   }
 
   /// Whether a token printed in [c] can be told from a white disc.
-  static bool _isColoured(Color c) {
+  static bool isColoured(Color c) {
     final r = c.r * 255, g = c.g * 255, b = c.b * 255;
     final chroma = math.sqrt(math.pow(r - g, 2) + math.pow((r + g) / 2 - b, 2));
     return chroma >= 40 || (r + g + b) / 3 <= 170;
@@ -279,7 +279,7 @@ class TokenDetector {
   /// out a pale yellow. Compared as they are, a pale yellow is nearer the
   /// light grey companies than the mustard ones, so each is compared as it
   /// photographs -- [_photographedShare] of the way from white to itself.
-  static double _colourDistance(List<double> seen, Color token) {
+  static double colourDistance(List<double> seen, Color token) {
     double photographed(double c) => 255 - _photographedShare * (255 - c * 255);
     final r = photographed(token.r),
         g = photographed(token.g),
@@ -301,6 +301,6 @@ class TokenDetector {
   /// How much nearer the home company's colour is made to seem.
   static const double _homeFavour = 0.6;
 
-  /// See [_colourDistance]; measured on one 1844 token under a warm lamp.
+  /// See [colourDistance]; measured on one 1844 token under a warm lamp.
   static const double _photographedShare = 0.6;
 }

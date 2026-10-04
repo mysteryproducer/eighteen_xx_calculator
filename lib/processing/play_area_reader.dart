@@ -144,23 +144,12 @@ class PlayAreaReader {
         if (trainIn(l) case final name? when l.height >= usual * 1.5)
           (name, l),
     ]..sort((a, b) => a.$2.left.compareTo(b.$2.left));
-    // A card whose large figure wasn't read can say which train it is in
-    // its small print -- 1889's cards say what scraps them: `RUSTED BY 4`
-    // is a 2 -- unless that train is already counted next to it.
-    for (final l in lines) {
-      final m = _rustedBy.firstMatch(_fold(l.text).toUpperCase());
-      if (m == null) continue;
-      final by = m[1]!.toUpperCase();
-      final scrapped = [
-        for (final t in title.trains)
-          if (t.rustsOn?.toUpperCase() == by && t.base == t.name) t.name,
-      ];
-      if (scrapped.length != 1) continue;
-      final near = trains.any((t) =>
-          t.$1 == scrapped.single &&
-          (centre(t.$2) - centre(l)).distance < 4 * math.max(l.height, l.width * 0.3));
-      if (!near) trains.add((scrapped.single, l));
-    }
+    // The cards lie as far from the camera as each other, so their figures
+    // come out alike: one much smaller is something else -- the 3 on a
+    // keyboard key beside a charter.
+    final tallest =
+        trains.fold(0.0, (most, t) => math.max(most, t.$2.height));
+    trains.removeWhere((t) => t.$2.height < tallest / 2);
     trains.sort((a, b) => a.$2.left.compareTo(b.$2.left));
 
     // Token places: a cost with its currency, `40 Fr.`, or a home place
@@ -217,6 +206,52 @@ class PlayAreaReader {
       return best;
     }
 
+    // A card whose large figure wasn't read can say which train it is in
+    // its small print -- 1889's cards say what scraps them: `RUSTED BY 4`
+    // is a 2 -- and of cards fanned out, only the top one's is whole, the
+    // rest showing `RUS`. So a company has as many of a train as its cards'
+    // figures or their small print say, whichever is more; a part line
+    // counts where the company's whole ones name only the one train.
+    final said = <Company, List<(String?, RecognizedWord)>>{};
+    for (final l in lines) {
+      final text = _fold(l.text).toUpperCase().trim();
+      final String? name;
+      if (_rustedBy.firstMatch(text) case final m?) {
+        final by = m[1]!.toUpperCase();
+        final scrapped = [
+          for (final t in title.trains)
+            if (t.rustsOn?.toUpperCase() == by && t.base == t.name) t.name,
+        ];
+        if (scrapped.length != 1) continue;
+        name = scrapped.single;
+      } else if (text.startsWith('RUS')) {
+        name = null;
+      } else {
+        continue;
+      }
+      said
+          .putIfAbsent(nearestCompany(l, certificate: false)!, () => [])
+          .add((name, l));
+    }
+    said.forEach((company, notes) {
+      final named = {for (final (name, _) in notes) ?name};
+      final cards = <String, List<RecognizedWord>>{};
+      for (final (name, line) in notes) {
+        final train = name ?? (named.length == 1 ? named.single : null);
+        if (train != null) cards.putIfAbsent(train, () => []).add(line);
+      }
+      cards.forEach((train, smallPrint) {
+        final figures = trains
+            .where((t) =>
+                t.$1 == train &&
+                nearestCompany(t.$2, certificate: false) == company)
+            .length;
+        for (final line in smallPrint.skip(figures)) {
+          trains.add((train, line));
+        }
+      });
+    });
+
     // A train card whose number wasn't read -- a single figure is the
     // hardest thing to read -- still shows its price, and where only one
     // kind of train costs that, the price says which. A card whose number
@@ -256,20 +291,38 @@ class PlayAreaReader {
       charterSlots.putIfAbsent(company, () => []).add(line);
       slotCosts[line] = cost;
     }
+    // A charter that prints its free place as `FREE` (1889) has no `0`
+    // place besides: that is something else, a keyboard's 0 key, say.
+    for (final found in charterSlots.values) {
+      if (found.any((l) => _plain(l.text) == 'free')) {
+        found.removeWhere(
+            (l) => slotCosts[l] == 0 && _plain(l.text) != 'free');
+      }
+    }
     // A place with a token on it can have its cost covered -- 1889 prints
     // the cost beside the ring -- and isn't read. Tokens leave the charter
     // from the left, so the places read are the first of the company's
     // costs, evenly spaced in a row, and the rest are further along it. (A
     // place whose cost isn't printed at all, like an 1844 home place, isn't
-    // one of the first, and nothing is made up.)
+    // one of the first, and nothing is made up.) Where only 1889's `FREE`
+    // is read -- the company's one other place has its token on it -- the
+    // next place is two of the word's widths along: so it is on all five
+    // charters photographed.
     charterSlots.forEach((company, found) {
-      if (found.length < 2 || found.length >= company.tokenCosts.length) return;
+      if (found.isEmpty || found.length >= company.tokenCosts.length) return;
       final row = [...found]..sort((a, b) => a.left.compareTo(b.left));
       for (int i = 0; i < row.length; i++) {
         if (slotCosts[row[i]] != company.tokenCosts[i]) return;
       }
       final missing = company.tokenCosts.sublist(row.length);
-      final step = Offset(row[1].left - row[0].left, row[1].top - row[0].top);
+      final Offset step;
+      if (row.length >= 2) {
+        step = Offset(row[1].left - row[0].left, row[1].top - row[0].top);
+      } else if (_plain(row.single.text) == 'free') {
+        step = Offset(2 * row.single.width, 0);
+      } else {
+        return;
+      }
       if (step.dx <= 0) return;
       for (int i = 2; i < row.length; i++) {
         final gap = Offset(row[i].left - row[i - 1].left, row[i].top - row[i - 1].top);
@@ -726,6 +779,10 @@ class PlayAreaReader {
       final part = _plain(_telling(c.name));
       if (telling.length >= 4 && part.length >= 4) {
         likeness = math.max(likeness, _likeness(telling, part));
+      } else if (part.length >= 3 && telling == part) {
+        // A short one -- 1889's "Iyo Railroad", "Awa Railroad" -- only as
+        // the whole of it: "Awa" is in Kubokawa too.
+        likeness = 1;
       }
       if (likeness > bestLikeness) {
         bestLikeness = likeness;
